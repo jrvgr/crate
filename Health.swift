@@ -1,0 +1,275 @@
+import SwiftUI
+
+// Library health: albums with no cover, no year or genre, odd track numbers, the same song twice,
+// low bit rate MP3s or missing files, each with a way to fix it; and Find Metadata for many
+// albums at once, reviewed before anything is written.
+
+enum Issue: String, CaseIterable, Identifiable {
+    case noCover = "No cover", noYear = "No year", noGenre = "No genre", numbering = "Track numbers"
+    case duplicates = "Duplicates", lowQuality = "Low bit rate", missing = "Missing files"
+    var id: String { rawValue }
+    var icon: String {
+        switch self {
+        case .noCover: return "photo"
+        case .noYear: return "calendar"
+        case .noGenre: return "guitars"
+        case .numbering: return "number"
+        case .duplicates: return "square.on.square"
+        case .lowQuality: return "waveform.badge.minus"
+        case .missing: return "questionmark.folder"
+        }
+    }
+    /// Issues Find Metadata can fix.
+    var metadata: Bool { self == .noCover || self == .noYear || self == .noGenre }
+}
+
+extension Model {
+    func issues(_ a: Album) -> [Issue] {
+        var out: [Issue] = []
+        if artwork[a.id] == nil { out.append(.noCover) }
+        if a.year == 0 && (metadata[a.id]?.year ?? 0) == 0 { out.append(.noYear) }
+        if a.genre.isEmpty && (metadata[a.id]?.genre ?? "").isEmpty { out.append(.noGenre) }
+        let nums = a.tracks.map { $0.discNumber * 1000 + $0.trackNumber }
+        if a.tracks.count > 1, a.tracks.contains(where: { $0.trackNumber == 0 }) || Set(nums).count < nums.count { out.append(.numbering) }
+        let titles = a.tracks.map { $0.title.lowercased().filter { $0.isLetter || $0.isNumber } }
+        if Set(titles).count < titles.count, Set(a.tracks.map(\.discNumber)).count <= 1 { out.append(.duplicates) }
+        if a.tracks.contains(where: { $0.ext == "mp3" && $0.lengthMs > 0 && (1..<160).contains(fileKbps($0)) }) { out.append(.lowQuality) }
+        if a.tracks.contains(where: { !FileManager.default.fileExists(atPath: $0.path) }) { out.append(.missing) }
+        return out
+    }
+
+    private func fileKbps(_ t: LibTrack) -> Int {
+        let size = (try? FileManager.default.attributesOfItem(atPath: t.path))?[.size] as? Int ?? 0
+        return size * 8 / max(t.lengthMs, 1)
+    }
+
+    /// Library albums with at least one issue (albums only on the iPod aren't checked).
+    var unhealthy: [(Album, [Issue])] {
+        guard !loading else { return [] }
+        return albums.compactMap { a in let i = issues(a); return i.isEmpty ? nil : (a, i) }
+    }
+}
+
+@MainActor
+final class HealthUI: ObservableObject {
+    @Published var filter: Issue?
+    @Published var cache: [(Album, [Issue])] = []
+}
+
+struct HealthView: View {
+    @EnvironmentObject var model: Model
+    @StateObject private var ui = HealthUI()
+
+    var body: some View {
+        let all = ui.cache
+        let shown = all.filter { ui.filter == nil || $0.1.contains(ui.filter!) }
+        let fixable = shown.filter { $0.1.contains(where: \.metadata) }.map(\.0)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 8) {
+                    Chip(title: "All", count: all.count, on: ui.filter == nil) { ui.filter = nil }
+                    ForEach(Issue.allCases) { i in
+                        let n = all.filter { $0.1.contains(i) }.count
+                        if n > 0 { Chip(title: i.rawValue, icon: i.icon, count: n, on: ui.filter == i) { ui.filter = i } }
+                    }
+                }
+                if all.isEmpty && !model.loading {
+                    ContentUnavailableView("Everything looks good", systemImage: "checkmark.seal",
+                                           description: Text("Every album has a cover, year, genre and tidy track numbers.")).padding(.top, 60)
+                }
+                if !fixable.isEmpty {
+                    HStack(spacing: 12) {
+                        Image(systemName: "sparkle.magnifyingglass").font(.title2).foregroundStyle(.tint)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Find metadata for \(fixable.count) album\(fixable.count == 1 ? "" : "s")").font(.headline)
+                            Text("Looks each one up on MusicBrainz and iTunes; you check the matches before anything is written.")
+                                .font(.callout).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Review Matches…") { model.batchAlbums = fixable }.buttonStyle(.glassProminent)
+                    }
+                    .padding(14).glassEffect(.regular, in: .rect(cornerRadius: 16))
+                }
+                LazyVStack(spacing: 8) {
+                    ForEach(shown, id: \.0.id) { a, issues in
+                        HStack(spacing: 12) {
+                            Cover(image: model.artwork[a.id], seed: a.id).frame(width: 48, height: 48).clipShape(.rect(cornerRadius: 7))
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(a.title).font(.headline).lineLimit(1)
+                                HStack(spacing: 6) {
+                                    Text(a.artist).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                                    ForEach(issues) { i in
+                                        Label(i.rawValue, systemImage: i.icon).font(.caption).foregroundStyle(.orange)
+                                            .padding(.horizontal, 6).padding(.vertical, 2).background(.orange.opacity(0.12), in: .capsule)
+                                    }
+                                }
+                            }
+                            Spacer()
+                            if issues.contains(where: \.metadata) {
+                                Button { model.lookupAlbum = a } label: { Image(systemName: "sparkle.magnifyingglass") }.buttonStyle(.glass).help("Find Metadata…")
+                            }
+                            Button { model.editAlbum = a } label: { Image(systemName: "pencil") }.buttonStyle(.glass).help("Edit Tags…")
+                            Button { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: a.folder) } label: { Image(systemName: "folder") }
+                                .buttonStyle(.glass).help("Show in Finder")
+                        }
+                        .padding(10)
+                        .glassEffect(.regular, in: .rect(cornerRadius: 14))
+                        .contentShape(.rect)
+                        .onTapGesture(count: 2) { model.path.append(.album(a)) }
+                    }
+                }
+            }
+            .padding(24).padding(.bottom, 60)
+        }
+        .navigationTitle("Needs Attention")
+        .navigationSubtitle("\(all.count) album\(all.count == 1 ? "" : "s")")
+        .task(id: "\(model.albums.count)-\(model.artwork.count)-\(model.metadata.count)-\(model.loading)") { ui.cache = model.unhealthy }
+    }
+}
+
+struct Chip: View {
+    var title: String
+    var icon: String?
+    var count: Int
+    var on: Bool
+    var action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if let icon { Image(systemName: icon) }
+                Text(title)
+                Text("\(count)").foregroundStyle(on ? .white.opacity(0.8) : .secondary)
+            }
+            .font(.callout).padding(.horizontal, 10).padding(.vertical, 5)
+            .foregroundStyle(on ? .white : .primary)
+            .background(on ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), in: .capsule)
+            .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(on ? .regular.tint(.accentColor) : .regular, in: .capsule)
+    }
+}
+
+// MARK: batch metadata
+
+@MainActor
+final class BatchState: ObservableObject {
+    struct Row: Identifiable {
+        var id: Album.ID { album.id }
+        var album: Album
+        var candidates: [MBRelease] = []
+        var choice = 0
+        var include = true
+        var state = "Waiting"
+        var chosen: MBRelease? { candidates.indices.contains(choice) ? candidates[choice] : nil }
+    }
+    @Published var rows: [Row] = []
+    @Published var searching = false
+    @Published var applying = false
+    @Published var done = 0
+    @Published var replaceCovers = false
+
+    func search() async {
+        searching = true; defer { searching = false }
+        for i in rows.indices {
+            guard !Task.isCancelled else { return }
+            let a = rows[i].album
+            rows[i].state = "Searching…"
+            async let it = (try? ITunesLookup.search(album: a.title, artist: a.artist)) ?? []
+            async let mb = (try? MusicBrainz.search(album: a.title, artist: a.artist)) ?? []
+            let all = await it + mb
+            let loose = { (s: String) in s.lowercased().filter { $0.isLetter || $0.isNumber } }
+            // same title first, then the same number of songs, iTunes before MusicBrainz (it has the cover right away)
+            rows[i].candidates = all.sorted { x, y in
+                let kx = (loose(x.title) == loose(a.title) ? 1 : 0, x.trackCount == a.tracks.count ? 1 : 0, x.source == "iTunes" ? 1 : 0, x.score)
+                let ky = (loose(y.title) == loose(a.title) ? 1 : 0, y.trackCount == a.tracks.count ? 1 : 0, y.source == "iTunes" ? 1 : 0, y.score)
+                return kx > ky
+            }
+            rows[i].state = rows[i].candidates.isEmpty ? "No match" : ""
+            rows[i].include = !rows[i].candidates.isEmpty && loose(rows[i].candidates[0].title) == loose(a.title)
+            try? await Task.sleep(for: .seconds(1.1))     // MusicBrainz allows one request a second
+        }
+    }
+
+    func apply(_ model: Model) async {
+        applying = true; done = 0
+        for i in rows.indices where rows[i].include {
+            guard let r = rows[i].chosen else { continue }
+            rows[i].state = "Saving…"
+            rows[i].state = await model.apply(r, to: rows[i].album, replaceCover: replaceCovers) { _ in }
+            done += 1
+        }
+        applying = false
+    }
+}
+
+struct BatchMetadataSheet: View {
+    @EnvironmentObject var model: Model
+    @Environment(\.dismiss) private var dismiss
+    var albums: [Album]
+    @StateObject private var s = BatchState()
+
+    var body: some View {
+        let picked = s.rows.filter { $0.include && $0.chosen != nil }.count
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Find Metadata").font(.title2.bold())
+                Text(s.searching ? "Looking up \(s.rows.filter { !$0.candidates.isEmpty || $0.state == "No match" }.count + 1) of \(s.rows.count)…"
+                     : s.applying ? "Saving \(s.done) of \(picked)…" : "\(picked) of \(s.rows.count) albums will be updated")
+                    .foregroundStyle(.secondary)
+            }
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach($s.rows) { $r in
+                        HStack(spacing: 12) {
+                            Toggle("", isOn: $r.include).labelsHidden().disabled(r.chosen == nil || s.applying)
+                            Cover(image: model.artwork[r.album.id], seed: r.album.id).frame(width: 44, height: 44).clipShape(.rect(cornerRadius: 6))
+                            Image(systemName: "arrow.right").foregroundStyle(.tertiary)
+                            AsyncImage(url: r.chosen.map { MusicBrainz.coverURL($0, size: 250) }) { $0.resizable().scaledToFill() }
+                                placeholder: { RoundedRectangle(cornerRadius: 6).fill(.quaternary) }
+                                .frame(width: 44, height: 44).clipShape(.rect(cornerRadius: 6))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(r.album.title).font(.headline).lineLimit(1)
+                                if let c = r.chosen {
+                                    Text([c.source, c.title == r.album.title ? "" : "“\(c.title)”", c.date, c.genre,
+                                          c.trackCount > 0 ? "\(c.trackCount) songs" : ""].filter { !$0.isEmpty }.joined(separator: " · "))
+                                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                } else {
+                                    Text(r.state).font(.caption).foregroundStyle(.secondary)
+                                }
+                                if r.chosen != nil, !r.state.isEmpty { Text(r.state).font(.caption).foregroundStyle(.green).lineLimit(1) }
+                            }
+                            Spacer()
+                            if r.candidates.count > 1 {
+                                Picker("", selection: $r.choice) {
+                                    ForEach(Array(r.candidates.enumerated()), id: \.offset) { i, c in
+                                        Text("\(c.source): \(c.title) \(c.date.prefix(4))").tag(i)
+                                    }
+                                }
+                                .labelsHidden().frame(width: 170).disabled(s.applying)
+                            }
+                        }
+                        .padding(8)
+                        .glassEffect(.regular, in: .rect(cornerRadius: 12))
+                    }
+                }
+            }
+            HStack {
+                Toggle("Replace existing covers", isOn: $s.replaceCovers).toggleStyle(.checkbox)
+                if s.searching || s.applying { ProgressView().controlSize(.small) }
+                Spacer()
+                Button(s.done > 0 && !s.applying ? "Done" : "Cancel") { dismiss() }.buttonStyle(.glass).keyboardShortcut(.cancelAction)
+                Button("Save \(picked)") { Task { await s.apply(model) } }
+                    .buttonStyle(.glassProminent).keyboardShortcut(.defaultAction)
+                    .disabled(picked == 0 || s.searching || s.applying || s.done > 0)
+            }
+        }
+        .padding(22)
+        .frame(width: 720, height: 600)
+        .interactiveDismissDisabled(s.applying)
+        .task {
+            s.rows = albums.map { BatchState.Row(album: $0) }
+            await s.search()
+        }
+    }
+}
