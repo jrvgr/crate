@@ -88,16 +88,16 @@ enum Main {
         if let i = args.firstIndex(of: "--import"), args.count > i + 2 { importFiles(Array(args[(i + 2)...]), into: args[i + 1]); return }
         if let i = args.firstIndex(of: "--tag"), args.count > i + 1 { tag(args[i + 1], Array(args[(i + 2)...])); return }
         if let i = args.firstIndex(of: "--organize-test"), args.count > i + 1 {     // plans and runs the organiser on a scratch folder
-            let dir = args[i + 1], done = DispatchSemaphore(value: 0)
-            Task {
+            let dir = args[i + 1]
+            Task { @MainActor in
                 let albums = LibraryLoader.albums(await LibraryLoader.scan(dir))
                 let moves = Organizer.plan(albums, roots: [dir], withYear: true)
                 moves.forEach { print(($0.conflict ? "SKIP " : "move ") + $0.from.dropFirst(dir.count) + " -> " + $0.to.dropFirst(dir.count)) }
                 let r = Organizer.apply(moves)
                 print("moved \(r.done.count), failed \(r.failed)")
-                done.signal()
+                exit(0)
             }
-            done.wait(); return
+            RunLoop.main.run()
         }
         if let i = args.firstIndex(of: "--organize-test"), args.count > i + 1 {     // plans and runs the organiser on a scratch folder
             let dir = args[i + 1], done = DispatchSemaphore(value: 0)
@@ -151,8 +151,8 @@ enum Main {
             RunLoop.main.run()
         }
         if let i = args.firstIndex(of: "--convert-bench"), args.count > i + 1 {     // FLAC → AAC of a folder: one by one, then in parallel (temp files only)
-            let dir = args[i + 1], done = DispatchSemaphore(value: 0)
-            Task {
+            let dir = args[i + 1]
+            Task { @MainActor in
                 let ts = await LibraryLoader.scan(dir).filter(\.needsConversion)
                 let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("crate-bench"); try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
                 let s = PodSettings()
@@ -166,9 +166,9 @@ enum Main {
                 }
                 print("in parallel: \(Int(Date().timeIntervalSince(t0))) s")
                 try? FileManager.default.removeItem(at: tmp)
-                done.signal()
+                exit(0)
             }
-            done.wait(); return
+            RunLoop.main.run()
         }
         if let i = args.firstIndex(of: "--write-tags"), args.count > i + 3 { writeTags(args[i + 1], args[i + 2], args[i + 3]); return }
         if let i = args.firstIndex(of: "--lookup"), args.count > i + 2 { lookup(args[i + 1], args[i + 2]); return }

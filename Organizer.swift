@@ -48,17 +48,23 @@ enum Organizer {
     static func apply(_ moves: [FileMove]) -> (done: [FileMove], failed: [String]) {
         let fm = FileManager.default
         var done: [FileMove] = [], failed: [String] = []
-        var folders: [String: String] = [:]        // old album folder -> new
+        var folders: [String: Set<String>] = [:]        // old album folder -> the new folders its songs went to
         for m in moves where !m.conflict {
             do {
                 try fm.createDirectory(atPath: (m.to as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
                 try fm.moveItem(atPath: m.from, toPath: m.to)
                 done.append(m)
-                folders[(m.from as NSString).deletingLastPathComponent] = (m.to as NSString).deletingLastPathComponent
+                folders[(m.from as NSString).deletingLastPathComponent, default: []].insert((m.to as NSString).deletingLastPathComponent)
             } catch { failed.append("\((m.from as NSString).lastPathComponent): \(error.localizedDescription)") }
         }
-        for (old, new) in folders where old != new {
-            for n in (try? fm.contentsOfDirectory(atPath: old)) ?? [] where !LibraryLoader.audioExts.contains((n as NSString).pathExtension.lowercased()) {
+        let extras: Set<String> = ["jpg", "jpeg", "png", "gif", "cue", "log", "txt", "nfo", "m3u", "pdf"]
+        for (old, targets) in folders where targets.count == 1 && !targets.contains(old) {
+            let new = targets.first!
+            // covers and rip logs come along, only when the whole folder went to one album, never subfolders
+            let audioLeft = ((try? fm.contentsOfDirectory(atPath: old)) ?? []).contains { LibraryLoader.audioExts.contains(($0 as NSString).pathExtension.lowercased()) }
+            for n in (try? fm.contentsOfDirectory(atPath: old)) ?? [] where !audioLeft && extras.contains((n as NSString).pathExtension.lowercased()) {
+                var dir: ObjCBool = false
+                guard fm.fileExists(atPath: old + "/" + n, isDirectory: &dir), !dir.boolValue else { continue }
                 let dst = new + "/" + n
                 if !fm.fileExists(atPath: dst) { try? fm.moveItem(atPath: old + "/" + n, toPath: dst) }
             }
