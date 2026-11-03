@@ -91,7 +91,7 @@ enum SmartStore {
 }
 
 extension Model {
-    func stat(_ t: LibTrack) -> PodStat { podStats[t.key] ?? PodStat() }
+    func stat(_ t: LibTrack) -> PodStat { podStats[podKey(t.key)] ?? PodStat() }
 
     func matches(_ r: SmartRule, _ t: LibTrack) -> Bool {
         let s = stat(t), v = r.value.trimmingCharacters(in: .whitespaces), n = Int(v) ?? 0
@@ -113,7 +113,7 @@ extension Model {
         case .genre: return text(t.genre.isEmpty ? (metadata[t.album.lowercased()]?.genre ?? "") : t.genre)
         case .year: return num(t.year > 0 ? t.year : (metadata[t.album.lowercased()]?.year ?? 0))
         case .added: return days(t.added)
-        case .rating: return num(s.rating)
+        case .rating: return num(rating(t))
         case .plays: return num(s.plays)
         case .lastPlayed: return days(s.lastPlayed)
         case .format: return text(t.ext)
@@ -136,7 +136,7 @@ extension Model {
         case .mostPlayed: ts.sort { stat($0).plays > stat($1).plays }
         case .recent: ts.sort { ($0.added ?? .distantPast) > ($1.added ?? .distantPast) }
         case .artist: ts.sort { ($0.artist.lowercased(), $0.album.lowercased(), $0.discNumber, $0.trackNumber) < ($1.artist.lowercased(), $1.album.lowercased(), $1.discNumber, $1.trackNumber) }
-        case .rating: ts.sort { stat($0).rating > stat($1).rating }
+        case .rating: ts.sort { rating($0) > rating($1) }
         }
         return p.limit > 0 ? Array(ts.prefix(p.limit)) : ts
     }

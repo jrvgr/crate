@@ -84,6 +84,7 @@ struct ContentView: View {
         .sheet(item: $model.lookupAlbum) { LookupSheet(album: $0).environmentObject(model) }
         .sheet(item: $model.editAlbum) { TagEditor(album: $0).environmentObject(model) }
         .sheet(item: $model.editSmart) { SmartEditor(playlist: $0).environmentObject(model) }
+        .sheet(isPresented: $model.showMatch) { MatchSheet().environmentObject(model) }
         .sheet(isPresented: Binding(get: { model.merge != nil }, set: { if !$0 { model.merge = nil } })) {
             MergeSheet(albums: model.merge ?? []).environmentObject(model)
         }
@@ -723,6 +724,12 @@ struct SyncSheet: View {
                 }
                 if let n = p.rename {
                     PlanRow(icon: "pencil.circle.fill", tint: .purple, title: "Rename to “\(n)”", detail: "Was “\(model.db?.name ?? "")”")
+                }
+                if model.checkingFiles {
+                    PlanRow(icon: "checkmark.shield", tint: .secondary, title: "Checking the files…", detail: "Broken or cut-off files are skipped")
+                } else if !model.brokenFiles.isEmpty {
+                    PlanRow(icon: "exclamationmark.triangle.fill", tint: .orange, title: "\(model.brokenFiles.count) broken file\(model.brokenFiles.count == 1 ? "" : "s") will be skipped",
+                            detail: model.brokenFiles.prefix(3).map { "\(($0.key as NSString).lastPathComponent): \($0.value)" }.joined(separator: "; "))
                 }
             }
             .glassEffect(.regular, in: .rect(cornerRadius: 14))

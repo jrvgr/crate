@@ -336,6 +336,7 @@ struct AlbumDetail: View {
                                     .foregroundStyle(sm == .none ? AnyShapeStyle(.quaternary) : AnyShapeStyle(sm.tint))
                             }
                             .buttonStyle(.plain).help(sm == .none ? "Add this song to the iPod" : sm.help)
+                            if !podOnly { StarPicker(value: model.rating(t)) { model.rate(t, $0) } }
                             Text(t.lengthMs > 0 ? duration(t.lengthMs) : "").monospacedDigit().foregroundStyle(.secondary)
                                 .frame(width: 44, alignment: .trailing)
                         }
@@ -741,6 +742,11 @@ struct ArtistDetail: View {
                                 if m != .none {
                                     Button("Remove All", systemImage: "minus") { model.removeAll(a) }.buttonStyle(.glass)
                                 }
+                                Toggle(isOn: Binding(get: { model.keptArtists.contains(a.id) }, set: { _ in model.toggleKeep(a) })) {
+                                    Label("Keep on iPod", systemImage: "pin")
+                                }
+                                .toggleStyle(.button).buttonStyle(.glass)
+                                .help("Every album by \(a.name) goes to the iPod, also ones you add later")
                                 if model.on(.ownTone) {
                                     Button("Play", systemImage: "play.fill") {
                                         Task { await OwnTonePlaylists.play(a.albums.flatMap(\.tracks).map(\.uri).filter { !$0.isEmpty }, base: model.ownToneURL) }

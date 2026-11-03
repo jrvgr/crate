@@ -86,6 +86,11 @@ extension ITunesDB {
         for k in 0..<4 { b[0x4C + k] = UInt8(truncatingIfNeeded: value >> (k * 8)) }
         tracks[i].raw = Data(b)
     }
+    mutating func setRating(_ i: Int, _ stars: Int) {
+        guard var b = tracks[i].raw.map({ [UInt8]($0) }), b.count > 0x1F else { return }
+        b[0x1F] = UInt8(max(0, min(5, stars)) * 20)
+        tracks[i].raw = Data(b)
+    }
     func soundCheck(_ i: Int) -> Int {
         guard let r = tracks[i].raw, r.count >= 0x50 else { return 0 }
         let o = r.startIndex + 0x4C

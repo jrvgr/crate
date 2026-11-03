@@ -115,6 +115,7 @@ struct LibrarySettings: View {
                     if model.on(.ownTone) { Text("OwnTone's speakers").tag("owntone") }
                 }
                 Toggle("Show Crate in the menu bar", isOn: $menuBar)
+                SettingsTransferRow()
             } header: { Text("App") }
             Section {
                 SecureField("Discogs token", text: model.$discogsToken, prompt: Text("Optional"))

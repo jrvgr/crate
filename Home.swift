@@ -294,6 +294,13 @@ struct IPodView: View {
                     .buttonStyle(.glass).disabled(ui.checking || model.syncing || !model.connected)
                 }
                 Divider().padding(.leading, 50)
+                let pairs = model.matchSuggestions().count
+                MaintenanceRow(icon: "link", title: "Fix matching",
+                               detail: pairs > 0 ? "\(pairs) songs on the iPod look like library songs with slightly different tags"
+                                                 : model.aliases.isEmpty ? "Every song on the iPod matches the library or has no look-alike" : "\(model.aliases.count) songs paired") {
+                    Button(pairs > 0 ? "Review…" : "Open…") { model.showMatch = true }.buttonStyle(.glass)
+                }
+                Divider().padding(.leading, 50)
                 MaintenanceRow(icon: "clock.arrow.circlepath", title: "Previous database",
                                detail: model.hasBackup ? "Crate keeps the song list from before its last write" : "No backup yet; one is made on the first sync") {
                     Button("Restore…") { ui.confirmRestore = true }.buttonStyle(.glass).disabled(!model.hasBackup || model.syncing)
@@ -388,7 +395,7 @@ struct SongsView: View {
             TableColumn("Year", value: \.year) { (t: LibTrack) in Text(t.year > 0 ? "\(t.year)" : "").monospacedDigit() }.width(44)
             TableColumn("Time", value: \.lengthMs) { (t: LibTrack) in Text(t.lengthMs > 0 ? duration(t.lengthMs) : "").monospacedDigit() }.width(48)
             TableColumn("Plays") { (t: LibTrack) in Text(model.stat(t).plays > 0 ? "\(model.stat(t).plays)" : "").monospacedDigit().foregroundStyle(.secondary) }.width(40)
-            TableColumn("Rating") { (t: LibTrack) in Stars(value: model.stat(t).rating) }.width(56)
+            TableColumn("Rating") { (t: LibTrack) in StarPicker(value: model.rating(t)) { model.rate(t, $0) } }.width(64)
             TableColumn("Kind", value: \.ext) { (t: LibTrack) in Text(t.ext.uppercased()).foregroundStyle(.secondary) }.width(44)
         }
         .contextMenu(forSelectionType: LibTrack.ID.self) { ids in

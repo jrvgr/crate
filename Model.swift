@@ -101,6 +101,12 @@ final class Model: ObservableObject {
     @Published var songsToAdd: Set<String> = [] { didSet { savePending() } }       // library file paths
     @Published var songsToRemove: Set<String> = [] { didSet { savePending() } }    // track keys on the iPod
     @Published var fileSizes: [String: Int64] = [:]
+    @Published var aliases: [String: String] = Store.load("matches.json", [:])      // iPod key → library key
+    @Published var ratings: [String: Int] = Store.load("ratings.json", [:])        // library key → stars
+    @Published var keptArtists: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "keptArtists") ?? [])
+    @Published var brokenFiles: [String: String] = [:]
+    @Published var checkingFiles = false
+    @Published var showMatch = false
     @Published var playlistsToAdd: Set<OTPlaylist.ID> = [] { didSet { savePending() } }
     @Published var playlistsToRemove: Set<PodPlaylist.ID> = [] { didSet { savePending() } }
     @Published var pendingName: String? { didSet { savePending() } }
@@ -231,7 +237,8 @@ final class Model: ObservableObject {
 
     // MARK: library
 
-    var podKeys: Set<String> { Set(db?.tracks.map(\.key) ?? []) }
+    /// The iPod's songs as library keys (paired songs count as their library song).
+    var podKeys: Set<String> { Set((db?.tracks ?? []).map { aliases[$0.key] ?? $0.key }) }
 
     var podAlbums: [Album] {
         let ts = (db?.tracks ?? []).map {
@@ -351,6 +358,7 @@ final class Model: ObservableObject {
         }
         playlists = lists.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         finishJob(job, "\(libTracks.count) songs in \(albums.count) albums")
+        applyKeptArtists()
         refreshSmartPending()
         Task { await loadSizes() }
         await loadArtwork()
@@ -623,7 +631,9 @@ final class Model: ObservableObject {
         report = nil
         plan = makePlan()
         showSync = true
+        brokenFiles = [:]
         Task { await estimateSizes() }
+        Task { await checkQueuedFiles() }
     }
 
     /// Per album, the songs the next sync adds and removes (for the sync sheet's preview).
@@ -636,6 +646,8 @@ final class Model: ObservableObject {
         }
         return out.values.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
     }
+
+    func syncWork() -> [(Album, LibTrack)] { addWork(have: podKeys) }
 
     private func addWork(have: Set<String>) -> [(Album, LibTrack)] {
         var work = albums.filter { toAdd.contains($0.id) }.flatMap { a in a.tracks.filter { !have.contains($0.key) }.map { (a, $0) } }
@@ -651,7 +663,7 @@ final class Model: ObservableObject {
 
     func songMark(_ t: LibTrack) -> SyncMark {
         if songsToAdd.contains(t.path) { return .adding }
-        if songsToRemove.contains(t.key) { return .removing }
+        if songsToRemove.contains(podKey(t.key)) { return .removing }
         let a = albums.first { $0.id == t.album.lowercased() }
         if podKeys.contains(t.key) { return a.map { toRemove.contains($0.id) } == true ? .removing : .onIPod }
         return a.map { toAdd.contains($0.id) } == true ? .adding : .none
@@ -660,8 +672,8 @@ final class Model: ObservableObject {
     /// Queues one song for the iPod, or for removal from it (or takes it out of the queue again).
     func toggleSong(_ t: LibTrack) {
         if songsToAdd.contains(t.path) { songsToAdd.remove(t.path) }
-        else if songsToRemove.contains(t.key) { songsToRemove.remove(t.key) }
-        else if podKeys.contains(t.key) { songsToRemove.insert(t.key) }
+        else if songsToRemove.contains(podKey(t.key)) { songsToRemove.remove(podKey(t.key)) }
+        else if podKeys.contains(t.key) { songsToRemove.insert(podKey(t.key)) }
         else { songsToAdd.insert(t.path) }
     }
 
@@ -773,8 +785,9 @@ final class Model: ObservableObject {
         }
         pendingName = nil; toRemove = []; songsToRemove = []; playlistsToRemove = []
 
-        let have = Set(db.tracks.map(\.key))
-        var work = addWork(have: have)
+        let have = Set(db.tracks.map { aliases[$0.key] ?? $0.key })
+        var work = addWork(have: have).filter { brokenFiles[$0.1.path] == nil }
+        for (_, t) in addWork(have: have) where brokenFiles[t.path] != nil { rep.failures.append("\(t.title): skipped, \(brokenFiles[t.path]!)") }
         var queued = Set(work.map(\.1.path))
         var lists: [(OTPlaylist, [OTTrack])] = []
         for p in playlists where playlistsToAdd.contains(p.id) {      // playlists bring the tracks there are files for
@@ -848,7 +861,7 @@ final class Model: ObservableObject {
             }
         }
         syncPhase = "Writing playlists"; syncCurrent = ""
-        let idByKey = Dictionary(db.tracks.map { ($0.key, $0.id) }, uniquingKeysWith: { a, _ in a })
+        let idByKey = Dictionary(db.tracks.flatMap { t in [(t.key, t.id)] + (aliases[t.key].map { [($0, t.id)] } ?? []) }, uniquingKeysWith: { a, _ in a })
         for (p, ts) in lists {
             let items = ts.compactMap { t in libraryTrack(for: t).flatMap { idByKey[$0.track.key] } ?? idByKey[t.key] }
                 .map { PodPlaylist.Item(trackID: $0) }
@@ -861,6 +874,9 @@ final class Model: ObservableObject {
             if let i = db.playlists.firstIndex(where: { $0.name == sp.name }) { db.playlists[i].items = items }
             else { db.playlists.append(PodPlaylist(name: sp.name, items: items)) }
             rep.playlists += 1
+        }
+        for i in db.tracks.indices {        // ratings set in Crate
+            if let r = ratings[aliases[db.tracks[i].key] ?? db.tracks[i].key] { db.setRating(i, r) }
         }
         if podSettings.calendars || podSettings.reminders {
             syncPhase = "Calendars and To Do"; syncCurrent = ""

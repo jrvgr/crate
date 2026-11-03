@@ -170,6 +170,17 @@ enum Main {
             }
             RunLoop.main.run()
         }
+        if args.contains("--match-test") {     // pairing suggestions and a file check (read only)
+            Task { @MainActor in
+                let m = Model(); await m.reload()
+                let s = m.matchSuggestions()
+                print("\(s.count) suggested pairs")
+                for p in s.prefix(8) { print("  iPod: \(p.pod.artist) – \(p.pod.album) – \(p.pod.title)  ⇄  lib: \(p.lib.album) – \(p.lib.title)") }
+                for f in args.drop { $0 != "--match-test" }.dropFirst() { print(f.split(separator: "/").last ?? "", "→", FileCheck.problem(f) ?? "ok") }
+                exit(0)
+            }
+            RunLoop.main.run()
+        }
         if let i = args.firstIndex(of: "--write-tags"), args.count > i + 3 { writeTags(args[i + 1], args[i + 2], args[i + 3]); return }
         if let i = args.firstIndex(of: "--lookup"), args.count > i + 2 { lookup(args[i + 1], args[i + 2]); return }
         spaceKey()
