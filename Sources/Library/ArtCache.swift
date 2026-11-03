@@ -7,7 +7,7 @@ import ImageIO
 
 enum ArtCache {
     static let dir: URL = {
-        let d = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("Crate/art")
+        let d = Demo.dir("art") ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("Crate/art")
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         return d
     }()

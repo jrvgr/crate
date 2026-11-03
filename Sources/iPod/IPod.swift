@@ -70,7 +70,7 @@ struct PodCache: Codable {
     var songsToAdd: [String]? = nil, songsToRemove: [String]? = nil
 
     static var dir: URL {
-        let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Crate")
+        let d = Demo.dir("support") ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Crate")
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         return d
     }

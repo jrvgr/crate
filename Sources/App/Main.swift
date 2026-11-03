@@ -56,6 +56,7 @@ struct CrateApp: App {
 @main
 enum Main {
     static func main() {
+        Demo.setUp()
         Rename.run()
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--selftest"), args.count > i + 1 { selftest(args[i + 1]); return }
@@ -761,5 +762,21 @@ enum Rename {
             try? FileManager.default.moveItem(at: from, to: to)
         }
         d.set(true, forKey: "renamedFromOldID")
+    }
+}
+
+/// `--demo <music folder>`: for screenshots. Crate reads only that folder with every plugin off, and keeps its
+/// caches and state in <folder>/.crate-demo, so your own library, iPod cache and settings aren't read.
+enum Demo {
+    nonisolated(unsafe) static var root: String?
+    static func dir(_ name: String) -> URL? { root.map { URL(fileURLWithPath: $0).appendingPathComponent(".crate-demo/" + name) } }
+    static func setUp() {
+        let a = CommandLine.arguments
+        guard let i = a.firstIndex(of: "--demo"), i + 1 < a.count else { return }
+        root = a[i + 1]
+        // the argument domain wins over the app's own settings for every read
+        UserDefaults.standard.setVolatileDomain(["extraFolders": a[i + 1], "importFolder": a[i + 1], "enabledPlugins": [String](),
+                                                 "playOn": "mac", "renamedFromOldID": true, "menuBarExtra": false],
+                                                forName: UserDefaults.argumentDomain)
     }
 }
