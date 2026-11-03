@@ -151,6 +151,7 @@ final class Model: ObservableObject {
     @Published var playlistTracks: [Int: [OTTrack]] = [:]
     @Published var spotify: [SpotifyAlbum] = []
     @Published var onlyMissing = true
+    @Published var spotifyTab = "albums"
 
     // Apple Music
     @Published var amAlbums: [AMAlbum] = []

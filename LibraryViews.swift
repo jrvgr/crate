@@ -603,13 +603,45 @@ struct SpotifyGrid: View {
 
     var body: some View {
         let list = shown
+        let lists = model.playlists.filter { model.source(of: $0) == "Spotify" || (!spot.direct && $0.spotifyID == nil) }
         ScrollView {
-            HStack {
-                Toggle("Only albums without files", isOn: $model.onlyMissing).toggleStyle(.switch)
+            HStack(spacing: 14) {
+                Picker("", selection: $model.spotifyTab) {
+                    Text("Albums").tag("albums")
+                    Text("Playlists").tag("playlists")
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
+                if model.spotifyTab == "albums" {
+                    Toggle("Only albums without files", isOn: $model.onlyMissing).toggleStyle(.switch)
+                }
                 Spacer()
                 Text("Spotify streams can't be copied to the iPod").font(.callout).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 24).padding(.top, 16)
+            if model.spotifyTab == "playlists" {
+                if lists.isEmpty {
+                    ContentUnavailableView("No playlists", systemImage: "music.note.list").padding(.top, 60)
+                }
+                LazyVGrid(columns: columns, spacing: 24) {
+                    ForEach(lists) { p in
+                        Button { model.search = ""; model.pane = .playlist(p.id) } label: {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Color.clear.aspectRatio(1, contentMode: .fit)
+                                    .overlay { CachedImage(url: model.artURL(p.artwork), seed: p.uri) }
+                                    .clipShape(.rect(cornerRadius: 12))
+                                    .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
+                                    .overlay(alignment: .topTrailing) { MarkBadge(mark: model.mark(p), size: 24).padding(7) }
+                                Text(p.name).font(.headline).lineLimit(1)
+                                Text("\(p.count) songs").font(.subheadline).foregroundStyle(.secondary)
+                            }
+                            .contentShape(.rect)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu { PlaylistMenu(playlist: p) }
+                    }
+                }
+                .padding(24).padding(.bottom, 50)
+            } else {
             if spot.direct && !spot.connected {
                 PluginSetupNotice(plugin: .spotify, text: "Connect your Spotify account to see your saved albums and playlists.")
             } else if let e = spot.error, spot.direct {
@@ -652,6 +684,7 @@ struct SpotifyGrid: View {
                 }
             }
             .padding(24).padding(.bottom, 50)
+            }
         }
         .toolbar {
             if model.on(.soulseek) {
