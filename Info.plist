@@ -4,6 +4,7 @@
 <dict>
 	<key>CFBundleExecutable</key><string>Crate</string>
 	<key>CFBundleIdentifier</key><string>nl.jaccogroen.crate</string>
+	<key>CFBundleIconFile</key><string>Crate</string>
 	<key>CFBundleName</key><string>Crate</string>
 	<key>CFBundleDisplayName</key><string>Crate</string>
 	<key>CFBundlePackageType</key><string>APPL</string>

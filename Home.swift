@@ -81,9 +81,8 @@ struct IPodView: View {
                     settings
                     maintenance(i, db)
                 }
-                .padding(28).padding(.bottom, 60)
-                .frame(maxWidth: 820, alignment: .leading)
-                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 32).padding(.top, 24).padding(.bottom, 90)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .navigationTitle(model.podName)
             .confirmationDialog("Restore the previous database?", isPresented: $ui.confirmRestore) {
