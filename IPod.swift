@@ -58,6 +58,7 @@ struct PodCache: Codable {
     var toAdd: [String] = [], toRemove: [String] = []
     var playlistsToAdd: [Int] = [], playlistsToRemove: [UInt64] = []
     var pendingName: String?
+    var songsToAdd: [String]? = nil, songsToRemove: [String]? = nil
 
     static var dir: URL {
         let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Crate")

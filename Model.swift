@@ -98,6 +98,9 @@ final class Model: ObservableObject {
     @Published var lastSeen: Date?
     @Published var toAdd: Set<Album.ID> = [] { didSet { savePending() } }
     @Published var toRemove: Set<Album.ID> = [] { didSet { savePending() } }
+    @Published var songsToAdd: Set<String> = [] { didSet { savePending() } }       // library file paths
+    @Published var songsToRemove: Set<String> = [] { didSet { savePending() } }    // track keys on the iPod
+    @Published var fileSizes: [String: Int64] = [:]
     @Published var playlistsToAdd: Set<OTPlaylist.ID> = [] { didSet { savePending() } }
     @Published var playlistsToRemove: Set<PodPlaylist.ID> = [] { didSet { savePending() } }
     @Published var pendingName: String? { didSet { savePending() } }
@@ -349,6 +352,7 @@ final class Model: ObservableObject {
         playlists = lists.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         finishJob(job, "\(libTracks.count) songs in \(albums.count) albums")
         refreshSmartPending()
+        Task { await loadSizes() }
         await loadArtwork()
     }
 
@@ -441,7 +445,7 @@ final class Model: ObservableObject {
     var podName: String { pendingName ?? db?.name ?? "iPod" }
 
     var pendingCount: Int {
-        toAdd.count + toRemove.count + playlistsToAdd.count + playlistsToRemove.count
+        toAdd.count + toRemove.count + songsToAdd.count + songsToRemove.count + playlistsToAdd.count + playlistsToRemove.count
             + (podSettings.importOnTheGo ? onTheGo.count : 0) + (pendingName == nil ? 0 : 1) + smartPending
     }
 
@@ -492,13 +496,15 @@ final class Model: ObservableObject {
         guard !restoring, let i = ipod else { return }
         let old = PodCache.load()
         PodCache(info: i, seen: connected ? Date() : (old?.seen ?? Date()), toAdd: toAdd.sorted(), toRemove: toRemove.sorted(),
-                 playlistsToAdd: playlistsToAdd.sorted(), playlistsToRemove: playlistsToRemove.sorted(), pendingName: pendingName).save()
+                 playlistsToAdd: playlistsToAdd.sorted(), playlistsToRemove: playlistsToRemove.sorted(), pendingName: pendingName,
+                 songsToAdd: songsToAdd.sorted(), songsToRemove: songsToRemove.sorted()).save()
     }
 
     private func restorePending() {
         guard let c = PodCache.load(), c.info.key == ipod?.key else { return }
         restoring = true; defer { restoring = false }
         toAdd = Set(c.toAdd); toRemove = Set(c.toRemove)
+        songsToAdd = Set(c.songsToAdd ?? []); songsToRemove = Set(c.songsToRemove ?? [])
         playlistsToAdd = Set(c.playlistsToAdd); playlistsToRemove = Set(c.playlistsToRemove)
         pendingName = c.pendingName
     }
@@ -544,7 +550,7 @@ final class Model: ObservableObject {
     }
 
     func discardChanges() {
-        toAdd = []; toRemove = []; playlistsToAdd = []; playlistsToRemove = []; pendingName = nil
+        toAdd = []; toRemove = []; songsToAdd = []; songsToRemove = []; playlistsToAdd = []; playlistsToRemove = []; pendingName = nil
     }
 
     func scanOrphans() async {
@@ -600,7 +606,59 @@ final class Model: ObservableObject {
     }
 
     private func addWork(have: Set<String>) -> [(Album, LibTrack)] {
-        albums.filter { toAdd.contains($0.id) }.flatMap { a in a.tracks.filter { !have.contains($0.key) }.map { (a, $0) } }
+        var work = albums.filter { toAdd.contains($0.id) }.flatMap { a in a.tracks.filter { !have.contains($0.key) }.map { (a, $0) } }
+        let queued = Set(work.map(\.1.path))
+        for a in albums { for t in a.tracks where songsToAdd.contains(t.path) && !queued.contains(t.path) && !have.contains(t.key) { work.append((a, t)) } }
+        return work
+    }
+
+    /// Keys of the iPod songs that go on the next sync (whole albums and single songs).
+    var removalKeys: Set<String> { Set(podAlbums.filter { toRemove.contains($0.id) }.flatMap { $0.tracks.map(\.key) }).union(songsToRemove) }
+
+    // MARK: single songs
+
+    func songMark(_ t: LibTrack) -> SyncMark {
+        if songsToAdd.contains(t.path) { return .adding }
+        if songsToRemove.contains(t.key) { return .removing }
+        let a = albums.first { $0.id == t.album.lowercased() }
+        if podKeys.contains(t.key) { return a.map { toRemove.contains($0.id) } == true ? .removing : .onIPod }
+        return a.map { toAdd.contains($0.id) } == true ? .adding : .none
+    }
+
+    /// Queues one song for the iPod, or for removal from it (or takes it out of the queue again).
+    func toggleSong(_ t: LibTrack) {
+        if songsToAdd.contains(t.path) { songsToAdd.remove(t.path) }
+        else if songsToRemove.contains(t.key) { songsToRemove.remove(t.key) }
+        else if podKeys.contains(t.key) { songsToRemove.insert(t.key) }
+        else { songsToAdd.insert(t.path) }
+    }
+
+    // MARK: sizes
+
+    /// What a song takes on the iPod: converted ones by length and bit rate, the rest by file size.
+    func podSize(_ t: LibTrack) -> Int64 {
+        if t.needsConversion { return Int64(t.lengthMs) * Int64(podSettings.aacKbps) / 8 }
+        return fileSizes[t.path] ?? Int64(t.lengthMs) * 256 / 8
+    }
+    func podSize(_ a: Album) -> Int64 { a.tracks.reduce(0) { $0 + podSize($1) } }
+
+    /// Roughly what the queued changes add (positive) or free up on the iPod.
+    var queuedBytes: Int64 {
+        let add = addWork(have: podKeys).reduce(Int64(0)) { $0 + podSize($1.1) }
+        let keys = removalKeys
+        let out = Int64((db?.tracks ?? []).filter { keys.contains($0.key) }.map(\.size).reduce(0, +))
+        return add - out
+    }
+
+    func loadSizes() async {
+        let paths = libTracks.map(\.path).filter { fileSizes[$0] == nil }
+        guard !paths.isEmpty else { return }
+        let found = await Task.detached { () -> [String: Int64] in
+            var out: [String: Int64] = [:]
+            for p in paths { if let n = (try? FileManager.default.attributesOfItem(atPath: p))?[.size] as? Int { out[p] = Int64(n) } }
+            return out
+        }.value
+        fileSizes.merge(found) { a, _ in a }
     }
 
     func makePlan() -> SyncPlan {
@@ -611,7 +669,7 @@ final class Model: ObservableObject {
         p.addSongs = work.count
         p.convertSongs = work.filter { podSettings.needsConversion($0.1) }.count
         p.removeAlbums = podAlbums.filter { toRemove.contains($0.id) }
-        let removeKeys = Set(p.removeAlbums.flatMap { $0.tracks.map(\.key) })
+        let removeKeys = removalKeys
         p.removeSongs = (db?.tracks ?? []).filter { removeKeys.contains($0.key) }.count
         p.bytesOut = Int64((db?.tracks ?? []).filter { removeKeys.contains($0.key) }.map(\.size).reduce(0, +))
         p.playlistsAdd = playlists.filter { playlistsToAdd.contains($0.id) }.map(\.name) + smartPlaylists.filter(smartNeedsSync).map(\.name)
@@ -668,7 +726,7 @@ final class Model: ObservableObject {
         db.playlists.removeAll { playlistsToRemove.contains($0.id) }
 
         syncPhase = "Removing songs"
-        let removeKeys = Set(podAlbums.filter { toRemove.contains($0.id) }.flatMap { $0.tracks.map(\.key) })
+        let removeKeys = removalKeys
         for t in db.tracks where removeKeys.contains(t.key) { Syncer.remove(t, from: ipod); rep.removed += 1 }
         db.tracks.removeAll { removeKeys.contains($0.key) }
         let left = Set(db.tracks.map(\.id))     // new tracks may reuse the ids of removed ones
@@ -681,7 +739,7 @@ final class Model: ObservableObject {
                 if playCountsMerged { try? FileManager.default.removeItem(at: PlayCounts.url(ipod)) }
             } catch { rep.error = "Writing the database failed: \(error.localizedDescription)"; return }
         }
-        pendingName = nil; toRemove = []; playlistsToRemove = []
+        pendingName = nil; toRemove = []; songsToRemove = []; playlistsToRemove = []
 
         let have = Set(db.tracks.map(\.key))
         var work = addWork(have: have)
@@ -779,7 +837,7 @@ final class Model: ObservableObject {
         syncPhase = "Writing the database"
         do { try Syncer.write(db, to: ipod) }
         catch { rep.error = "Writing the database failed: \(error.localizedDescription)" }
-        toAdd = []; playlistsToAdd = []
+        toAdd = []; songsToAdd = []; playlistsToAdd = []
         syncPhase = "Done"
     }
 

@@ -369,13 +369,16 @@ struct SongsView: View {
     @StateObject private var ui = SongsUI()
 
     var body: some View {
-        let keys = model.podKeys
         let rows = model.libTracks.sorted(using: ui.sort)
         Table(rows, selection: $ui.selection, sortOrder: $ui.sort) {
             TableColumn("") { (t: LibTrack) in
-                Image(systemName: keys.contains(t.key) ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(keys.contains(t.key) ? AnyShapeStyle(.green) : AnyShapeStyle(.quaternary))
-                    .help(keys.contains(t.key) ? "On the iPod" : "Not on the iPod")
+                let m = model.songMark(t)
+                Button { model.toggleSong(t) } label: {
+                    Image(systemName: m.icon.map { $0 == "checkmark" ? "checkmark.circle.fill" : $0 + ".circle.fill" } ?? "plus.circle")
+                        .foregroundStyle(m == .none ? AnyShapeStyle(.quaternary) : AnyShapeStyle(m.tint))
+                }
+                .buttonStyle(.plain)
+                .help(m == .none ? "Add this song to the iPod" : m.help)
             }
             .width(22)
             TableColumn("Title", value: \.title)
@@ -389,7 +392,12 @@ struct SongsView: View {
             TableColumn("Kind", value: \.ext) { (t: LibTrack) in Text(t.ext.uppercased()).foregroundStyle(.secondary) }.width(44)
         }
         .contextMenu(forSelectionType: LibTrack.ID.self) { ids in
-            if let a = album(ids.first) {
+            let picked = model.libTracks.filter { ids.contains($0.id) }
+            let off = picked.filter { model.songMark($0) == .none }, on = picked.filter { model.songMark($0) == .onIPod }
+            if !off.isEmpty { Button("Add \(off.count) Song\(off.count == 1 ? "" : "s") to iPod", systemImage: "plus.circle") { off.forEach(model.toggleSong) } }
+            if !on.isEmpty { Button("Remove \(on.count) Song\(on.count == 1 ? "" : "s") from iPod", systemImage: "minus.circle") { on.forEach(model.toggleSong) } }
+            Divider()
+            if ids.count == 1, let a = album(ids.first) {
                 Button("Go to Album", systemImage: "square.stack") { model.path.append(.album(a)) }
                 AlbumMenu(album: a)
             }

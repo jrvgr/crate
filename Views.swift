@@ -183,8 +183,8 @@ enum SyncMark {
 
 extension Model {
     func mark(_ a: Album) -> SyncMark {
-        if toAdd.contains(a.id) { return .adding }
-        if toRemove.contains(a.id) { return .removing }
+        if toAdd.contains(a.id) || a.tracks.contains(where: { songsToAdd.contains($0.path) }) { return .adding }
+        if toRemove.contains(a.id) || a.tracks.contains(where: { songsToRemove.contains($0.key) }) { return .removing }
         switch state(a) { case .none: return .none; case .partial: return .partial; case .onIPod: return .onIPod }
     }
 
@@ -421,7 +421,13 @@ struct IPodCard: View {
                         Image(systemName: "powerplug").foregroundStyle(.tertiary).help("Not connected")
                     }
                 }
-                CapacityBar(height: 6)
+                CapacityBar(height: 6, incoming: max(0, model.pendingCount > 0 ? model.queuedBytes : 0))
+                if model.pendingCount > 0, !model.syncing {
+                    let q = model.queuedBytes
+                    Text((q >= 0 ? "≈ \(ByteCountFormatter.string(fromByteCount: q, countStyle: .file)) to add" : "≈ \(ByteCountFormatter.string(fromByteCount: -q, countStyle: .file)) freed")
+                         + (q > i.free ? " · doesn't fit" : ""))
+                        .font(.caption).foregroundStyle(q > i.free ? .red : .secondary)
+                }
                 if model.syncing {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.mini)

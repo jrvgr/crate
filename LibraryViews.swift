@@ -134,6 +134,11 @@ struct AlbumList: View {
             TableColumn("Genre", value: \.genre).width(min: 70, ideal: 110)
             TableColumn("Songs", value: \.songs) { (r: AlbumRow) in Text("\(r.songs)").monospacedDigit() }.width(46)
             TableColumn("Time", value: \.length) { (r: AlbumRow) in Text(totalDuration(r.length)).monospacedDigit().foregroundStyle(.secondary) }.width(70)
+            TableColumn("Size") { (r: AlbumRow) in
+                Text(ByteCountFormatter.string(fromByteCount: model.podSize(r.album), countStyle: .file)).monospacedDigit().foregroundStyle(.secondary)
+                    .help("About this much on the iPod (lossless files are converted)")
+            }
+            .width(66)
             TableColumn("Added", value: \.added) { (r: AlbumRow) in
                 Text(r.album.added?.formatted(date: .abbreviated, time: .omitted) ?? "").foregroundStyle(.secondary)
             }
@@ -280,7 +285,8 @@ struct AlbumDetail: View {
                             .font(.callout)
                         }
                         Text([year > 0 ? "\(year)" : "", genre, "\(album.tracks.count) songs",
-                              totalDuration(album.tracks.map(\.lengthMs).reduce(0, +)), podOnly ? "" : formats]
+                              totalDuration(album.tracks.map(\.lengthMs).reduce(0, +)), podOnly ? "" : formats,
+                              podOnly ? "" : "≈ " + ByteCountFormatter.string(fromByteCount: model.podSize(album), countStyle: .file) + " on the iPod"]
                                 .filter { !$0.isEmpty }.joined(separator: " · "))
                             .foregroundStyle(.secondary)
                         HStack(spacing: 10) {
@@ -324,12 +330,12 @@ struct AlbumDetail: View {
                                 }
                             }
                             Spacer()
-                            if keys.contains(t.key) {
-                                Image(systemName: m == .removing ? "minus.circle.fill" : "checkmark.circle.fill")
-                                    .foregroundStyle(m == .removing ? .red : .green).help(m == .removing ? "Will be removed" : "On the iPod")
-                            } else if m == .adding {
-                                Image(systemName: "plus.circle.fill").foregroundStyle(.tint).help("Will be added")
+                            let sm = podOnly ? (keys.contains(t.key) ? (m == .removing ? SyncMark.removing : .onIPod) : .none) : model.songMark(t)
+                            Button { if !podOnly { model.toggleSong(t) } } label: {
+                                Image(systemName: sm.icon.map { $0 == "checkmark" ? "checkmark.circle.fill" : $0 + ".circle.fill" } ?? "plus.circle")
+                                    .foregroundStyle(sm == .none ? AnyShapeStyle(.quaternary) : AnyShapeStyle(sm.tint))
                             }
+                            .buttonStyle(.plain).help(sm == .none ? "Add this song to the iPod" : sm.help)
                             Text(t.lengthMs > 0 ? duration(t.lengthMs) : "").monospacedDigit().foregroundStyle(.secondary)
                                 .frame(width: 44, alignment: .trailing)
                         }
@@ -340,6 +346,9 @@ struct AlbumDetail: View {
                         .contextMenu {
                             Button("Play", systemImage: "play.fill") { Task { await model.play(album, from: i) } }
                             if !podOnly {
+                                let sm = model.songMark(t)
+                                Button(sm == .none ? "Add Song to iPod" : sm == .onIPod ? "Remove Song from iPod" : "Don't Sync This Song",
+                                       systemImage: sm == .none ? "plus.circle" : "minus.circle") { model.toggleSong(t) }
                                 Button("Show in Finder", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: t.path)]) }
                                 Divider()
                                 Button("Delete Song…", systemImage: "trash", role: .destructive) { model.confirmTrash = [t] }
