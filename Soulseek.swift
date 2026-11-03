@@ -106,6 +106,7 @@ final class Slskd: ObservableObject {
     @AppStorage("slskdFreeSlot") var freeSlotOnly = false
     @AppStorage("slskdMaxQueue") var maxQueue = 0           // 0 = any
     @Published var expanded: Set<String> = []
+    @Published var wantSongs = 0          // set by "Complete Album": folders with at least this many songs go first
     @Published var busy: Set<String> = []
     @Published var requested: Set<SlskFolder.ID> = []
     @Published var imported: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "slskdImported") ?? [])
@@ -342,13 +343,15 @@ struct SoulseekView: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        let shown = slsk.results.filter(slsk.passes)
+        let shown = slsk.results.filter(slsk.passes).sorted { a, b in
+            slsk.wantSongs == 0 ? false : (a.audio.count >= slsk.wantSongs ? 1 : 0) > (b.audio.count >= slsk.wantSongs ? 1 : 0)
+        }
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Artist, album or song", text: $slsk.query)
                     .textFieldStyle(.plain).font(.title3).focused($focused)
-                    .onSubmit { slsk.search(slsk.query) }
+                    .onSubmit { slsk.wantSongs = 0; slsk.search(slsk.query) }
                 if slsk.searching { ProgressView().controlSize(.small) }
                 Button("Search") { slsk.search(slsk.query) }
                     .buttonStyle(.glassProminent).disabled(slsk.query.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -408,7 +411,16 @@ struct SlskFolderRow: View {
                 Image(systemName: folder.lossless ? "waveform" : "music.note")
                     .font(.title3).foregroundStyle(folder.lossless ? .orange : .secondary).frame(width: 28)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(folder.name).font(.headline).lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(folder.name).font(.headline).lineLimit(1)
+                        if slsk.wantSongs > 0 {
+                            let full = folder.audio.count >= slsk.wantSongs
+                            Text(full ? "complete" : "\(folder.audio.count)/\(slsk.wantSongs)").font(.caption.bold())
+                                .padding(.horizontal, 6).padding(.vertical, 1)
+                                .background((full ? Color.green : Color.orange).opacity(0.2), in: .capsule)
+                                .foregroundStyle(full ? .green : .orange)
+                        }
+                    }
                     Text([folder.parent, "\(folder.audio.count) tracks", folder.formats, folder.quality,
                           ByteCountFormatter.string(fromByteCount: Int64(folder.size), countStyle: .file)]
                             .filter { !$0.isEmpty }.joined(separator: " · "))

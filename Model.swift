@@ -953,10 +953,20 @@ final class Model: ObservableObject {
     }
 
     /// Looks the album up on Soulseek (the Soulseek pane, search started).
-    func findOnSoulseek(_ artist: String, _ album: String) {
+    func findOnSoulseek(_ artist: String, _ album: String, songs: Int = 0) {
         guard on(.soulseek) else { notify("Turn on the Soulseek plugin in Settings to download albums"); return }
         search = ""
         pane = .soulseek
+        slsk.wantSongs = songs
         slsk.search((artist == "Various Artists" ? "" : artist + " ") + album)
+    }
+
+    /// How many songs the full album has, when the library copy has fewer: gaps in the track
+    /// numbers, or more songs on the release picked with Find Metadata.
+    func expectedSongs(_ a: Album) -> Int? {
+        let have = a.tracks.count
+        let byNumbers = Set(a.tracks.map(\.discNumber)).count <= 1 ? (a.tracks.map(\.trackNumber).max() ?? 0) : 0
+        let full = max(byNumbers, metadata[a.id]?.trackCount ?? 0)
+        return full > have ? full : nil
     }
 }

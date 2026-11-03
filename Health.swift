@@ -6,7 +6,7 @@ import SwiftUI
 
 enum Issue: String, CaseIterable, Identifiable {
     case noCover = "No cover", noYear = "No year", noGenre = "No genre", numbering = "Track numbers"
-    case duplicates = "Duplicates", lowQuality = "Low bit rate", missing = "Missing files"
+    case incomplete = "Missing songs", duplicates = "Duplicates", lowQuality = "Low bit rate", missing = "Missing files"
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -14,6 +14,7 @@ enum Issue: String, CaseIterable, Identifiable {
         case .noYear: return "calendar"
         case .noGenre: return "guitars"
         case .numbering: return "number"
+        case .incomplete: return "rectangle.badge.minus"
         case .duplicates: return "square.on.square"
         case .lowQuality: return "waveform.badge.minus"
         case .missing: return "questionmark.folder"
@@ -31,6 +32,7 @@ extension Model {
         if a.genre.isEmpty && (metadata[a.id]?.genre ?? "").isEmpty { out.append(.noGenre) }
         let nums = a.tracks.map { $0.discNumber * 1000 + $0.trackNumber }
         if a.tracks.count > 1, a.tracks.contains(where: { $0.trackNumber == 0 }) || Set(nums).count < nums.count { out.append(.numbering) }
+        if expectedSongs(a) != nil { out.append(.incomplete) }
         let titles = a.tracks.map { $0.title.lowercased().filter { $0.isLetter || $0.isNumber } }
         if Set(titles).count < titles.count, Set(a.tracks.map(\.discNumber)).count <= 1 { out.append(.duplicates) }
         if a.tracks.contains(where: { $0.ext == "mp3" && $0.lengthMs > 0 && (1..<160).contains(fileKbps($0)) }) { out.append(.lowQuality) }
@@ -105,6 +107,10 @@ struct HealthView: View {
                                 }
                             }
                             Spacer()
+                            if issues.contains(.incomplete), model.on(.soulseek), let full = model.expectedSongs(a) {
+                                Button("Complete") { model.findOnSoulseek(a.artist, a.title, songs: full) }.buttonStyle(.glass)
+                                    .help("Search Soulseek for a copy with all \(full) songs")
+                            }
                             if issues.contains(where: \.metadata) {
                                 Button { model.lookupAlbum = a } label: { Image(systemName: "sparkle.magnifyingglass") }.buttonStyle(.glass).help("Find Metadata…")
                             }

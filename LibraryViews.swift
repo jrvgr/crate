@@ -173,6 +173,11 @@ struct AlbumMenu: View {
             Button("Edit Tags…", systemImage: "pencil") { model.editAlbum = album }
             Button("Organise Files…", systemImage: "folder.badge.gearshape") { model.organize = [album] }
             Button("Quick Look Cover", systemImage: "eye") { model.quickLookCover(album) }
+            if model.on(.soulseek) {
+                Button(model.expectedSongs(album) != nil ? "Complete Album on Soulseek" : "Find on Soulseek", systemImage: "arrow.down.circle") {
+                    model.findOnSoulseek(album.artist, album.title, songs: model.expectedSongs(album) ?? album.tracks.count)
+                }
+            }
             Button("Show in Finder", systemImage: "folder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: album.folder) }
         }
     }
@@ -246,6 +251,17 @@ struct AlbumDetail: View {
                             Text(album.artist).font(.title2).foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain).help("Go to artist")
+                        if let full = model.expectedSongs(album), !podOnly {
+                            HStack(spacing: 8) {
+                                Label("\(album.tracks.count) of \(full) songs", systemImage: "exclamationmark.circle").foregroundStyle(.orange)
+                                if model.on(.soulseek) {
+                                    Button("Complete Album") { model.findOnSoulseek(album.artist, album.title, songs: full) }
+                                        .buttonStyle(.glass).controlSize(.small)
+                                        .help("Search Soulseek for a copy with all \(full) songs")
+                                }
+                            }
+                            .font(.callout)
+                        }
                         Text([year > 0 ? "\(year)" : "", genre, "\(album.tracks.count) songs",
                               totalDuration(album.tracks.map(\.lengthMs).reduce(0, +)), podOnly ? "" : formats]
                                 .filter { !$0.isEmpty }.joined(separator: " · "))
