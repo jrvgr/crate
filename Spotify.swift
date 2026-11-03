@@ -57,8 +57,9 @@ final class SpotifyAPI: ObservableObject {
             guard query["state"] == state else { throw SpotifyError.denied("the answer didn't match") }
             guard let code = query["code"] else { throw SpotifyError.denied(query["error"] ?? "no code") }
             try await token(["grant_type": "authorization_code", "code": code, "redirect_uri": Self.redirect, "code_verifier": verifier])
-            let me = try await get("/me") as? [String: Any]
-            user = me?["display_name"] as? String ?? me?["id"] as? String ?? ""
+            // logged in; the name is a nicety (dev-mode apps answer 403 here until the account is added in the dashboard)
+            if let me = (try? await get("/me")) as? [String: Any] { user = me["display_name"] as? String ?? me["id"] as? String ?? "" }
+            objectWillChange.send()
         } catch { self.error = error.localizedDescription }
     }
 

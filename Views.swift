@@ -327,8 +327,8 @@ struct IPodCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let i = model.ipod, let db = model.db {
+                SidebarIPod()
                 HStack(spacing: 10) {
-                    Image(nsImage: NSWorkspace.shared.icon(forFile: i.mount.path)).resizable().frame(width: 34, height: 34)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(model.podName).font(.headline).lineLimit(1).minimumScaleFactor(0.8)
                         Text(model.connected ? "\(db.tracks.count) songs · \(ByteCountFormatter.string(fromByteCount: i.free, countStyle: .file)) free"
@@ -553,8 +553,8 @@ struct SyncSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 14) {
-                Image(systemName: "ipod").font(.system(size: 30, weight: .light))
-                    .frame(width: 54, height: 54).glassEffect(.regular.tint(.accentColor), in: .rect(cornerRadius: 14))
+                IPodArt(mode: model.podArtMode, name: model.podName, height: 96)
+                    .animation(.spring(response: 0.5, dampingFraction: 0.55), value: model.syncing)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(model.syncing ? "Syncing \(model.podName)" : model.report != nil ? "Sync finished" : "Sync \(model.podName)")
                         .font(.title2.bold())

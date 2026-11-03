@@ -123,7 +123,7 @@ final class Model: ObservableObject {
     @Published var search = ""
     @Published var albumFilter = AlbumFilter.all
     @Published var albumSort = AlbumSort.artist
-    @AppStorage("albumCoverFlow") var coverFlow = false
+    @AppStorage("albumView") var albumView = "grid"          // "grid", "flow" or "list"
     @Published var lookupAlbum: Album?
     @Published var editAlbum: Album?
     @Published var batchAlbums: [Album]?

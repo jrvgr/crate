@@ -11,8 +11,17 @@ enum CalendarSync {
     static var eventsAllowed: Bool { EKEventStore.authorizationStatus(for: .event) == .fullAccess }
     static var remindersAllowed: Bool { EKEventStore.authorizationStatus(for: .reminder) == .fullAccess }
 
-    static func requestEvents() async -> Bool { (try? await store.requestFullAccessToEvents()) ?? false }
-    static func requestReminders() async -> Bool { (try? await store.requestFullAccessToReminders()) ?? false }
+    /// Asks macOS (with Crate in front, so the dialog appears on this screen); the error text when it fails.
+    static func requestEvents() async -> String? {
+        NSApp.activate(ignoringOtherApps: true)
+        do { return try await store.requestFullAccessToEvents() ? nil : "Not allowed (System Settings › Privacy & Security › Calendars)" }
+        catch { return error.localizedDescription }
+    }
+    static func requestReminders() async -> String? {
+        NSApp.activate(ignoringOtherApps: true)
+        do { return try await store.requestFullAccessToReminders() ? nil : "Not allowed (System Settings › Privacy & Security › Reminders)" }
+        catch { return error.localizedDescription }
+    }
 
     static func calendars(_ type: EKEntityType) -> [EKCalendar] {
         store.calendars(for: type).sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
@@ -143,9 +152,10 @@ struct CalendarSettings: View {
                     .fixedSize()
                 }
                 Toggle("", isOn: Binding(get: { model.podSettings.calendars }, set: { on in
-                    Task { if on && !CalendarSync.eventsAllowed { _ = await CalendarSync.requestEvents() }
+                    Task { var err: String?
+                           if on && !CalendarSync.eventsAllowed { err = await CalendarSync.requestEvents() }
                            model.podSettings.calendars = on && CalendarSync.eventsAllowed
-                           if on && !CalendarSync.eventsAllowed { ui.status = "Crate isn't allowed to read your calendars (System Settings › Privacy & Security › Calendars)" } }
+                           if on && !CalendarSync.eventsAllowed { ui.status = "Calendars: " + (err ?? "not allowed") } else { ui.status = "" } }
                 })).toggleStyle(.switch).labelsHidden()
             }
             Divider().padding(.leading, 50)
@@ -167,9 +177,10 @@ struct CalendarSettings: View {
                     .fixedSize()
                 }
                 Toggle("", isOn: Binding(get: { model.podSettings.reminders }, set: { on in
-                    Task { if on && !CalendarSync.remindersAllowed { _ = await CalendarSync.requestReminders() }
+                    Task { var err: String?
+                           if on && !CalendarSync.remindersAllowed { err = await CalendarSync.requestReminders() }
                            model.podSettings.reminders = on && CalendarSync.remindersAllowed
-                           if on && !CalendarSync.remindersAllowed { ui.status = "Crate isn't allowed to read your reminders (System Settings › Privacy & Security › Reminders)" } }
+                           if on && !CalendarSync.remindersAllowed { ui.status = "To Do: " + (err ?? "not allowed") } else { ui.status = "" } }
                 })).toggleStyle(.switch).labelsHidden()
             }
             if model.podSettings.calendars || model.podSettings.reminders || !ui.status.isEmpty {

@@ -1,4 +1,5 @@
 import SwiftUI
+import EventKit
 
 struct CrateApp: App {
     @StateObject private var model = Model()
@@ -73,6 +74,12 @@ enum Main {
             }
             RunLoop.main.run()
         }
+        if args.contains("--privacy-status") {     // what macOS currently allows (run it as the app: open --stdout)
+            let names = ["notDetermined", "restricted", "denied", "authorized", "fullAccess", "writeOnly"]
+            print("calendars:", names[safe: EKEventStore.authorizationStatus(for: .event).rawValue] ?? "?",
+                  "reminders:", names[safe: EKEventStore.authorizationStatus(for: .reminder).rawValue] ?? "?")
+            return
+        }
         if args.contains("--keychain-test") {
             print("set:", Keychain.set("crate-test", "dummy"), "get:", Keychain.get("crate-test") == "dummy")
             Keychain.set("crate-test", ""); return
@@ -91,6 +98,43 @@ enum Main {
                 done.signal()
             }
             done.wait(); return
+        }
+        if let i = args.firstIndex(of: "--organize-test"), args.count > i + 1 {     // plans and runs the organiser on a scratch folder
+            let dir = args[i + 1], done = DispatchSemaphore(value: 0)
+            Task {
+                let albums = LibraryLoader.albums(await LibraryLoader.scan(dir))
+                let moves = Organizer.plan(albums, roots: [dir], withYear: true)
+                moves.forEach { print(($0.conflict ? "SKIP " : "move ") + $0.from.dropFirst(dir.count) + " -> " + $0.to.dropFirst(dir.count)) }
+                let r = Organizer.apply(moves)
+                print("moved \(r.done.count), failed \(r.failed)")
+                done.signal()
+            }
+            done.wait(); return
+        }
+        if let i = args.firstIndex(of: "--yt-test"), args.count > i + 1 {     // one YouTube search hit, downloaded and tagged, not imported
+            let q = args[i + 1]
+            Task { @MainActor in
+                let yt = YouTube()
+                let saved = yt.customPath
+                if let b = ProcessInfo.processInfo.environment["YTDLP"] { yt.customPath = b }     // test with a given binary
+                defer { yt.customPath = saved }
+                print("yt-dlp:", yt.binary ?? "none")
+                yt.onFiles = { files, _ in
+                    for f in files {
+                        let t = await LibraryLoader.track(f.path, relative: f.lastPathComponent)
+                        print("file: \(f.lastPathComponent) | \(t.title) | \(t.trackArtist) | \(t.album) | #\(t.trackNumber) | \(t.lengthMs) ms")
+                        try? FileManager.default.copyItem(at: f, to: URL(fileURLWithPath: NSTemporaryDirectory() + f.lastPathComponent))
+                    }
+                }
+                yt.fetch([OTTrack(id: 0, title: q, artist: "Aphex Twin", album: "Test Album", albumArtist: "Aphex Twin", dataKind: "", uri: "", artworkPath: "", lengthMs: 0)],
+                         album: "Test Album", art: "https://coverartarchive.org/release-group/1a0a8b5c-e0cb-3a18-a2f0-29ba7e6fd8ec/front-250")
+                while yt.jobs.contains(where: { !$0.finished }) { try? await Task.sleep(for: .seconds(1)) }
+                try? await Task.sleep(for: .seconds(2))
+                for i in yt.jobs[0].items { print("item:", i.state, i.done) }
+                yt.customPath = saved
+                exit(0)
+            }
+            RunLoop.main.run()
         }
         if let i = args.firstIndex(of: "--write-tags"), args.count > i + 3 { writeTags(args[i + 1], args[i + 2], args[i + 3]); return }
         if let i = args.firstIndex(of: "--lookup"), args.count > i + 2 { lookup(args[i + 1], args[i + 2]); return }

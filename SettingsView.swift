@@ -9,6 +9,8 @@ final class SettingsUI: ObservableObject {
     @Published var folderSelection: String?
     @Published var ownToneStatus = ""
     @Published var testing: PluginID?
+    @Published var password = ""
+    @Published var passwordSaved = false
 }
 
 struct SettingsView: View {
@@ -188,9 +190,15 @@ struct PluginSettings: View {
         case .soulseek:
             TextField("slskd address", text: slsk.$url, prompt: Text("http://host:5030"))
             TextField("Username", text: slsk.$user)
-            SecureField("Password", text: Binding(get: { slsk.password }, set: { slsk.password = $0 }))
-            if !slsk.password.isEmpty {
-                LabeledContent("") { Label("Saved in the Keychain", systemImage: "key.fill").font(.caption).foregroundStyle(.secondary) }
+            LabeledContent("Password") {
+                HStack {
+                    SecureField("", text: $ui.password, prompt: Text(slsk.password.isEmpty ? "Your slskd web password" : "Saved in the Keychain – type to change"))
+                        .onSubmit { savePassword() }
+                    Button("Save") { savePassword() }.disabled(ui.password.isEmpty)
+                }
+            }
+            if ui.passwordSaved {
+                LabeledContent("") { Label("Saved", systemImage: "key.fill").font(.caption).foregroundStyle(.green) }
             }
             TextField("API key", text: slsk.$apiKey, prompt: Text("Optional, instead of the login"))
             FolderField(title: "Downloads folder", path: slsk.$downloadsFolder,
@@ -233,6 +241,16 @@ struct PluginSettings: View {
                 }
             }
         }
+    }
+}
+
+extension PluginSettings {
+    func savePassword() {
+        slsk.password = ui.password
+        ui.passwordSaved = !slsk.password.isEmpty && slsk.password == ui.password
+        ui.password = ""
+        ui.testing = .soulseek
+        Task { await slsk.check(); ui.testing = nil }
     }
 }
 

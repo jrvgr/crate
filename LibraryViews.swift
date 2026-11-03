@@ -29,8 +29,10 @@ struct AlbumsView: View {
     var body: some View {
         let list = shown
         Group {
-            if model.coverFlow && !list.isEmpty {
+            if model.albumView == "flow" && !list.isEmpty {
                 CoverFlowAlbums(albums: list)
+            } else if model.albumView == "list" && !list.isEmpty {
+                AlbumList(albums: list)
             } else {
                 ScrollView {
                     if model.albums.isEmpty && model.db == nil {
@@ -69,12 +71,84 @@ struct AlbumsView: View {
                 .help("Sort albums")
             }
             ToolbarItem(placement: .navigation) {
-                Picker("View", selection: model.$coverFlow) {
-                    Image(systemName: "square.grid.2x2").tag(false).help("Grid")
-                    Image(systemName: "rectangle.stack").tag(true).help("Cover Flow")
+                Picker("View", selection: model.$albumView) {
+                    Image(systemName: "square.grid.2x2").tag("grid").help("Grid")
+                    Image(systemName: "list.bullet").tag("list").help("List")
+                    Image(systemName: "rectangle.stack").tag("flow").help("Cover Flow")
                 }
                 .pickerStyle(.segmented).labelsHidden().fixedSize()
             }
+        }
+    }
+}
+
+@MainActor
+final class AlbumListUI: ObservableObject {
+    @Published var selection: Set<Album.ID> = []
+    @Published var sort = [KeyPathComparator(\AlbumRow.artist), KeyPathComparator(\AlbumRow.yearSort), KeyPathComparator(\AlbumRow.title)]
+}
+
+/// One row of the album list (sortable fields).
+struct AlbumRow: Identifiable {
+    var album: Album
+    var id: Album.ID { album.id }
+    var title: String { album.title }
+    var artist: String { album.artist }
+    var year: Int { album.year }
+    var yearSort: Int { album.year == 0 ? 9999 : album.year }
+    var genre: String { album.genre }
+    var songs: Int { album.tracks.count }
+    var length: Int { album.lengthMs }
+    var added: Date { album.added ?? .distantPast }
+}
+
+/// Albums as a table: sortable columns, iPod state, double-click opens, right-click for the album menu.
+struct AlbumList: View {
+    @EnvironmentObject var model: Model
+    var albums: [Album]
+    @StateObject private var ui = AlbumListUI()
+
+    var body: some View {
+        let rows = albums.map(AlbumRow.init).sorted(using: ui.sort)
+        Table(rows, selection: $ui.selection, sortOrder: $ui.sort) {
+            TableColumn("") { (r: AlbumRow) in
+                let m = model.mark(r.album)
+                Button { model.cycle(r.album) } label: {
+                    Image(systemName: m.icon.map { $0 == "checkmark" ? "checkmark.circle.fill" : $0 + ".circle.fill" } ?? "plus.circle")
+                        .foregroundStyle(m == .none ? AnyShapeStyle(.tertiary) : AnyShapeStyle(m.tint))
+                }
+                .buttonStyle(.plain).help(m == .none ? "Add to the iPod" : m.help)
+                .disabled(model.isPodOnly(r.album) && m == .none)
+            }
+            .width(22)
+            TableColumn("Album", value: \.title) { (r: AlbumRow) in
+                HStack(spacing: 8) {
+                    Cover(image: model.artwork[r.id], seed: r.id).frame(width: 28, height: 28).clipShape(.rect(cornerRadius: 4))
+                    Text(r.title).lineLimit(1)
+                }
+            }
+            .width(min: 180, ideal: 280)
+            TableColumn("Artist", value: \.artist)
+            TableColumn("Year", value: \.yearSort) { (r: AlbumRow) in Text(r.year > 0 ? "\(r.year)" : "").monospacedDigit() }.width(46)
+            TableColumn("Genre", value: \.genre).width(min: 70, ideal: 110)
+            TableColumn("Songs", value: \.songs) { (r: AlbumRow) in Text("\(r.songs)").monospacedDigit() }.width(46)
+            TableColumn("Time", value: \.length) { (r: AlbumRow) in Text(totalDuration(r.length)).monospacedDigit().foregroundStyle(.secondary) }.width(70)
+            TableColumn("Added", value: \.added) { (r: AlbumRow) in
+                Text(r.album.added?.formatted(date: .abbreviated, time: .omitted) ?? "").foregroundStyle(.secondary)
+            }
+            .width(90)
+        }
+        .contextMenu(forSelectionType: Album.ID.self) { ids in
+            if ids.count == 1, let a = albums.first(where: { ids.contains($0.id) }) { AlbumMenu(album: a) }
+            else if ids.count > 1 {
+                let picked = albums.filter { ids.contains($0.id) }
+                Button("Add \(ids.count) Albums to iPod", systemImage: "plus.circle") { picked.forEach { if !model.isPodOnly($0) && model.state($0) != .onIPod { model.toAdd.insert($0.id) } } }
+                Button("Remove \(ids.count) Albums from iPod", systemImage: "minus.circle") { picked.forEach { if model.state($0) != .none { model.toRemove.insert($0.id) } } }
+                Button("Find Metadata for \(ids.count) Albums…", systemImage: "sparkle.magnifyingglass") { model.batchAlbums = picked.filter { !model.isPodOnly($0) } }
+                Button("Organise Files…", systemImage: "folder.badge.gearshape") { model.organize = picked }
+            }
+        } primaryAction: { ids in
+            if let a = albums.first(where: { ids.contains($0.id) }) { model.path.append(.album(a)) }
         }
     }
 }

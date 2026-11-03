@@ -112,7 +112,12 @@ final class Slskd: ObservableObject {
 
     var password: String {
         get { Keychain.get("slskd") }
-        set { objectWillChange.send(); Keychain.set("slskd", newValue); token = "" }
+        set {
+            objectWillChange.send()
+            let status = Keychain.set("slskd", newValue)
+            token = ""
+            if status != errSecSuccess { error = "Couldn't save the password in the Keychain (\(status))" }
+        }
     }
 
     /// Called with a finished album folder (local path) when auto-import is on.
