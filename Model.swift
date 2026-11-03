@@ -77,7 +77,7 @@ final class Model: ObservableObject {
 
     // library
     @Published var libTracks: [LibTrack] = []
-    @Published var albums: [Album] = []
+    @Published var albums: [Album] = [] { didSet { refreshDerived() } }
     @Published var artwork: [Album.ID: NSImage] = [:]
     @Published var artistArt: [Artist.ID: NSImage] = [:]
     @Published var metadata: [String: MBRelease] = MetadataStore.load()
@@ -87,7 +87,10 @@ final class Model: ObservableObject {
     // iPod
     @Published var ipod: IPodInfo?
     @Published var db: ITunesDB? {
-        didSet { podStats = Dictionary((db?.tracks ?? []).map { ($0.key, $0.stat) }, uniquingKeysWith: { a, b in a.plays >= b.plays ? a : b }) }
+        didSet {
+            podStats = Dictionary((db?.tracks ?? []).map { ($0.key, $0.stat) }, uniquingKeysWith: { a, b in a.plays >= b.plays ? a : b })
+            refreshPod()
+        }
     }
     @Published var podStats: [String: PodStat] = [:]
     @Published var smartPlaylists: [SmartPlaylist] = SmartStore.load()
@@ -101,12 +104,13 @@ final class Model: ObservableObject {
     @Published var songsToAdd: Set<String> = [] { didSet { savePending() } }       // library file paths
     @Published var songsToRemove: Set<String> = [] { didSet { savePending() } }    // track keys on the iPod
     @Published var fileSizes: [String: Int64] = [:]
-    @Published var aliases: [String: String] = Store.load("matches.json", [:])      // iPod key → library key
+    @Published var aliases: [String: String] = Store.load("matches.json", [:]) { didSet { refreshPod() } }     // iPod key → library key
     @Published var ratings: [String: Int] = Store.load("ratings.json", [:])        // library key → stars
     @Published var keptArtists: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "keptArtists") ?? [])
     @Published var brokenFiles: [String: String] = [:]
     @Published var checkingFiles = false
     @Published var showMatch = false
+    @Published var coverDrop: Album.ID?        // the cover an image is being dragged over
     @Published var playlistsToAdd: Set<OTPlaylist.ID> = [] { didSet { savePending() } }
     @Published var playlistsToRemove: Set<PodPlaylist.ID> = [] { didSet { savePending() } }
     @Published var pendingName: String? { didSet { savePending() } }
@@ -239,25 +243,29 @@ final class Model: ObservableObject {
     // MARK: library
 
     /// The iPod's songs as library keys (paired songs count as their library song).
-    var podKeys: Set<String> { Set((db?.tracks ?? []).map { aliases[$0.key] ?? $0.key }) }
+    // Worked out once when the library or the iPod changes, not on every redraw (the album grid asks
+    // for these per tile, which made every click slow).
+    private(set) var podKeys: Set<String> = []
+    private(set) var podAlbums: [Album] = []
+    private(set) var allAlbums: [Album] = []
+    private(set) var artists: [Artist] = []
+    private var libraryIDs: Set<Album.ID> = []
 
-    var podAlbums: [Album] {
-        let ts = (db?.tracks ?? []).map {
+    private func refreshPod() {
+        podKeys = Set((db?.tracks ?? []).map { aliases[$0.key] ?? $0.key })
+        podAlbums = LibraryLoader.albums((db?.tracks ?? []).map {
             LibTrack(title: $0.title, artist: $0.artist, album: $0.album, genre: $0.genre, trackNumber: $0.trackNumber,
                      discNumber: 0, year: 0, lengthMs: $0.lengthMs, path: $0.relativePath)
-        }
-        return LibraryLoader.albums(ts)
+        })
+        refreshDerived()
     }
 
-    /// Library albums plus albums that are only on the iPod (so they can be opened and removed).
-    var allAlbums: [Album] {
-        let lib = Set(albums.map(\.id))
-        return (albums + podAlbums.filter { !lib.contains($0.id) })
+    private func refreshDerived() {
+        libraryIDs = Set(albums.map(\.id))
+        /// Library albums plus albums that are only on the iPod (so they can be opened and removed).
+        allAlbums = (albums + podAlbums.filter { !libraryIDs.contains($0.id) })
             .sorted { ($0.artist.lowercased(), $0.title.lowercased()) < ($1.artist.lowercased(), $1.title.lowercased()) }
-    }
-
-    var artists: [Artist] {
-        Dictionary(grouping: allAlbums) { $0.artist.lowercased() }.values
+        artists = Dictionary(grouping: allAlbums) { $0.artist.lowercased() }.values
             .map { Artist(name: $0[0].artist, albums: $0.sorted { ($0.year, $0.title) < ($1.year, $1.title) }) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
@@ -274,7 +282,7 @@ final class Model: ObservableObject {
         return marks.contains { $0 == .onIPod || $0 == .partial } ? .partial : .none
     }
 
-    func isPodOnly(_ a: Album) -> Bool { !albums.contains { $0.id == a.id } }
+    func isPodOnly(_ a: Album) -> Bool { !libraryIDs.contains(a.id) }
 
     private static func loose(_ s: String) -> String { s.lowercased().filter { $0.isLetter || $0.isNumber } }
 
@@ -523,13 +531,21 @@ final class Model: ObservableObject {
     /// Plugging the iPod in later in the session starts the queued sync, not the very first scan at launch.
     private var lastSeenAtLaunch = false
 
+    /// Saves the queue a moment after the last change (clicking through albums shouldn't wait on disk writes).
     private func savePending() {
-        guard !restoring, let i = ipod else { return }
-        let old = PodCache.load()
-        PodCache(info: i, seen: connected ? Date() : (old?.seen ?? Date()), toAdd: toAdd.sorted(), toRemove: toRemove.sorted(),
-                 playlistsToAdd: playlistsToAdd.sorted(), playlistsToRemove: playlistsToRemove.sorted(), pendingName: pendingName,
-                 songsToAdd: songsToAdd.sorted(), songsToRemove: songsToRemove.sorted()).save()
+        guard !restoring, ipod != nil else { return }
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(0.6))
+            guard let self, !Task.isCancelled, let i = self.ipod else { return }
+            let seen = self.connected ? Date() : (self.lastSeen ?? Date())
+            let c = PodCache(info: i, seen: seen, toAdd: self.toAdd.sorted(), toRemove: self.toRemove.sorted(),
+                             playlistsToAdd: self.playlistsToAdd.sorted(), playlistsToRemove: self.playlistsToRemove.sorted(),
+                             pendingName: self.pendingName, songsToAdd: self.songsToAdd.sorted(), songsToRemove: self.songsToRemove.sorted())
+            Task.detached { c.save() }
+        }
     }
+    private var saveTask: Task<Void, Never>?
 
     private func restorePending() {
         guard let c = PodCache.load(), c.info.key == ipod?.key else { return }
@@ -921,6 +937,20 @@ final class Model: ObservableObject {
         if let e = written.error { parts.append(e) }
         if let c = await saveCover(r, to: album, replace: replaceCover, step: step) { parts.append(c) }
         return parts.joined(separator: " · ")
+    }
+
+    /// Uses an image you dropped on an album's cover as its cover.jpg.
+    func setCover(_ data: Data, for album: Album) async {
+        guard NSImage(data: data) != nil, !isPodOnly(album) else { notify("That isn't an image"); return }
+        let fm = FileManager.default
+        for n in ["folder.jpg", "cover.png", "folder.png", "front.jpg"] where fm.fileExists(atPath: album.folder + "/" + n) {
+            try? fm.moveItem(atPath: album.folder + "/" + n, toPath: album.folder + "/" + n + ".old")
+        }
+        try? fm.removeItem(atPath: album.folder + "/cover.jpg")
+        guard fm.createFile(atPath: album.folder + "/cover.jpg", contents: data) else { notify("Couldn't write cover.jpg in \(album.folder)"); return }
+        artwork[album.id] = ArtCache.store(data, for: "album:" + album.folder) ?? NSImage(data: data)
+        if on(.ownTone) { await ownToneRescan(ownToneURL) }
+        notify("New cover for \(album.title)")
     }
 
     /// Saves the release's cover as cover.jpg (replacing folder.jpg/cover.png too, so it wins).

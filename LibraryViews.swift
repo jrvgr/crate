@@ -215,6 +215,7 @@ struct AlbumTile: View {
             Color.clear.aspectRatio(1, contentMode: .fit)
                 .overlay { Cover(image: model.artwork[album.id], seed: album.id) }
                 .clipShape(.rect(cornerRadius: 14))
+                .coverDrop(album)
                 .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
                 .overlay {
                     if m == .adding || m == .removing { RoundedRectangle(cornerRadius: 14).strokeBorder(m.tint, lineWidth: 3) }
@@ -266,7 +267,8 @@ struct AlbumDetail: View {
                         .frame(width: 220, height: 220).clipShape(.rect(cornerRadius: 16))
                         .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
                         .onTapGesture { model.quickLookCover(album) }
-                        .help("Quick Look (⌘Y)")
+                        .coverDrop(album, corner: 16)
+                        .help(model.artwork[album.id] == nil ? "Drop an image here to use it as the cover" : "Quick Look (⌘Y); drop an image to replace the cover")
                     VStack(alignment: .leading, spacing: 6) {
                         Text(album.title).font(.largeTitle.bold()).lineLimit(2)
                         Button { model.path.append(.artist(album.artist)) } label: {

@@ -142,3 +142,39 @@ struct MergeSheet: View {
         if failed.isEmpty { model.notify("Merged into “\(s.title)”"); dismiss() } else { s.error = "\(failed.count) failed: \(failed[0])" }
     }
 }
+
+/// Drop an image (from Finder or a browser) on an album's cover to make it the cover.
+struct CoverDrop: ViewModifier {
+    @EnvironmentObject var model: Model
+    var album: Album
+    var corner: CGFloat
+    static let images: Set<String> = ["jpg", "jpeg", "png", "webp", "heic", "gif", "tif", "tiff"]
+
+    func body(content: Content) -> some View {
+        if model.isPodOnly(album) { content } else {
+            content
+                .overlay {
+                    if model.coverDrop == album.id {
+                        RoundedRectangle(cornerRadius: corner).strokeBorder(.tint, lineWidth: 3)
+                            .background(Color.accentColor.opacity(0.18), in: .rect(cornerRadius: corner))
+                            .overlay { Label("Use as Cover", systemImage: "photo").font(.callout.bold()).padding(8).glassEffect(.regular, in: .capsule) }
+                            .allowsHitTesting(false)
+                    }
+                }
+                .dropDestination(for: URL.self) { urls, _ in
+                    guard let u = urls.first(where: { !$0.isFileURL || Self.images.contains($0.pathExtension.lowercased()) }) else { return false }
+                    Task {
+                        let data = u.isFileURL ? try? Data(contentsOf: u) : (try? await URLSession.shared.data(from: u))?.0
+                        if let data { await model.setCover(data, for: album) }
+                    }
+                    return true
+                } isTargeted: { on in
+                    if on { model.coverDrop = album.id } else if model.coverDrop == album.id { model.coverDrop = nil }
+                }
+        }
+    }
+}
+
+extension View {
+    func coverDrop(_ album: Album, corner: CGFloat = 14) -> some View { modifier(CoverDrop(album: album, corner: corner)) }
+}
