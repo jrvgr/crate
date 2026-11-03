@@ -145,12 +145,25 @@ final class SpotifyAPI: ObservableObject {
         }
     }
 
+    /// Liked Songs (the library's saved tracks), shown as a playlist.
+    func likedPlaylist() async throws -> OTPlaylist? {
+        let j = try await get("/me/tracks?limit=1") as? [String: Any]
+        let n = j?["total"] as? Int ?? 0
+        return n > 0 ? OTPlaylist(id: -10_000, name: "Liked Songs", uri: "spotify:collection:tracks", count: n, spotifyID: "liked") : nil
+    }
+
     func tracks(_ playlistID: String) async throws -> [OTTrack] {
+        if playlistID == "liked" { return try await songs(all("/me/tracks?limit=50", limit: 10_000)) }
         // /items with "item" is the current form; /tracks with "track" is what older apps still get
         let items: [[String: Any]]
         do { items = try await all("/playlists/\(playlistID)/items?limit=50&additional_types=track", limit: 5000) }
         catch { items = try await all("/playlists/\(playlistID)/tracks?limit=100&additional_types=track", limit: 5000) }
-        return items.enumerated().compactMap { n, i in
+        return songs(items)
+    }
+
+    /// Playlist or library items → songs (the song is under "item" now, "track" before).
+    func songs(_ items: [[String: Any]]) -> [OTTrack] {
+        items.enumerated().compactMap { n, i in
             guard let t = (i["item"] ?? i["track"]) as? [String: Any], (t["type"] as? String ?? "track") == "track" else { return nil }
             let a = t["album"] as? [String: Any]
             let artists = ((t["artists"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
@@ -212,5 +225,97 @@ final class Callback: @unchecked Sendable {
         result = r
         listener.cancel()
         continuation?.resume(with: r); continuation = nil
+    }
+}
+
+// MARK: album page
+
+@MainActor
+final class SpotifyAlbumState: ObservableObject {
+    @Published var tracks: [OTTrack] = []
+    @Published var year = 0
+    @Published var loading = true
+    @Published var error: String?
+}
+
+/// A saved Spotify album: its songs (and which you have as files), play, and ways to get it.
+struct SpotifyAlbumView: View {
+    @EnvironmentObject var model: Model
+    @EnvironmentObject var spot: SpotifyAPI
+    var album: SpotifyAlbum
+    @StateObject private var s = SpotifyAlbumState()
+
+    var body: some View {
+        let lib = model.albums.first { $0.id == album.name.lowercased() }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                HStack(alignment: .bottom, spacing: 24) {
+                    CachedImage(url: model.artURL(album.artworkPath), seed: album.uri)
+                        .frame(width: 220, height: 220).clipShape(.rect(cornerRadius: 16))
+                        .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Spotify", systemImage: PluginID.spotify.icon).font(.caption.weight(.semibold)).foregroundStyle(PluginID.spotify.tint)
+                        Text(album.name).font(.largeTitle.bold()).lineLimit(2)
+                        Text(album.artist).font(.title2).foregroundStyle(.secondary)
+                        let year = album.year > 0 ? album.year : s.year
+                        Text([year > 0 ? "\(year)" : "", s.tracks.isEmpty ? "" : "\(s.tracks.count) songs",
+                              s.tracks.isEmpty ? "" : totalDuration(s.tracks.map(\.lengthMs).reduce(0, +)),
+                              lib != nil ? "in your library" : "no files yet"].filter { !$0.isEmpty }.joined(separator: " · "))
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 10) {
+                            if let lib {
+                                Button("Go to Album", systemImage: "square.stack") { model.path.append(.album(lib)) }.buttonStyle(.glassProminent)
+                            } else {
+                                if model.on(.soulseek) {
+                                    Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(album.artist, album.name, songs: s.tracks.count) }
+                                        .buttonStyle(.glassProminent)
+                                }
+                                if model.on(.youtube), spot.direct {
+                                    Button("Get from YouTube", systemImage: "play.rectangle") { Task { await model.albumFromYouTube(album) } }.buttonStyle(.glass)
+                                }
+                            }
+                            Button(model.on(.ownTone) ? "Play" : "Open in Spotify", systemImage: "play.fill") { Task { await model.playURIs([album.uri]) } }
+                                .buttonStyle(.glass)
+                        }
+                        .padding(.top, 8)
+                    }
+                    Spacer(minLength: 0)
+                }
+                if s.loading { ProgressView().frame(maxWidth: .infinity, minHeight: 100) }
+                else if let e = s.error { Label(e, systemImage: "exclamationmark.triangle").foregroundStyle(.secondary) }
+                else {
+                    VStack(spacing: 0) {
+                        ForEach(Array(s.tracks.enumerated()), id: \.offset) { i, t in
+                            let have = model.libraryTrack(for: t) != nil
+                            HStack(spacing: 12) {
+                                Text("\(i + 1)").monospacedDigit().foregroundStyle(.secondary).frame(width: 26, alignment: .trailing)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(t.title).lineLimit(1)
+                                    if t.artist != album.artist { Text(t.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+                                }
+                                Spacer()
+                                Image(systemName: have ? "music.note" : "dot.radiowaves.left.and.right")
+                                    .foregroundStyle(have ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                                    .help(have ? "You have this song as a file" : "Only on Spotify")
+                                Text(t.lengthMs > 0 ? duration(t.lengthMs) : "").monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
+                            }
+                            .padding(.horizontal, 14).padding(.vertical, 7)
+                            .background(i % 2 == 1 ? Color.primary.opacity(0.04) : .clear)
+                            .opacity(have ? 1 : 0.75)
+                        }
+                    }
+                    .clipShape(.rect(cornerRadius: 14))
+                    .glassEffect(.regular, in: .rect(cornerRadius: 14))
+                }
+            }
+            .padding(28).padding(.bottom, 60)
+        }
+        .navigationTitle(album.name)
+        .task(id: album.uri) {
+            defer { s.loading = false }
+            guard spot.direct, spot.connected else { s.error = "Connect your Spotify account (Settings › Plugins) to see the songs"; return }
+            do { let r = try await spot.album(album.uri); s.tracks = r.tracks; s.year = r.year }
+            catch { s.error = error.localizedDescription }
+        }
     }
 }

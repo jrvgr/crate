@@ -23,6 +23,7 @@ struct ContentView: View {
                     switch r {
                     case .album(let a): AlbumDetail(album: a)
                     case .artist(let name): ArtistDetail(name: name)
+                    case .spotifyAlbum(let a): SpotifyAlbumView(album: a)
                     }
                 }
             }

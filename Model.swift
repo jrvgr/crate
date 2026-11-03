@@ -10,7 +10,7 @@ enum Pane: Hashable {
 }
 
 /// Pages pushed on top of a pane.
-enum Route: Hashable { case album(Album), artist(String) }
+enum Route: Hashable { case album(Album), artist(String), spotifyAlbum(SpotifyAlbum) }
 
 /// An album artist with their albums (compilations under "Various Artists").
 struct Artist: Identifiable, Hashable {
@@ -347,7 +347,8 @@ final class Model: ObservableObject {
                     updateJob(job) { $0.detail = "Reading Spotify" }
                     do {
                         spotify = try await spotifyAPI.savedAlbums()
-                        let own = try await spotifyAPI.playlists()
+                        var own = try await spotifyAPI.playlists()
+                        if let liked = try? await spotifyAPI.likedPlaylist() { own.insert(liked, at: 0) }
                         let names = Set(own.map { $0.name.lowercased() })
                         lists = lists.filter { !names.contains($0.name.lowercased()) } + own    // OwnTone mirrors the same playlists
                         spotifyAPI.error = nil

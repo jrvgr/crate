@@ -652,10 +652,11 @@ struct SpotifyGrid: View {
             }
             LazyVGrid(columns: columns, spacing: 24) {
                 ForEach(list.prefix(600)) { a in
+                    NavigationLink(value: Route.spotifyAlbum(a)) {
                     VStack(alignment: .leading, spacing: 6) {
                         Color.clear.aspectRatio(1, contentMode: .fit)
                             .overlay {
-                                CachedImage(url: model.artURL(a.artworkPath), seed: "LibraryViews.swift:7")
+                                CachedImage(url: model.artURL(a.artworkPath), seed: a.uri)
                             }
                             .clipShape(.rect(cornerRadius: 12))
                             .overlay(alignment: .topTrailing) {
@@ -668,6 +669,9 @@ struct SpotifyGrid: View {
                         Text(a.name).font(.headline).lineLimit(1)
                         Text("\(a.artist) · \(a.trackCount) saved").font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                     }
+                    .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
                     .contextMenu {
                         if model.on(.soulseek) {
                             Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(a.artist, a.name) }

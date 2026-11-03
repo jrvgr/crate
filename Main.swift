@@ -187,6 +187,10 @@ enum Main {
                 do {
                     let lists = try await sp.playlists()
                     print("\(lists.count) playlists")
+                    if let l = try await sp.likedPlaylist() {
+                        let ts = try await sp.tracks("liked")
+                        print("Liked Songs: \(l.count) total, loaded \(ts.count), first: \(ts.first.map { "\($0.artist) – \($0.title)" } ?? "-")")
+                    }
                     for p in lists.prefix(3) {
                         print("  \(p.name) [\(p.count)] art: \(p.artwork.isEmpty ? "none" : "yes")")
                         do { let ts = try await sp.tracks(p.spotifyID!); print("    \(ts.count) songs, first: \(ts.first.map { "\($0.artist) – \($0.title) (\($0.album))" } ?? "-")") }
