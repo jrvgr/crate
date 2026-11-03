@@ -197,7 +197,7 @@ struct ChipButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                Image(systemName: icon)
+                Image(symbol: icon)
                 Text(title).lineLimit(1)
                 SidebarMark(mark: mark)
             }

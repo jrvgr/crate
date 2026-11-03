@@ -46,6 +46,31 @@ enum ArtCache {
         return img
     }
 
+    // An album's cover is cached with where it came from (the cover file's name and size, or "embedded"), so a
+    // cover.jpg that turns up or changes later is read again instead of the old picture staying.
+
+    nonisolated static func albumSource(_ folder: String) -> String {
+        for n in ["cover.jpg", "folder.jpg", "cover.png", "folder.png", "front.jpg"] {
+            if let size = (try? FileManager.default.attributesOfItem(atPath: folder + "/" + n))?[.size] as? Int { return "\(n):\(size)" }
+        }
+        return "embedded"
+    }
+
+    /// The cached cover for an album folder, if it still matches the folder's cover file. Reads the share: off the main thread.
+    static func albumImage(_ folder: String) -> NSImage? {
+        let key = "album:" + folder
+        guard (try? String(contentsOf: file(key).appendingPathExtension("src"), encoding: .utf8)) == albumSource(folder) else { return nil }
+        return image(key)
+    }
+
+    @discardableResult
+    static func storeAlbum(_ data: Data, folder: String) -> NSImage? {
+        let key = "album:" + folder
+        let img = store(data, for: key)
+        try? albumSource(folder).write(to: file(key).appendingPathExtension("src"), atomically: true, encoding: .utf8)
+        return img
+    }
+
     static func remove(_ key: String) {
         memory.removeObject(forKey: key as NSString)
         try? FileManager.default.removeItem(at: file(key))

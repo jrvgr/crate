@@ -49,6 +49,7 @@ final class Subsonic: ObservableObject {
 
     /// Library path → the server's song, from the last load.
     private(set) var songs: [String: SubsonicSong] = [:]
+    private(set) var rawPaths: [String] = []         // a few paths as the server reports them (--subsonic-check)
     private var paths: [String: String] = [:]          // song id → library path
     /// Album + title → the server's song: matches files Crate found itself when the server doesn't report real paths.
     private var byKey: [String: SubsonicSong] = [:]
@@ -124,6 +125,7 @@ final class Subsonic: ObservableObject {
         if musicFolder.isEmpty, let root = Self.commonFolder(raw.compactMap { $0["path"] as? String }.filter { $0.hasPrefix("/") }) {
             musicFolder = LibraryLoader.localPath(root)
         }
+        rawPaths = raw.prefix(5).map { ($0["path"] as? String) ?? "" }
         let folder = musicFolder, cache = Self.cache.path
         let found = await Task.detached { Self.tracks(raw, folder: folder, cache: cache) }.value
         songs = Dictionary(found.map { ($0.0.path, $0.1) }, uniquingKeysWith: { a, _ in a })
@@ -175,7 +177,8 @@ final class Subsonic: ObservableObject {
     /// Server songs → library tracks. A song is used from the share when its album's first file is
     /// there (one look per folder, not per song); otherwise it gets a path in the download cache.
     nonisolated static func tracks(_ raw: [[String: Any]], folder: String, cache: String) -> [(LibTrack, SubsonicSong)] {
-        var seen: [String: Bool] = [:]
+        var listings: [String: [String]] = [:]      // each folder's files, read once
+        let bare = { (x: String) in x.lowercased().filter { $0.isLetter || $0.isNumber } }
         return raw.compactMap { s in
             guard let id = s["id"] as? String else { return nil }
             let str = { (k: String) in (s[k] as? String) ?? "" }
@@ -183,10 +186,22 @@ final class Subsonic: ObservableObject {
             let p = str("path")
             let local = p.hasPrefix("/") ? LibraryLoader.localPath(p) : folder + "/" + p
             let dir = (local as NSString).deletingLastPathComponent
-            if seen[dir] == nil { seen[dir] = !p.isEmpty && FileManager.default.fileExists(atPath: local) }
+            if listings[dir] == nil { listings[dir] = p.isEmpty ? [] : (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] }
+            let files = listings[dir]!
+            // without Report Real Path the server makes up file names ("01-01 - Title.mp3"): the folder is right, so
+            // take the file in it whose name has the title
+            var onShare: String?
+            if files.contains((local as NSString).lastPathComponent) { onShare = local }
+            else if !files.isEmpty, !str("title").isEmpty {
+                let ext = (p as NSString).pathExtension.lowercased(), title = bare(str("title"))
+                let hits = files.filter { ($0 as NSString).pathExtension.lowercased() == ext && bare(($0 as NSString).deletingPathExtension).contains(title) }
+                // "… - 05 - Title.flac": a name ending in the title beats one that only has it (the album's name can be in every file)
+                let ends = hits.filter { bare(($0 as NSString).deletingPathExtension).hasSuffix(title) }
+                if let f = (ends.isEmpty ? hits : ends).min(by: { $0.count < $1.count }) { onShare = dir + "/" + f }
+            }
             let albumID = str("albumId").isEmpty ? "unknown" : str("albumId")
             let suffix = str("suffix").isEmpty ? (p as NSString).pathExtension : str("suffix")
-            let path = seen[dir]! ? local : cache + "/" + albumID + "/" + id + "." + suffix
+            let path = onShare ?? cache + "/" + albumID + "/" + id + "." + suffix
             let albumArtist = [str("displayAlbumArtist"), ((s["albumArtists"] as? [[String: Any]])?.first?["name"] as? String) ?? "", str("artist")]
                 .first { !$0.isEmpty } ?? ""
             let added = ISO8601DateFormatter().date(from: String(str("created").prefix(19)) + "Z")

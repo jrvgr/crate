@@ -46,7 +46,8 @@ struct CrateApp: App {
         MenuBarExtra(isInserted: $menuBar) {
             MenuBarView().environmentObject(model).environmentObject(model.slsk).environmentObject(model.player).environmentObject(model.yt)
         } label: {
-            Image(systemName: model.syncing ? "arrow.triangle.2.circlepath" : model.ipod == nil ? "ipod" : model.pendingCount > 0 ? "ipod.badge.plus" : "ipod")
+            if model.syncing { Image(systemName: "arrow.triangle.2.circlepath") }
+            else { Image.pod(model.ipod?.glyph, height: 16, badge: model.ipod != nil && model.pendingCount > 0) }
         }
         .menuBarExtraStyle(.window)
         Settings { SettingsView().environmentObject(model).environmentObject(model.slsk).environmentObject(model.spotifyAPI).environmentObject(model.player).environmentObject(model.yt) }
@@ -621,6 +622,10 @@ enum Main {
                     let here = songs.filter { !s.needsDownload($0.path) }.count
                     print("\(songs.count) songs, \(here) with a file on this Mac, \(songs.count - here) to download")
                     songs.prefix(3).forEach { print("  \($0.artist) – \($0.album) – \($0.title) | \($0.path)") }
+                    print("music folder: \(s.musicFolder)"); s.rawPaths.forEach { print("  server path: \($0)") }
+                    let dup = Dictionary(grouping: songs.filter { !s.needsDownload($0.path) }, by: \.path).filter { $0.value.count > 1 }
+                    print("\(dup.count) files used by more than one song")
+                    dup.prefix(8).forEach { print("  \($0.key): " + $0.value.map(\.title).joined(separator: " / ")) }
                     let lists = try await s.playlists()
                     print("\(lists.count) playlists", lists.prefix(5).map(\.name).joined(separator: ", "))
                 } catch { print("library:", error.localizedDescription) }

@@ -35,10 +35,16 @@ struct RecentView: View {
                     VStack(alignment: .leading, spacing: 14) {
                         Text(title(month)).font(.title2.bold())
                         LazyVGrid(columns: columns, spacing: 26) {
-                            ForEach(list) { a in
-                                NavigationLink(value: Route.album(a)) { AlbumTile(album: a) }
-                                    .buttonStyle(.plain)
-                                    .contextMenu { AlbumMenu(album: a) }
+                            ForEach(Self.items(list)) { item in
+                                switch item {
+                                case .album(let a):
+                                    NavigationLink(value: Route.album(a)) { AlbumTile(album: a) }
+                                        .buttonStyle(.plain)
+                                        .contextMenu { AlbumMenu(album: a) }
+                                case .singles(let artist, let singles):
+                                    NavigationLink(value: Route.artist(artist)) { SinglesTile(artist: artist, albums: singles) }
+                                        .buttonStyle(.plain)
+                                }
                             }
                         }
                     }
@@ -49,10 +55,57 @@ struct RecentView: View {
         .navigationTitle("Recently Added")
     }
 
+    enum Item: Identifiable {
+        case album(Album), singles(String, [Album])
+        var id: String { switch self { case .album(let a): a.id; case .singles(let n, _): "singles:" + n } }
+    }
+
+    /// A month's albums, with an artist's singles (three songs or fewer) folded into one stack when
+    /// there are three or more of them, where the first of them came in.
+    static func items(_ list: [Album]) -> [Item] {
+        let isSingle = { (a: Album) in a.tracks.count <= 3 }
+        let counts = Dictionary(grouping: list.filter(isSingle)) { $0.artist.lowercased() }.mapValues(\.count)
+        var out: [Item] = [], placed: Set<String> = []
+        for a in list {
+            let k = a.artist.lowercased()
+            guard isSingle(a), (counts[k] ?? 0) >= 3 else { out.append(.album(a)); continue }
+            if placed.insert(k).inserted { out.append(.singles(a.artist, list.filter { isSingle($0) && $0.artist.lowercased() == k })) }
+        }
+        return out
+    }
+
     func title(_ d: Date) -> String {
         let cal = Calendar.current
         if cal.isDate(d, equalTo: Date(), toGranularity: .month) { return "This Month" }
         return d.formatted(cal.isDate(d, equalTo: Date(), toGranularity: .year) ? .dateTime.month(.wide) : .dateTime.month(.wide).year())
+    }
+}
+
+/// An artist's singles as one stack of covers; opens the artist.
+struct SinglesTile: View {
+    @EnvironmentObject var model: Model
+    var artist: String
+    var albums: [Album]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ZStack {
+                ForEach(Array(albums.prefix(3).enumerated().reversed()), id: \.offset) { i, a in
+                    Color.clear.aspectRatio(1, contentMode: .fit)
+                        .overlay { Cover(image: model.artwork[a.id], seed: a.id) }
+                        .clipShape(.rect(cornerRadius: 14))
+                        .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
+                        .scaleEffect(1 - CGFloat(i) * 0.06)
+                        .offset(y: CGFloat(i) * -9)
+                        .brightness(Double(i) * -0.12)
+                }
+            }
+            .padding(.top, 9)
+            Text(artist).font(.headline).lineLimit(1)
+            Text("\(albums.count) singles").font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+        }
+        .contentShape(.rect)
+        .help(albums.map(\.title).joined(separator: ", "))
     }
 }
 
@@ -115,14 +168,14 @@ struct IPodView: View {
             if model.brokenPod != nil || model.podRepairMessage != nil {
                 DiskRepairCard().padding(28).frame(maxHeight: .infinity, alignment: .top)
             } else {
-                ContentUnavailableView("No iPod connected", systemImage: "ipod", description: Text("Connect it over USB; it shows up here when it's mounted."))
+                ContentUnavailableView { Label { Text("No iPod connected") } icon: { Image.pod(height: 44) } } description: { Text("Connect it over USB; it shows up here when it's mounted.") }
             }
         }
     }
 
     func header(_ i: IPodInfo, _ db: ITunesDB) -> some View {
         HStack(spacing: 22) {
-            LiveIPod(height: 220)
+            PodPicture(height: 220)
             VStack(alignment: .leading, spacing: 6) {
                 Text(i.modelName).font(.caption.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
                 Text(model.podName).font(.largeTitle.bold())
@@ -188,7 +241,7 @@ struct IPodView: View {
             HStack {
                 Text("Waiting for Sync").font(.headline)
                 Spacer()
-                Button("Discard") { model.discardChanges() }.buttonStyle(.link)
+                Button("Discard") { model.discardChanges() }.buttonStyle(.glass).controlSize(.small)
                 Button("Review & Sync…") { model.reviewSync() }.buttonStyle(.glassProminent).controlSize(.small)
             }
             .padding(14)
@@ -240,6 +293,7 @@ struct IPodView: View {
                 SettingRow(icon: "music.note.list", title: "Save On-The-Go lists", detail: "On-The-Go becomes an “On-The-Go N” playlist (playlists saved or changed on the iPod are always kept)") {
                     Toggle("", isOn: $model.podSettings.importOnTheGo).toggleStyle(.switch).labelsHidden()
                 }
+                if model.froggerFeatures {
                 Divider().padding(.leading, 50)
                 SettingRow(icon: "eye.slash", title: "Hidden playlists",
                            detail: "Right-click a playlist › Hide Its Songs from iPod Library. Songs only in those playlists stay out of Artists and Albums (needs Frogger on the iPod)") {
@@ -248,6 +302,7 @@ struct IPodView: View {
                         Text("Name ~").tag(true)
                     }
                     .labelsHidden().fixedSize()
+                }
                 }
                 Divider().padding(.leading, 50)
                 SettingRow(icon: "person.2", title: "File collaborations under the main artist",
@@ -271,7 +326,7 @@ struct IPodView: View {
                     Toggle("", isOn: $model.podSettings.ejectAfterSync).toggleStyle(.switch).labelsHidden()
                 }
             }
-            FroggerSettings()
+            if model.froggerFeatures { FroggerSettings() }
             CalendarSettings()
         }
     }
@@ -396,6 +451,17 @@ struct MaintenanceRow<Actions: View>: View {
 // MARK: songs
 
 /// The search field at the left of a list's filter bar.
+extension View {
+    /// A Menu drawn as a glass button, like the buttons around it: Menu ignores `.buttonStyle(.glass)` and
+    /// comes out as a flat grey button.
+    func glassMenu(indicator: Bool = true) -> some View {
+        menuStyle(.button).buttonStyle(.plain).menuIndicator(indicator ? .visible : .hidden)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .glassEffect(.regular.interactive(), in: .capsule)
+            .fixedSize()
+    }
+}
+
 struct FilterField: View {
     var prompt: String
     @Binding var text: String
@@ -429,17 +495,21 @@ final class SongsUI: ObservableObject {
     @Published var show = Show.all
     @Published var genre = ""                  // "" = every genre
     @Published var kind = ""                   // file extension, "" = every kind
-    @Published var minRating = 0
+    @Published var stars: Set<Int> = []         // ratings to show (0 = unrated); empty: any
     @Published var unplayed = false
+    // which columns show (right-click the header); remembered
+    @Published var columns: TableColumnCustomization<LibTrack> = {
+        (UserDefaults.standard.data(forKey: "songColumns")).flatMap { try? JSONDecoder().decode(TableColumnCustomization<LibTrack>.self, from: $0) } ?? .init()
+    }() { didSet { UserDefaults.standard.set(try? JSONEncoder().encode(columns), forKey: "songColumns") } }
 
     enum Show: String, CaseIterable { case all = "All Songs", onIPod = "On iPod", notOnIPod = "Not on iPod", queued = "Waiting for Sync" }
 
-    var filtering: Bool { !query.isEmpty || show != .all || !genre.isEmpty || !kind.isEmpty || minRating > 0 || unplayed }
+    var filtering: Bool { !query.isEmpty || show != .all || !genre.isEmpty || !kind.isEmpty || !stars.isEmpty || unplayed }
     /// "Electronic, IDM; Ambient" counts as three genres.
     static func genres(_ s: String) -> [String] {
         s.split { $0 == "," || $0 == ";" }.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
-    func clear() { query = ""; show = .all; genre = ""; kind = ""; minRating = 0; unplayed = false }
+    func clear() { query = ""; show = .all; genre = ""; kind = ""; stars = []; unplayed = false }
 
     // The filtered, sorted rows and the genre/kind menus, kept until their inputs change: the whole library
     // was filtered and sorted again on every redraw (any change anywhere in Crate).
@@ -465,36 +535,57 @@ struct SongsView: View {
 
     var body: some View {
         let rows = ui.rows(rowsKey) { filtered.sorted(using: ui.sort) }
-        Table(rows, selection: $ui.selection, sortOrder: $ui.sort) {
+        Table(rows, selection: $ui.selection, sortOrder: $ui.sort, columnCustomization: $ui.columns) {
             TableColumn("") { (t: LibTrack) in
+                // on the iPod is the usual state: faint; queued, partly and removing stand out, as on album covers
                 let m = model.songMark(t)
                 Button { model.toggleSong(t) } label: {
-                    Image(systemName: m.icon.map { $0 == "checkmark" ? "checkmark.circle.fill" : $0 + ".circle.fill" } ?? "plus.circle")
-                        .foregroundStyle(m == .none ? AnyShapeStyle(.quaternary) : AnyShapeStyle(m.tint))
+                    Image(systemName: m.icon.map { $0 == "checkmark" ? "checkmark.circle" : $0 + ".circle.fill" } ?? "plus.circle")
+                        .foregroundStyle(m == .none ? AnyShapeStyle(.quaternary) : m == .onIPod ? AnyShapeStyle(.tertiary) : AnyShapeStyle(m.tint))
                 }
                 .buttonStyle(.plain)
                 .help(m == .none ? "Add this song to the iPod" : m.help)
             }
-            .width(22)
-            TableColumn("Title", value: \.title)
-            TableColumn("Artist", value: \.artist) { (t: LibTrack) in Text(t.trackArtist.isEmpty ? t.artist : t.trackArtist) }
-            TableColumn("Album", value: \.album)
-            TableColumn("Genre", value: \.genre).width(min: 60, ideal: 90)
-            TableColumn("Year", value: \.year) { (t: LibTrack) in Text(t.year > 0 ? String(t.year) : "").monospacedDigit() }.width(44)
-            TableColumn("Time", value: \.lengthMs) { (t: LibTrack) in Text(t.lengthMs > 0 ? duration(t.lengthMs) : "").monospacedDigit() }.width(48)
-            Group {     // (a Table takes 10 columns per block)
-                TableColumn("Plays") { (t: LibTrack) in Text(model.stat(t).plays > 0 ? "\(model.stat(t).plays)" : "").monospacedDigit().foregroundStyle(.secondary) }.width(40)
-                TableColumn("Skips") { (t: LibTrack) in Text(model.stat(t).skips > 0 ? "\(model.stat(t).skips)" : "").monospacedDigit().foregroundStyle(.secondary) }.width(40)
+            .width(22).customizationID("ipod").disabledCustomizationBehavior(.visibility)
+            TableColumn("Title", value: \.title) { (t: LibTrack) in
+                HStack(spacing: 8) {
+                    Group {
+                        if let img = model.artwork[t.album.lowercased()] { Image(nsImage: img).resizable().scaledToFill() }
+                        else { Color.secondary.opacity(0.15) }
+                    }
+                    .frame(width: 26, height: 26).clipShape(.rect(cornerRadius: 4))
+                    Text(t.title).lineLimit(1)
+                    if model.player.current?.id == t.id { Image(systemName: "speaker.wave.2.fill").font(.caption).foregroundStyle(.tint) }
+                }
             }
-            TableColumn("Rating") { (t: LibTrack) in StarPicker(value: model.rating(t)) { model.rate(t, $0) } }.width(64)
-            TableColumn("Kind", value: \.ext) { (t: LibTrack) in Text(t.ext.uppercased()).foregroundStyle(.secondary) }.width(44)
+            .width(min: 160, ideal: 280).customizationID("title").disabledCustomizationBehavior(.visibility)
+            TableColumn("Artist", value: \.artist) { (t: LibTrack) in Text(t.trackArtist.isEmpty ? t.artist : t.trackArtist).foregroundStyle(.secondary) }
+                .customizationID("artist")
+            TableColumn("Album", value: \.album) { (t: LibTrack) in Text(t.album).foregroundStyle(.secondary) }
+                .customizationID("album")
+            TableColumn("Genre", value: \.genre) { (t: LibTrack) in Text(t.genre).foregroundStyle(.secondary) }
+                .width(min: 60, ideal: 90).customizationID("genre").defaultVisibility(.hidden)
+            TableColumn("Year", value: \.year) { (t: LibTrack) in Text(t.year > 0 ? String(t.year) : "").monospacedDigit().foregroundStyle(.secondary) }
+                .width(44).customizationID("year")
+            TableColumn("Time", value: \.lengthMs) { (t: LibTrack) in Text(t.lengthMs > 0 ? duration(t.lengthMs) : "").monospacedDigit().foregroundStyle(.secondary) }
+                .width(48).customizationID("time")
+            Group {     // (a Table takes 10 columns per block)
+                TableColumn("Plays") { (t: LibTrack) in Text(model.stat(t).plays > 0 ? "\(model.stat(t).plays)" : "").monospacedDigit().foregroundStyle(.secondary) }
+                    .width(40).customizationID("plays")
+                TableColumn("Skips") { (t: LibTrack) in Text(model.stat(t).skips > 0 ? "\(model.stat(t).skips)" : "").monospacedDigit().foregroundStyle(.secondary) }
+                    .width(40).customizationID("skips").defaultVisibility(.hidden)
+            }
+            TableColumn("Rating") { (t: LibTrack) in StarPicker(value: model.rating(t)) { model.rate(t, $0) } }.width(64).customizationID("rating")
+            TableColumn("Kind", value: \.ext) { (t: LibTrack) in Text(t.ext.uppercased()).font(.caption).foregroundStyle(.tertiary) }
+                .width(44).customizationID("kind").defaultVisibility(.hidden)
         }
+        .tableStyle(.inset)
         .contextMenu(forSelectionType: LibTrack.ID.self) { ids in
             let picked = model.libTracks.filter { ids.contains($0.id) }
             let off = picked.filter { model.songMark($0) == .none }, on = picked.filter { model.songMark($0) == .onIPod }
             if !off.isEmpty { Button("Add \(off.count) Song\(off.count == 1 ? "" : "s") to iPod", systemImage: "plus.circle") { off.forEach(model.toggleSong) } }
             if !on.isEmpty { Button("Remove \(on.count) Song\(on.count == 1 ? "" : "s") from iPod", systemImage: "minus.circle") { on.forEach(model.toggleSong) } }
-            if !on.isEmpty {
+            if !on.isEmpty, model.froggerFeatures {
                 let hidden = on.allSatisfy(model.isHidden)
                 Button(hidden ? "Show in iPod Library" : "Hide from iPod Library", systemImage: hidden ? "eye" : "eye.slash") {
                     model.setHidden(on, !hidden)
@@ -520,9 +611,9 @@ struct SongsView: View {
     var rowsKey: Int {
         var h = Hasher()
         h.combine(model.libraryVersion); h.combine(ui.sort); h.combine(ui.query); h.combine(ui.show)
-        h.combine(ui.genre); h.combine(ui.kind); h.combine(ui.minRating); h.combine(ui.unplayed)
+        h.combine(ui.genre); h.combine(ui.kind); h.combine(ui.stars); h.combine(ui.unplayed)
         if ui.show != .all || ui.unplayed { h.combine(model.syncVersion) }
-        if ui.minRating > 0 { h.combine(model.ratings) }
+        if !ui.stars.isEmpty { h.combine(model.ratings) }
         return h.finalize()
     }
 
@@ -537,42 +628,64 @@ struct SongsView: View {
             case .notOnIPod: if model.songMark(t) != .none { return false }
             case .queued: if model.songMark(t) != .adding && model.songMark(t) != .removing { return false }
             }
-            if ui.minRating > 0 && model.rating(t) < ui.minRating { return false }
+            if !ui.stars.isEmpty && !ui.stars.contains(model.rating(t)) { return false }
             if ui.unplayed && model.stat(t).plays > 0 { return false }
             return matchesQuery(ui.query, [t.title, t.artist, t.trackArtist, t.album, t.genre, t.year > 0 ? String(t.year) : ""])
         }
     }
 
+    /// The same glass controls as the other pages: a search capsule and menus that say what they're set to.
     var filterBar: some View {
         let (genres, kinds) = ui.menus(model.libraryVersion, model.libTracks)
-        return HStack(spacing: 10) {
+        return HStack(spacing: 8) {
             FilterField(prompt: "Title, artist, album, genre, year", text: $ui.query)
-            Picker("Show", selection: $ui.show) { ForEach(SongsUI.Show.allCases, id: \.self) { Text($0.rawValue) } }
-                .labelsHidden().fixedSize()
-            Picker("Genre", selection: $ui.genre) {
-                Text("All Genres").tag("")
-                Divider()
-                ForEach(genres, id: \.self) { Text($0).tag($0) }
+            Menu {
+                Picker("Show", selection: $ui.show) { ForEach(SongsUI.Show.allCases, id: \.self) { Text($0.rawValue) } }.pickerStyle(.inline)
+            } label: { Text(ui.show.rawValue) }
+            .glassMenu()
+            Menu {
+                Picker("Genre", selection: $ui.genre) {
+                    Text("All Genres").tag("")
+                    Divider()
+                    ForEach(genres, id: \.self) { Text($0).tag($0) }
+                }
+                .pickerStyle(.inline)
+            } label: { Text(ui.genre.isEmpty ? "All Genres" : ui.genre) }
+            .glassMenu()
+            Menu {
+                // pick any mix of ratings ("★★★★★ and ★★★★"); none ticked shows every song
+                Section("Rating") {
+                    ForEach([5, 4, 3, 2, 1, 0], id: \.self) { n in
+                        Toggle(n == 0 ? "Unrated" : String(repeating: "★", count: n), isOn: Binding(
+                            get: { ui.stars.contains(n) },
+                            set: { if $0 { ui.stars.insert(n) } else { ui.stars.remove(n) } }))
+                    }
+                    if !ui.stars.isEmpty { Button("Any Rating") { ui.stars = [] } }
+                }
+                Picker("Kind", selection: $ui.kind) {
+                    Text("All Kinds").tag("")
+                    ForEach(kinds, id: \.self) { Text($0.uppercased()).tag($0) }
+                }
+                .pickerStyle(.inline)
+                Toggle("Never Played", isOn: $ui.unplayed)
+            } label: {
+                Label(moreLabel, systemImage: "line.3.horizontal.decrease")
+                    .labelStyle(.titleAndIcon)
             }
-            .labelsHidden().fixedSize()
-            Picker("Kind", selection: $ui.kind) {
-                Text("All Kinds").tag("")
-                Divider()
-                ForEach(kinds, id: \.self) { Text($0.uppercased()).tag($0) }
-            }
-            .labelsHidden().fixedSize()
-            Picker("Rating", selection: $ui.minRating) {
-                Text("Any Rating").tag(0)
-                ForEach(1...5, id: \.self) { n in Text(String(repeating: "★", count: n) + (n < 5 ? " or more" : "")).tag(n) }
-            }
-            .labelsHidden().fixedSize()
-            Toggle("Never Played", isOn: $ui.unplayed).toggleStyle(.button)
+            .glassMenu()
             Spacer()
-            if ui.filtering { Button("Clear") { ui.clear() }.buttonStyle(.borderless) }
+            if ui.filtering { Button("Clear") { ui.clear() }.buttonStyle(.glass) }
         }
         .controlSize(.small)
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(.bar)
+        .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 6)
+    }
+
+    /// The extra filters, as the menu's label: "Filters" or what's set ("★★★ · FLAC · Never Played").
+    var moreLabel: String {
+        let rated = ui.stars.sorted(by: >).map { $0 == 0 ? "Unrated" : String(repeating: "★", count: $0) }
+        let parts = [rated.count > 2 ? "\(rated.count) ratings" : rated.joined(separator: ", "), ui.kind.uppercased(), ui.unplayed ? "Never Played" : ""]
+            .filter { !$0.isEmpty }
+        return parts.isEmpty ? "Filters" : parts.joined(separator: " · ")
     }
 
     func album(_ id: LibTrack.ID?) -> Album? {

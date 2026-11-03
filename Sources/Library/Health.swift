@@ -38,7 +38,9 @@ extension Model {
         if Set(titles).count < titles.count, Set(a.tracks.map(\.discNumber)).count <= 1 { out.append(.duplicates) }
         let kbps = { (t: LibTrack) in ((sizes[t.path] ?? nil) ?? 0) * 8 / max(t.lengthMs, 1) }
         if a.tracks.contains(where: { $0.ext == "mp3" && $0.lengthMs > 0 && (1..<160).contains(kbps($0)) }) { out.append(.lowQuality) }
-        if a.tracks.contains(where: { sizes[$0.path].map { $0 == nil } ?? false }) { out.append(.missing) }
+        // server songs not on the share live in the download cache until a sync needs them: not missing
+        let cache = Subsonic.cache.path
+        if a.tracks.contains(where: { !$0.path.hasPrefix(cache) && (sizes[$0.path].map { $0 == nil } ?? false) }) { out.append(.missing) }
         return out
     }
 
@@ -63,6 +65,7 @@ final class HealthUI: ObservableObject {
     @Published var cache: [(Album, [Issue])] = []
     var sizes: [String: Int?] = [:]                   // file probes so far
     @Published var dedupe = false
+    @Published var genres = false
 }
 
 struct HealthView: View {
@@ -112,6 +115,21 @@ struct HealthView: View {
                     }
                     .padding(14).glassEffect(.regular, in: .rect(cornerRadius: 16))
                 }
+                let genreGroups = model.loading || ui.filter != nil ? [] : model.genreGroups
+                if !genreGroups.isEmpty {
+                    HStack(spacing: 12) {
+                        Image(systemName: "guitars").font(.title2).foregroundStyle(.tint)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Merge \(genreGroups.count) genre spelling\(genreGroups.count == 1 ? "" : "s")").font(.headline)
+                            Text(genreGroups.prefix(3).map { $0.variants.map(\.name).joined(separator: " / ") }.joined(separator: ", ")
+                                 + (genreGroups.count > 3 ? "…" : ""))
+                                .font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer()
+                        Button("Review Genres…") { ui.genres = true }.buttonStyle(.glass)
+                    }
+                    .padding(14).glassEffect(.regular, in: .rect(cornerRadius: 16))
+                }
                 LazyVStack(spacing: 8) {
                     ForEach(shown, id: \.0.id) { a, issues in
                         HStack(spacing: 12) {
@@ -128,13 +146,14 @@ struct HealthView: View {
                             }
                             Spacer()
                             if issues.contains(.incomplete), model.on(.soulseek), let full = model.expectedSongs(a) {
-                                Button("Complete") { model.findOnSoulseek(a.artist, a.title, songs: full) }.buttonStyle(.glass)
+                                Button("Complete", systemImage: "arrow.down.circle") { model.findOnSoulseek(a.artist, a.title, songs: full) }.buttonStyle(.glass)
                                     .help("Search Soulseek for a copy with all \(full) songs")
                             }
                             if issues.contains(where: \.metadata) {
-                                Button { model.lookupAlbum = a } label: { Image(systemName: "sparkle.magnifyingglass") }.buttonStyle(.glass).help("Find Metadata…")
+                                Button("Find Metadata", systemImage: "sparkle.magnifyingglass") { model.lookupAlbum = a }.buttonStyle(.glass)
+                                    .help("Look the album up on MusicBrainz and iTunes")
                             }
-                            Button { model.editAlbum = a } label: { Image(systemName: "pencil") }.buttonStyle(.glass).help("Edit Tags…")
+                            Button("Edit Tags", systemImage: "pencil") { model.editAlbum = a }.buttonStyle(.glass).help("Edit the album's tags by hand")
                             Button { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: a.folder) } label: { Image(systemName: "folder") }
                                 .buttonStyle(.glass).help("Show in Finder")
                         }
@@ -148,6 +167,7 @@ struct HealthView: View {
             .padding(24).padding(.bottom, 60)
         }
         .sheet(isPresented: $ui.dedupe) { DedupeSheet() }
+        .sheet(isPresented: $ui.genres) { GenreMergeSheet().environmentObject(model) }
         .navigationTitle("Needs Attention")
         .navigationSubtitle("\(all.count) album\(all.count == 1 ? "" : "s")")
         .task(id: "\(model.albums.count)-\(model.artwork.count)-\(model.metadata.count)-\(model.loading)") {

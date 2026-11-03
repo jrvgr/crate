@@ -328,7 +328,7 @@ struct YouTubeView: View {
                 ContentUnavailableView("YouTube", systemImage: "exclamationmark.triangle", description: Text(e))
             } else if yt.results.isEmpty {
                 ContentUnavailableView("Search YouTube", systemImage: PluginID.youtube.icon,
-                                       description: Text("Downloads the AAC audio (no conversion for the iPod), tags it and adds it to the library."))
+                                       description: Text("Downloads the song, tags it with its cover and adds it to your library."))
             } else {
                 if !yt.linkTitle.isEmpty {
                     HStack {

@@ -3,13 +3,16 @@ import AppKit
 
 /// What the detail column shows; the iPod's state is shown on every item as well.
 enum Pane: Hashable {
-    case recent, albums, artists, songs, health, review, ipod
+    case recent, albums, artists, songs, playlists, health, review, ipod
     case smart(UUID)
     case spotify, appleMusic, soulseek, downloads, youtube
     case playlist(Int), podPlaylist(UInt64), cratePlaylist(UUID)
 }
 
 /// Pages pushed on top of a pane.
+/// Where the window is: a page and what's open on it. Back and forward go through these.
+struct Place: Equatable { var pane: Pane?; var path: [Route] }
+
 enum Route: Hashable { case album(Album), artist(String), spotifyAlbum(SpotifyAlbum), amAlbum(AMAlbum) }
 
 /// An album artist with their albums (compilations under "Various Artists").
@@ -68,9 +71,10 @@ struct SyncReport {
 @MainActor
 final class Model: ObservableObject {
     // core settings
-    @AppStorage("ownToneURL") var ownToneURL = "http://host:3689"
+    @AppStorage("ownToneURL") var ownToneURL = ""
     @AppStorage("discogsToken") var discogsToken = ""
     @AppStorage("extraFolders") var foldersText = ""
+    @AppStorage("pinnedPlaylists") var pinnedText = ""         // playlists pinned to the sidebar (Pane.pinKey)
     @AppStorage("importFolder") var importFolder = ""          // "": the music folder (importRoot)
 
     @Published var plugins: Set<PluginID> = PluginStore.load() { didSet { PluginStore.save(plugins) } }
@@ -155,6 +159,12 @@ final class Model: ObservableObject {
     var diskCheck: Task<Void, Never>?
     private var diskWatch: DiskWatch?
     @Published var ratings: [String: Int] = Store.load("ratings.json", [:])        // library key → stars
+    /// Frogger's extras (sticker, hiding songs, cover art for its Now Playing page, its iPod settings); off for a stock iPod.
+    @Published var froggerFeatures = UserDefaults.standard.object(forKey: "froggerFeatures") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(froggerFeatures, forKey: "froggerFeatures") }
+    }
+    /// The iPod wears the frog sticker when it runs Frogger.
+    var froggerSticker: Bool { froggerFeatures && podSettings.frogger == .installed }
     @Published var keptArtists: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "keptArtists") ?? [])
     @Published var brokenFiles: [String: String] = [:]
     @Published var checkingFiles = false
@@ -185,6 +195,9 @@ final class Model: ObservableObject {
     @Published var pane: Pane? = .albums { didSet { if pane != oldValue { path = [] } } }
     @Published var path: [Route] = []
     @Published var search = ""
+    @Published var back: [Place] = []         // the toolbar's back and forward, across pages
+    @Published var forward: [Place] = []
+    var travelling = false
     @Published var albumFilter = AlbumFilter.all
     @Published var albumSort = AlbumSort.artist
     @AppStorage("artistView") var artistView = "grid"        // "grid" or "list"
@@ -510,7 +523,7 @@ final class Model: ObservableObject {
         flush(&batch)
         // cached copies first (quick), then whatever is still missing from the files themselves
         let cached = await Task.detached { [albums] in
-            albums.compactMap { a in ArtCache.image("album:" + a.folder).map { (a.id, $0) } }
+            albums.compactMap { a in ArtCache.albumImage(a.folder).map { (a.id, $0) } }
         }.value
         artwork.merge(cached.filter { artwork[$0.0] == nil }, uniquingKeysWith: { a, _ in a })
         for a in albums where artwork[a.id] == nil {
@@ -520,7 +533,7 @@ final class Model: ObservableObject {
                 data = await subsonic.cover(forPath: first)      // a server album not downloaded yet (checked off the main thread: the share)
             }
             if let d = data,
-               let img = await Task.detached(operation: { ArtCache.store(d, for: "album:" + a.folder) ?? NSImage(data: d) }).value {
+               let img = await Task.detached(operation: { ArtCache.storeAlbum(d, folder: a.folder) ?? NSImage(data: d) }).value {
                 batch.albums[a.id] = img
                 if batch.due { flush(&batch) }
             }
@@ -652,7 +665,7 @@ final class Model: ObservableObject {
         rebuild()
         if let newID = fresh.values.first?.album.lowercased() {
             let folder = albums.first { $0.id == newID }?.folder ?? ""
-            if let d = cover, let img = ArtCache.store(d, for: "album:" + folder) ?? NSImage(data: d) { artwork[newID] = img }
+            if let d = cover, let img = ArtCache.storeAlbum(d, folder: folder) ?? NSImage(data: d) { artwork[newID] = img }
             else if artwork[newID] == nil { artwork[newID] = oldArt }
         }
         if rescan { await rescanServers() }
@@ -724,6 +737,11 @@ final class Model: ObservableObject {
     var remoteName: String? {
         if player.remote() != nil { return ma.name(String(player.output.dropFirst(3))) }
         return on(.ownTone) ? "OwnTone" : nil
+    }
+    /// The speaker the player drives: this Mac, a Music Assistant player or OwnTone.
+    var outputName: String {
+        if player.remote() != nil { return ma.name(String(player.output.dropFirst(3))) }
+        return player.output == "owntone" && on(.ownTone) ? "OwnTone" : "This Mac"
     }
     /// What Play sends for a streamed sidebar playlist: Spotify's URI or OwnTone's (Subsonic playlists play as songs, see playSongs).
     func playURI(_ p: OTPlaylist) -> String? {
@@ -1474,9 +1492,11 @@ final class Model: ObservableObject {
         do {
             try await Syncer.save(db, to: ipod)
             retags = retags.filter { renames[$0.key] == nil }
-            syncPhase = "Cover art"; syncCurrent = ""; syncTotal = 0
-            await FroggerArt.write(db, to: ipod, albums: albums) { done, total, album in     // for Frogger's Now Playing page
-                self.syncDone = done; self.syncTotal = total; self.syncCurrent = album
+            if froggerFeatures {
+                syncPhase = "Cover art"; syncCurrent = ""; syncTotal = 0
+                await FroggerArt.write(db, to: ipod, albums: albums) { done, total, album in     // for Frogger's Now Playing page
+                    self.syncDone = done; self.syncTotal = total; self.syncCurrent = album
+                }
             }
             syncCurrent = ""
         }
@@ -1526,7 +1546,7 @@ final class Model: ObservableObject {
         }
         try? fm.removeItem(atPath: album.folder + "/cover.jpg")
         guard fm.createFile(atPath: album.folder + "/cover.jpg", contents: data) else { notify("Couldn't write cover.jpg in \(album.folder)"); return }
-        artwork[album.id] = ArtCache.store(data, for: "album:" + album.folder) ?? NSImage(data: data)
+        artwork[album.id] = ArtCache.storeAlbum(data, folder: album.folder) ?? NSImage(data: data)
         await rescanServers()
         notify("New cover for \(album.title)")
     }
@@ -1538,8 +1558,15 @@ final class Model: ObservableObject {
         let existing = names.filter { fm.fileExists(atPath: album.folder + "/" + $0) }
         guard existing.isEmpty || replace else { return nil }
         step("Downloading the cover")
-        let coverData = r.source == "MusicBrainz" ? await MusicBrainz.cover(r.id)
+        var coverData = r.source == "MusicBrainz" ? await MusicBrainz.cover(r.id)
             : (try? await URLSession.shared.data(from: URL(string: r.cover) ?? MusicBrainz.coverURL(r.id)))?.0
+        if coverData == nil {     // MusicBrainz often has no picture for singles: the iTunes Store's, when it's the same release
+            step("No cover on \(r.source); trying the iTunes Store")
+            let hits = (try? await ITunesLookup.search(album: r.title, artist: r.artist)) ?? []
+            if let hit = hits.first(where: { Self.looseMatch($0.title, r.title) }), let u = URL(string: hit.cover) {
+                coverData = (try? await URLSession.shared.data(from: u))?.0
+            }
+        }
         guard let d = coverData, let img = NSImage(data: d) else { return "no cover found" }
         guard !isPodOnly(album) else { artwork[album.id] = img; return nil }
         for n in existing where n != "cover.jpg" {       // the old image would otherwise still be picked first by some readers
@@ -1547,7 +1574,7 @@ final class Model: ObservableObject {
         }
         try? fm.removeItem(atPath: album.folder + "/cover.jpg")
         guard fm.createFile(atPath: album.folder + "/cover.jpg", contents: d) else { return "couldn't write cover.jpg" }
-        artwork[album.id] = ArtCache.store(d, for: "album:" + album.folder) ?? img
+        artwork[album.id] = ArtCache.storeAlbum(d, folder: album.folder) ?? img
         if on(.ownTone) || on(.subsonic) { step("Asking the server to rescan"); await rescanServers() }
         return existing.isEmpty ? "cover saved" : "cover replaced"
     }
@@ -1772,7 +1799,7 @@ final class Model: ObservableObject {
         guard let u = url.flatMap({ URL(string: $0.absoluteString.replacingOccurrences(of: "600x600bb", with: "1200x1200bb")) }),
               let (d, _) = try? await URLSession.shared.data(from: u), let img = NSImage(data: d) else { return }
         if fm.createFile(atPath: lib.folder + "/cover.jpg", contents: d) {
-            artwork[lib.id] = ArtCache.store(d, for: "album:" + lib.folder) ?? img
+            artwork[lib.id] = ArtCache.storeAlbum(d, folder: lib.folder) ?? img
             await rescanServers()
         }
     }
@@ -1811,3 +1838,27 @@ final class Model: ObservableObject {
         return full > have ? full : nil
     }
 }
+
+// MARK: back and forward
+
+extension Model {
+    var place: Place { Place(pane: pane, path: path) }
+
+    /// Called when the page or what's open on it changes; going back or forward isn't a new visit.
+    func visited(from old: Place) {
+        if travelling { travelling = false; return }
+        back.append(old); if back.count > 100 { back.removeFirst() }
+        forward = []
+    }
+
+    func goBack() { guard let p = back.popLast() else { return }; forward.append(place); travel(to: p) }
+    func goForward() { guard let p = forward.popLast() else { return }; back.append(place); travel(to: p) }
+
+    private func travel(to p: Place) {
+        search = ""
+        guard p != place else { return }
+        travelling = true
+        pane = p.pane; path = p.path
+    }
+}
+

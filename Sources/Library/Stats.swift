@@ -355,7 +355,7 @@ struct MostPlayed: View {
                         Text(r.0.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer()
-                    Stars(value: r.0.stars)
+                    StarPicker(value: model.rating(r.0)) { model.rate(r.0, $0) }
                     Text(r.1).font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, 12).padding(.vertical, 5)
@@ -393,8 +393,11 @@ struct YearInReview: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Your \(String(ui.year))").font(.system(size: 40, weight: .bold))
                     Spacer()
-                    Picker("Year", selection: $ui.year) { ForEach(years.isEmpty ? [ui.year] : years, id: \.self) { Text(String($0)).tag($0) } }
-                        .labelsHidden().fixedSize()
+                    Menu {
+                        Picker("Year", selection: $ui.year) { ForEach(years.isEmpty ? [ui.year] : years, id: \.self) { Text(String($0)).tag($0) } }
+                            .pickerStyle(.inline)
+                    } label: { Text(String(ui.year)) }
+                    .glassMenu()
                 }
                 HStack(spacing: 14) {
                     Stat(value: "\(added.count)", label: "albums added")
