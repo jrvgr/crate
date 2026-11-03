@@ -384,7 +384,8 @@ struct PlaylistView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 HStack(alignment: .bottom, spacing: 24) {
-                    Mosaic(paths: Array(NSOrderedSet(array: all.map(\.artworkPath)).array.compactMap { $0 as? String }.prefix(4)))
+                    Mosaic(paths: playlist.artwork.isEmpty ? Array(NSOrderedSet(array: all.map(\.artworkPath)).array.compactMap { $0 as? String }.prefix(4))
+                                                           : [playlist.artwork])
                         .frame(width: 200, height: 200).clipShape(.rect(cornerRadius: 16))
                         .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
                     VStack(alignment: .leading, spacing: 6) {

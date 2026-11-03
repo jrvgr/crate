@@ -181,6 +181,32 @@ enum Main {
             }
             RunLoop.main.run()
         }
+        if args.contains("--spotify-test") {     // read only: playlists and the songs of the first few
+            Task { @MainActor in
+                let sp = SpotifyAPI()
+                do {
+                    let lists = try await sp.playlists()
+                    print("\(lists.count) playlists")
+                    for p in lists.prefix(3) {
+                        print("  \(p.name) [\(p.count)] art: \(p.artwork.isEmpty ? "none" : "yes")")
+                        do { let ts = try await sp.tracks(p.spotifyID!); print("    \(ts.count) songs, first: \(ts.first.map { "\($0.artist) – \($0.title) (\($0.album))" } ?? "-")") }
+                        catch { print("    tracks error: \(error.localizedDescription)") }
+                    }
+                    if let p = lists.first {
+                        for path in ["/playlists/\(p.spotifyID!)/items?limit=2", "/playlists/\(p.spotifyID!)?limit=2", "/me/tracks?limit=2", "/me"] {
+                            do {
+                                let raw = try await sp.get(path) as? [String: Any]
+                                let items = (raw?["items"] as? [Any]) ?? ((raw?["tracks"] as? [String: Any])?["items"] as? [Any]) ?? ((raw?["items"] as? [String: Any])?["items"] as? [Any])
+                                print("\(path): ok, keys \(raw?.keys.sorted().prefix(12) ?? []), items \(items?.count ?? -1)")
+                                if let first = items?.first as? [String: Any] { print("   item keys:", first.keys.sorted()) }
+                            } catch { print("\(path): \(error.localizedDescription)") }
+                        }
+                    }
+                } catch { print("error: \(error.localizedDescription)") }
+                exit(0)
+            }
+            RunLoop.main.run()
+        }
         if let i = args.firstIndex(of: "--write-tags"), args.count > i + 3 { writeTags(args[i + 1], args[i + 2], args[i + 3]); return }
         if let i = args.firstIndex(of: "--lookup"), args.count > i + 2 { lookup(args[i + 1], args[i + 2]); return }
         spaceKey()

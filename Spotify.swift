@@ -146,8 +146,12 @@ final class SpotifyAPI: ObservableObject {
     }
 
     func tracks(_ playlistID: String) async throws -> [OTTrack] {
-        try await all("/playlists/\(playlistID)/tracks?limit=100&additional_types=track", limit: 5000).enumerated().compactMap { n, i in
-            guard let t = i["track"] as? [String: Any], t["type"] as? String == "track" else { return nil }
+        // /items with "item" is the current form; /tracks with "track" is what older apps still get
+        let items: [[String: Any]]
+        do { items = try await all("/playlists/\(playlistID)/items?limit=50&additional_types=track", limit: 5000) }
+        catch { items = try await all("/playlists/\(playlistID)/tracks?limit=100&additional_types=track", limit: 5000) }
+        return items.enumerated().compactMap { n, i in
+            guard let t = (i["item"] ?? i["track"]) as? [String: Any], (t["type"] as? String ?? "track") == "track" else { return nil }
             let a = t["album"] as? [String: Any]
             let artists = ((t["artists"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
             let albumArtists = ((a?["artists"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }

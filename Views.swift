@@ -389,11 +389,10 @@ struct PlaylistMenu: View {
 
 struct IPodCard: View {
     @EnvironmentObject var model: Model
-    @StateObject private var hover = HoverState()
     @Namespace private var ns
 
     var body: some View {
-        let big = hover.on || model.syncing || model.dropTarget == .ipod
+        let big = model.syncing || model.dropTarget == .ipod
         VStack(alignment: .leading, spacing: 8) {
             if let i = model.ipod, let db = model.db {
                 if big {
@@ -460,7 +459,6 @@ struct IPodCard: View {
         }
         .padding(12)
         .animation(.spring(response: 0.45, dampingFraction: 0.7), value: big)
-        .onHover { hover.on = $0 }
         .glassEffect(model.dropTarget == .ipod ? .regular.tint(.accentColor) : .regular, in: .rect(cornerRadius: 16))
         .overlay { if model.dropTarget == .ipod { RoundedRectangle(cornerRadius: 16).strokeBorder(.tint, lineWidth: 2) } }
         .contentShape(.rect)
