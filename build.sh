@@ -10,11 +10,11 @@ mkdir -p build/Crate.app/Contents/MacOS
 # `./build.sh dev` skips optimisation: much quicker to build, slower at heavy work (cover dithering, scans)
 opt=-O; [ "$1" = dev ] && opt=-Onone
 swiftc $opt -j$(sysctl -n hw.ncpu) -parse-as-library -swift-version 5 -target arm64-apple-macos26 \
-    *.swift \
+    $(find Sources -name "*.swift") \
     -o build/Crate.app/Contents/MacOS/Crate
-cp Info.plist build/Crate.app/Contents/
-mkdir -p build/Crate.app/Contents/Resources && cp Icon/Crate.icns build/Crate.app/Contents/Resources/   # drawn by Icon/make-icon.swift
-cp Fonts/ChicagoFLF.ttf build/Crate.app/Contents/Resources/   # public-domain Chicago revival for the iPod LCD
+cp Resources/Info.plist build/Crate.app/Contents/
+mkdir -p build/Crate.app/Contents/Resources && cp Resources/Icon/Crate.icns build/Crate.app/Contents/Resources/   # drawn by Resources/Icon/make-icon.swift
+cp Resources/Fonts/ChicagoFLF.ttf build/Crate.app/Contents/Resources/   # public-domain Chicago revival for the iPod LCD
 id=$(security find-identity -p codesigning | awk '/"Crate Local Signing"/ {print $2; exit}')
 codesign --force --sign "${id:--}" --identifier nl.jrvgr.crate build/Crate.app
 echo built build/Crate.app
