@@ -9,7 +9,7 @@ extension Model {
     /// Volume names of library folders whose share isn't mounted right now.
     var missingShares: [String] {
         let mounted = Set((FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: nil) ?? []).map(\.path))
-        let names = (folders + [importFolder]).compactMap { f -> String? in
+        let names = libraryRoots.compactMap { f -> String? in
             let parts = f.split(separator: "/")
             guard parts.count >= 2, parts[0] == "Volumes" else { return nil }
             return String(parts[1])
@@ -21,13 +21,14 @@ extension Model {
 
 @MainActor
 final class ShareUI: ObservableObject {
-    @AppStorage("shareServer") var server = "host"
+    @AppStorage("shareServer") var server = ""
     @Published var busy: Set<String> = []
     @Published var error: String?
     @Published var tick = 0                       // redraw when something mounts or unmounts
 
     /// Mounts smb://server/name under /Volumes; nil when it worked, else what went wrong.
     func connect(_ name: String) async -> String? {
+        guard !server.isEmpty else { return "No file server set" }
         guard let url = URL(string: "smb://\(server)/\(name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name)") else { return "Bad share address" }
         busy.insert(name); defer { busy.remove(name) }
         return await withCheckedContinuation { (done: CheckedContinuation<String?, Never>) in

@@ -4,7 +4,7 @@ import SwiftUI
 
 extension Model {
     /// Moves the files to the Trash and takes them out of the library and the iPod queue.
-    var trashRoots: [String] { folders + [importFolder, (importFolder as NSString).deletingLastPathComponent] }
+    var trashRoots: [String] { libraryRoots }
 
     /// To the Trash; on network shares (which have none) into a hidden .crate-trash folder in the
     /// same music folder, kept by date, so it can still be put back.
@@ -32,13 +32,18 @@ extension Model {
                 _ = discard(f)
             }
         }
-        let gone = Set(paths)
-        libTracks.removeAll { gone.contains($0.path) && !FileManager.default.fileExists(atPath: $0.path) }
+        let gone = Set(paths.filter { !FileManager.default.fileExists(atPath: $0) })
+        // their copies on the iPod go at the next sync too
+        let fromPod = tracks.filter { gone.contains($0.path) && podKeys.contains($0.key) }
+        songsToRemove.formUnion(fromPod.map { podKey($0.key) })
+        songsToAdd.subtract(gone)
+        libTracks.removeAll { gone.contains($0.path) }
         let ids = Set(albums.map(\.id))
         rebuild()
         toAdd = toAdd.filter { id in albums.contains { $0.id == id } || !ids.contains(id) }
-        if on(.ownTone) { await ownToneRescan(ownToneURL) }
-        notify("Deleted \(paths.count - failed) file\(paths.count - failed == 1 ? "" : "s")" + (failed > 0 ? ", \(failed) couldn't be moved" : ""))
+        await rescanServers()
+        notify("Deleted \(paths.count - failed) file\(paths.count - failed == 1 ? "" : "s")" + (failed > 0 ? ", \(failed) couldn't be moved" : "")
+               + (fromPod.isEmpty ? "" : "; \(fromPod.count) leave the iPod on the next sync"))
     }
 
     /// The .crate-trash folders on the shares: their size, and emptying them for good.
@@ -62,6 +67,9 @@ final class MergeState: ObservableObject {
     @Published var oneFolder = true
     @Published var working = false
     @Published var error: String?
+    @Published var phase = ""                  // what merging is doing now
+    @Published var done = 0                    // files through this phase
+    @Published var total = 0                   // 0: no count for this phase
 }
 
 /// Merges albums into one: the same album title and album artist in every file, optionally one folder.
@@ -101,7 +109,14 @@ struct MergeSheet: View {
             .formStyle(.grouped)
             if let e = s.error { Label(e, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red) }
             HStack {
-                if s.working { ProgressView().controlSize(.small); Text("Merging…").foregroundStyle(.secondary) }
+                if s.working {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(s.phase + (s.total > 0 ? " (\(s.done) of \(s.total))" : "…")).foregroundStyle(.secondary).monospacedDigit()
+                        if s.total > 0 { ProgressView(value: Double(s.done), total: Double(s.total)) }
+                        else { ProgressView().progressViewStyle(.linear) }
+                    }
+                    .frame(maxWidth: 300)
+                }
                 Spacer()
                 Button("Cancel") { dismiss() }.buttonStyle(.glass).keyboardShortcut(.cancelAction).disabled(s.working)
                 Button("Merge") { Task { await merge() } }.buttonStyle(.glassProminent).keyboardShortcut(.defaultAction)
@@ -122,23 +137,29 @@ struct MergeSheet: View {
         let tracks = albums.flatMap(\.tracks).filter { TagWriter.canWrite($0.path) }
         let e = TagEdit(albumArtist: s.artist, album: s.title)
         var failed: [String] = []
+        s.phase = "Writing album tags"; s.done = 0; s.total = tracks.count
         for t in tracks {
+            defer { s.done += 1 }
             let p = t.path
             if let err = await Task.detached(operation: { () -> String? in
                 do { try TagWriter.write(p, e); return nil } catch { return error.localizedDescription }
             }).value { failed.append(err) }
         }
         let wasAdding = albums.contains { model.toAdd.contains($0.id) }
-        await model.refreshFiles(tracks.map(\.path), oldID: albums.first?.id)
+        s.phase = "Reading the songs back in"; s.total = 0
+        await model.refreshFiles(tracks.map(\.path), oldID: albums.first?.id, rescan: false)
         if wasAdding { model.toAdd.insert(s.title.lowercased()) }
         if s.oneFolder, let merged = model.albums.first(where: { $0.id == s.title.lowercased() }) {
-            let roots = model.folders + [model.importFolder, (model.importFolder as NSString).deletingLastPathComponent]
+            let roots = model.libraryRoots
             let moves = Organizer.plan([merged], roots: roots, withYear: false)
+            s.phase = "Moving \(moves.count) files into one folder"
             let r = await Task.detached { Organizer.apply(moves) }.value
-            await model.moved(r.done)
+            await model.moved(r.done, rescan: false)
             failed += r.failed
         }
         s.working = false
+        // the servers pick the changes up in the background; no need to hold the dialog for it
+        Task { await model.rescanServers() }
         if failed.isEmpty { model.notify("Merged into “\(s.title)”"); dismiss() } else { s.error = "\(failed.count) failed: \(failed[0])" }
     }
 }

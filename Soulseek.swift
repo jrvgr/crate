@@ -86,10 +86,10 @@ enum SlskdError: Error, LocalizedError {
 
 @MainActor
 final class Slskd: ObservableObject {
-    @AppStorage("slskdURL") var url = "http://host:5030"
+    @AppStorage("slskdURL") var url = ""
     @AppStorage("slskdUser") var user = ""
     @AppStorage("slskdAPIKey") var apiKey = ""
-    @AppStorage("slskdDownloads") var downloadsFolder = "/path/to/slskd/downloads"
+    @AppStorage("slskdDownloads") var downloadsFolder = ""
     @AppStorage("slskdAutoImport") var autoImport = true
 
     @Published var connected = false

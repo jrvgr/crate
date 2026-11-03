@@ -4,13 +4,16 @@ Mac app (SwiftUI, Liquid Glass, macOS 26+) that manages the 3rd gen iPod, replac
 (which crash on this iPod on macOS 27).
 
 The core is the library (music folders on disk), the iPod and metadata lookups. Everything that
-talks to another service is a plugin (Settings › Plugins, `Plugins.swift`): **OwnTone** (its
-library, playlists, playback, rescans), **Spotify** (saved albums via OwnTone), **Soulseek**
-(slskd: search, download, import) and **Apple Music** (iTunes Match imports). With all of them off
-Crate is a plain folder → iPod manager.
+talks to another service is a plugin (Settings › Plugins, `Plugins.swift`), each with an on/off
+switch there (kept in the defaults): **OwnTone** (its library, playlists, playback, rescans; off
+means Crate doesn't contact it at all), **Subsonic** (Navidrome: library, playlists, covers,
+rescans, scrobbles), **Music Assistant** (plays on its speakers and groups), **Spotify** (saved
+albums via your account, or the older way through OwnTone), **Soulseek** (slskd:
+search, download, import), **Apple Music** (iTunes Match imports) and **YouTube** (yt-dlp). With all
+of them off Crate is a plain folder → iPod manager.
 
-- **Sidebar**: Library (Recently Added, Albums, Artists, Songs), Playlists (OwnTone's, plus the
-  ones only on the iPod), Sources (one per plugin). Search is at the top of the sidebar and looks
+- **Sidebar**: Library (Recently Added, Albums, Artists, Songs), Playlists (OwnTone's, Subsonic's,
+  plus the ones only on the iPod), Sources (one per plugin). Search is at the top of the sidebar and looks
   through everything (library, playlists, Apple Music, Spotify) with a jump to Soulseek.
   Downloads and Activity are toolbar buttons; the iPod card at the bottom opens the iPod page.
 - **Albums**: grid or Cover Flow (same geometry as `imac/CoverFlow`), filter On iPod / Not on
@@ -51,6 +54,22 @@ Crate is a plain folder → iPod manager.
   the tags and the cover if there is none (or always, with "Replace the current cover"); "Cover"
   only replaces the cover. Progress shows in the dialog.
 - **Drag and drop** onto the window imports into the library; onto the iPod card also queues it.
+- **Subsonic** (plugin, `Subsonic.swift`): a Subsonic server's songs join the library and its
+  playlists show in the sidebar (OpenSubsonic JSON API, token login; server, username, music folder
+  in Settings, the password in `secrets.json`). Songs whose files are in the music folder as this
+  Mac sees it (`/path/to/music`) are used from there; that needs real paths (Navidrome:
+  Settings › Players › Crate › Report Real Path). Others are downloaded (`download`, original file)
+  into `~/Library/Caches/nl.jrvgr.crate/Subsonic` when a sync needs them, stream when played
+  here and take their cover from `getCoverArt`. Imports, tag and cover edits ask for a `startScan`
+  (admin users only), and Sync scrobbles the iPod's plays (Play Counts) to the server.
+  Its playlists are read-only; Play plays their songs that are in the library. With OwnTone on as well, OwnTone's copy of a song wins (for playback there).
+- **Music Assistant** (plugin, `MusicAssistant.swift`): MA's players and groups join the toolbar's
+  speaker menu. With one picked, Play sends the songs to MA (`player_queues/play_media`,
+  replace) as `opensubsonic://track/<id>` (MA has the same Navidrome as a provider) or Spotify URIs;
+  songs not on the Subsonic server can't go. The iPod's buttons, wheel (volume), Space and the menu
+  bar drive MA's queue, and Crate reads the queue back once a second to show it; when the queue is
+  replaced elsewhere Crate lets go. HTTP `POST /api` with a long-lived token (MA › profile), kept in
+  secrets.json.
 - **Spotify** (plugin, `Spotify.swift`): reads your saved albums and playlists through the Web API
   (your own app on developer.spotify.com, PKCE login with a listener on 127.0.0.1:8765; refresh
   token in the Keychain), or OwnTone's library. "Get Missing Albums…" searches Soulseek for the
@@ -58,8 +77,8 @@ Crate is a plain folder → iPod manager.
   you check them.
 - **Soulseek quality rules**: format (any/lossless/MP3), minimum bit rate, free slot, queue length;
   a menu on the Soulseek page and in Settings.
-- **Playback**: the toolbar's mini player plays on this Mac (AVFoundation) or on OwnTone's speakers
-  (Settings › Library › Playback). Double-click a song on an album page to play from there.
+- **Playback**: the toolbar's mini player plays on this Mac (AVFoundation), on a Music Assistant player or on OwnTone's speakers
+  (the toolbar's speaker menu, shown when Music Assistant or OwnTone is on). Double-click a song on an album page to play from there.
 - **Needs Attention** (sidebar): albums with no cover/year/genre, odd track numbers, duplicate
   songs, MP3s under 160 kbps, missing files; "Review Matches…" runs Find Metadata over all of them
   (MusicBrainz + iTunes, one a second) and saves what you tick. "Review Duplicates…" finds the same
@@ -85,4 +104,4 @@ When launching the app: `--open-lookup/--open-album <album>`, `--open-playlist <
 `--open-artist <name>`, `--open-recent/-albums/-artists/-songs/-ipod/-spotify/-apple-music/-soulseek/-downloads`,
 `--search <text>`, `--open-sync` (review sheet only), `--open-health`. `--playlist-test` also checks the Play Counts merge.
 Tools: `--tag <file> title=… artist=… album=… year=… track=…` (use a copy), `--slskd-check [query]` (login + search, no
-downloads), `--callback-test` (Spotify login listener), `--keychain-test`.
+downloads), `--subsonic-check` (login, library and playlists; no downloads), `--callback-test` (Spotify login listener), `--keychain-test`.

@@ -324,7 +324,7 @@ struct SpotifyCoverFlow: View {
                             .frame(width: 260).padding(.top, 6)
                         HStack(spacing: 10) {
                             Button("Open", systemImage: "chevron.right") { model.path.append(.spotifyAlbum(a)) }
-                            Button(model.on(.ownTone) ? "Play on OwnTone" : "Open in Spotify", systemImage: "play.fill") { Task { await model.playURIs([a.uri]) } }
+                            Button(model.playURILabel, systemImage: "play.fill") { Task { await model.playURIs([a.uri]) } }
                             if model.on(.soulseek), !model.hasFiles(a) {
                                 Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(a.artist, a.name) }
                             }

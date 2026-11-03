@@ -135,7 +135,7 @@ struct OrganizerSheet: View {
         .onAppear { replan() }
     }
 
-    var roots: [String] { model.folders + [model.importFolder, (model.importFolder as NSString).deletingLastPathComponent] }
+    var roots: [String] { model.libraryRoots }
 
     func replan() { s.moves = Organizer.plan(albums.filter { !model.isPodOnly($0) }, roots: roots, withYear: s.withYear) }
 

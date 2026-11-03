@@ -594,7 +594,7 @@ struct LiveIPod: View {
                   openArtist: { model.search = ""; model.pane = .artists; model.path = [.artist(t.artist)] },
                   seek: { player.seek($0 * player.length) },
                   position: player.length > 0 ? player.time / player.length : 0,
-                  volume: player.volume, setVolume: { player.volume = $0 })
+                  volume: player.volume, setVolume: { player.setVolume($0) })
         }, frogger: model.podSettings.frogger == .installed)
     }
 }

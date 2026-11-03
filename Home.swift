@@ -87,6 +87,7 @@ struct IPodView: View {
                                     .font(.callout).foregroundStyle(.secondary).lineLimit(1)
                             }
                             Spacer()
+                            Button("Show") { model.albumFilter = .podOnly; model.pane = .albums }.buttonStyle(.glass)
                             Button("Copy to Library") { Task { await model.copyFromIPod(model.podOnlyAlbums) } }
                                 .buttonStyle(.glassProminent).disabled(!model.connected)
                         }
@@ -140,9 +141,10 @@ struct IPodView: View {
                         .filter { !$0.isEmpty }.joined(separator: " · "))
                     .foregroundStyle(.secondary).textSelection(.enabled)
                 HStack(spacing: 10) {
-                    Button("Sync", systemImage: "arrow.triangle.2.circlepath") { model.reviewSync() }
-                        .buttonStyle(.glassProminent).disabled(model.pendingCount == 0 || model.syncing || model.podRepairBusy || model.brokenPod != nil)
                     if model.connected {
+                        // while it's away the toolbar's Sync (and Waiting for Sync below) review the queue
+                        Button("Sync", systemImage: "arrow.triangle.2.circlepath") { model.reviewSync() }
+                            .buttonStyle(.glassProminent).disabled(model.pendingCount == 0 || model.syncing || model.podRepairBusy || model.brokenPod != nil)
                         Button("Eject", systemImage: "eject") { model.eject() }.buttonStyle(.glass).disabled(model.syncing)
                         Button { NSWorkspace.shared.activateFileViewerSelecting([i.mount]) } label: { Image(systemName: "folder") }
                             .buttonStyle(.glass).help("Show in Finder")
@@ -393,10 +395,68 @@ struct MaintenanceRow<Actions: View>: View {
 
 // MARK: songs
 
+/// The search field at the left of a list's filter bar.
+struct FilterField: View {
+    var prompt: String
+    @Binding var text: String
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField(prompt, text: $text).textFieldStyle(.plain)
+            if !text.isEmpty {
+                Button { text = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .glassEffect(.regular, in: .capsule)
+        .frame(maxWidth: 320)
+    }
+}
+
+/// Every word has to appear in one of the fields.
+func matchesQuery(_ q: String, _ fields: [String]) -> Bool {
+    let terms = q.lowercased().split(separator: " ")
+    if terms.isEmpty { return true }
+    let hay = fields.joined(separator: " ").lowercased()
+    return terms.allSatisfy { hay.contains($0) }
+}
+
 @MainActor
 final class SongsUI: ObservableObject {
     @Published var sort = [KeyPathComparator(\LibTrack.artist), KeyPathComparator(\LibTrack.album), KeyPathComparator(\LibTrack.trackNumber)]
     @Published var selection: Set<LibTrack.ID> = []
+    @Published var query = ""
+    @Published var show = Show.all
+    @Published var genre = ""                  // "" = every genre
+    @Published var kind = ""                   // file extension, "" = every kind
+    @Published var minRating = 0
+    @Published var unplayed = false
+
+    enum Show: String, CaseIterable { case all = "All Songs", onIPod = "On iPod", notOnIPod = "Not on iPod", queued = "Waiting for Sync" }
+
+    var filtering: Bool { !query.isEmpty || show != .all || !genre.isEmpty || !kind.isEmpty || minRating > 0 || unplayed }
+    /// "Electronic, IDM; Ambient" counts as three genres.
+    static func genres(_ s: String) -> [String] {
+        s.split { $0 == "," || $0 == ";" }.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+    func clear() { query = ""; show = .all; genre = ""; kind = ""; minRating = 0; unplayed = false }
+
+    // The filtered, sorted rows and the genre/kind menus, kept until their inputs change: the whole library
+    // was filtered and sorted again on every redraw (any change anywhere in Crate).
+    private var rowsKey: Int?, cachedRows: [LibTrack] = []
+    func rows(_ key: Int, _ make: () -> [LibTrack]) -> [LibTrack] {
+        if key != rowsKey { cachedRows = make(); rowsKey = key }
+        return cachedRows
+    }
+    private var menusKey: Int?, cachedMenus: (genres: [String], kinds: [String]) = ([], [])
+    func menus(_ version: Int, _ tracks: [LibTrack]) -> (genres: [String], kinds: [String]) {
+        if version != menusKey {
+            cachedMenus = (Set(tracks.flatMap { Self.genres($0.genre) }).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending },
+                           Set(tracks.map(\.ext)).filter { !$0.isEmpty }.sorted())
+            menusKey = version
+        }
+        return cachedMenus
+    }
 }
 
 struct SongsView: View {
@@ -404,7 +464,7 @@ struct SongsView: View {
     @StateObject private var ui = SongsUI()
 
     var body: some View {
-        let rows = model.libTracks.sorted(using: ui.sort)
+        let rows = ui.rows(rowsKey) { filtered.sorted(using: ui.sort) }
         Table(rows, selection: $ui.selection, sortOrder: $ui.sort) {
             TableColumn("") { (t: LibTrack) in
                 let m = model.songMark(t)
@@ -449,12 +509,74 @@ struct SongsView: View {
         } primaryAction: { ids in
             if let a = album(ids.first) { model.path.append(.album(a)) }
         }
+        .safeAreaInset(edge: .top, spacing: 0) { filterBar }
+        .overlay { if rows.isEmpty && ui.filtering { ContentUnavailableView("No Songs Match", systemImage: "line.3.horizontal.decrease.circle") } }
         .navigationTitle("Songs")
-        .navigationSubtitle("\(rows.count) songs")
+        .navigationSubtitle(ui.filtering ? "\(rows.count) of \(model.libTracks.count) songs" : "\(rows.count) songs")
+    }
+
+    /// What the rows depend on: the songs, the filters and sort, and (when a filter looks at them) the iPod and queue,
+    /// ratings and play counts.
+    var rowsKey: Int {
+        var h = Hasher()
+        h.combine(model.libraryVersion); h.combine(ui.sort); h.combine(ui.query); h.combine(ui.show)
+        h.combine(ui.genre); h.combine(ui.kind); h.combine(ui.minRating); h.combine(ui.unplayed)
+        if ui.show != .all || ui.unplayed { h.combine(model.syncVersion) }
+        if ui.minRating > 0 { h.combine(model.ratings) }
+        return h.finalize()
+    }
+
+    /// Every search word has to appear in the title, artist, album, genre or year.
+    var filtered: [LibTrack] {
+        model.libTracks.filter { t in
+            if !ui.genre.isEmpty && !SongsUI.genres(t.genre).contains(ui.genre) { return false }
+            if !ui.kind.isEmpty && t.ext != ui.kind { return false }
+            switch ui.show {
+            case .all: break
+            case .onIPod: if model.songMark(t) != .onIPod { return false }
+            case .notOnIPod: if model.songMark(t) != .none { return false }
+            case .queued: if model.songMark(t) != .adding && model.songMark(t) != .removing { return false }
+            }
+            if ui.minRating > 0 && model.rating(t) < ui.minRating { return false }
+            if ui.unplayed && model.stat(t).plays > 0 { return false }
+            return matchesQuery(ui.query, [t.title, t.artist, t.trackArtist, t.album, t.genre, t.year > 0 ? String(t.year) : ""])
+        }
+    }
+
+    var filterBar: some View {
+        let (genres, kinds) = ui.menus(model.libraryVersion, model.libTracks)
+        return HStack(spacing: 10) {
+            FilterField(prompt: "Title, artist, album, genre, year", text: $ui.query)
+            Picker("Show", selection: $ui.show) { ForEach(SongsUI.Show.allCases, id: \.self) { Text($0.rawValue) } }
+                .labelsHidden().fixedSize()
+            Picker("Genre", selection: $ui.genre) {
+                Text("All Genres").tag("")
+                Divider()
+                ForEach(genres, id: \.self) { Text($0).tag($0) }
+            }
+            .labelsHidden().fixedSize()
+            Picker("Kind", selection: $ui.kind) {
+                Text("All Kinds").tag("")
+                Divider()
+                ForEach(kinds, id: \.self) { Text($0.uppercased()).tag($0) }
+            }
+            .labelsHidden().fixedSize()
+            Picker("Rating", selection: $ui.minRating) {
+                Text("Any Rating").tag(0)
+                ForEach(1...5, id: \.self) { n in Text(String(repeating: "★", count: n) + (n < 5 ? " or more" : "")).tag(n) }
+            }
+            .labelsHidden().fixedSize()
+            Toggle("Never Played", isOn: $ui.unplayed).toggleStyle(.button)
+            Spacer()
+            if ui.filtering { Button("Clear") { ui.clear() }.buttonStyle(.borderless) }
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(.bar)
     }
 
     func album(_ id: LibTrack.ID?) -> Album? {
         guard let id, let t = model.libTracks.first(where: { $0.id == id }) else { return nil }
-        return model.albums.first { $0.id == t.album.lowercased() }
+        return model.album(of: t)
     }
 }

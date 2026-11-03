@@ -24,7 +24,7 @@ final class SpotifyAPI: ObservableObject {
     static var redirect: String { "http://127.0.0.1:\(port)/callback" }
     static let scopes = "user-library-read playlist-read-private playlist-read-collaborative"
 
-    @AppStorage("spotifyMode") var mode = "owntone"            // "owntone" or "account"
+    @AppStorage("spotifyMode") var mode = "account"            // "owntone" or "account"
     @AppStorage("spotifyClientID") var clientID = ""
     @AppStorage("spotifyUser") var user = ""
     @Published var connecting = false
@@ -277,7 +277,7 @@ struct SpotifyAlbumView: View {
                                     Button("Get from YouTube", systemImage: "play.rectangle") { Task { await model.albumFromYouTube(album) } }.buttonStyle(.glass)
                                 }
                             }
-                            Button(model.on(.ownTone) ? "Play" : "Open in Spotify", systemImage: "play.fill") { Task { await model.playURIs([album.uri]) } }
+                            Button(model.remoteName == nil ? "Open in Spotify" : "Play", systemImage: "play.fill") { Task { await model.playURIs([album.uri]) } }
                                 .buttonStyle(.glass)
                         }
                         .padding(.top, 8)
@@ -305,6 +305,7 @@ struct SpotifyAlbumView: View {
                             .padding(.horizontal, 14).padding(.vertical, 7)
                             .background(i % 2 == 1 ? Color.primary.opacity(0.04) : .clear)
                             .opacity(have ? 1 : 0.75)
+                            .contextMenu { LinkMenu(track: t) }
                         }
                     }
                     .clipShape(.rect(cornerRadius: 14))

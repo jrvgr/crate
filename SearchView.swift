@@ -3,15 +3,34 @@ import SwiftUI
 // Search across everything: the library (artists, albums, songs), playlists, and the enabled
 // sources (Apple Music, Spotify), with a jump to a Soulseek search at the end.
 
+/// The query the results are for (it follows the search field once typing pauses) and the library matches,
+/// kept until the query or the library changes.
+@MainActor
+final class SearchUI: ObservableObject {
+    @Published var q = ""
+    private var key: Int?
+    private var cached: (artists: [Artist], albums: [Album], songs: [LibTrack]) = ([], [], [])
+    func library(_ model: Model, _ match: (String, [String]) -> Bool) -> (artists: [Artist], albums: [Album], songs: [LibTrack]) {
+        var h = Hasher(); h.combine(q); h.combine(model.libraryVersion); h.combine(model.syncVersion)
+        let k = h.finalize()
+        if k != key {
+            cached = (model.artists.filter { match(q, [$0.name]) },
+                      model.allAlbums.filter { match(q, [$0.title, $0.artist, $0.genre]) },
+                      model.libTracks.filter { match(q, [$0.title, $0.trackArtist, $0.artist, $0.album]) })
+            key = k
+        }
+        return cached
+    }
+}
+
 struct SearchView: View {
     @EnvironmentObject var model: Model
+    @StateObject private var ui = SearchUI()
     private let grid = [GridItem(.adaptive(minimum: 150, maximum: 180), spacing: 20)]
 
     var body: some View {
-        let q = model.search
-        let artists = model.artists.filter { matches(q, $0.name) }
-        let albums = model.allAlbums.filter { matches(q, $0.title, $0.artist, $0.genre) }
-        let songs = model.libTracks.filter { matches(q, $0.title, $0.trackArtist, $0.artist, $0.album) }
+        let q = ui.q
+        let (artists, albums, songs) = ui.library(model) { q, fields in matches(q, fields) }
         let lists = model.playlists.filter { matches(q, $0.name) }
         let podLists = model.podOnlyPlaylists.filter { matches(q, $0.name) }
         let am = model.on(.appleMusic) ? model.amAlbums.filter { matches(q, $0.title, $0.artist) && !model.inLibrary($0) } : []
@@ -56,7 +75,7 @@ struct SearchView: View {
                     ResultSection(title: "Songs", count: songs.count) {
                         VStack(spacing: 0) {
                             ForEach(Array(songs.prefix(40).enumerated()), id: \.element.id) { i, t in
-                                let album = model.albums.first { $0.id == t.album.lowercased() }
+                                let album = model.album(of: t)
                                 HStack(spacing: 12) {
                                     Cover(image: album.flatMap { model.artwork[$0.id] }, seed: t.album)
                                         .frame(width: 34, height: 34).clipShape(.rect(cornerRadius: 5))
@@ -139,10 +158,16 @@ struct SearchView: View {
         }
         .navigationTitle("Search")
         .navigationSubtitle("“\(q)”")
+        .task(id: model.search) {
+            // the first query right away, then once typing pauses
+            if !ui.q.isEmpty { try? await Task.sleep(for: .milliseconds(200)) }
+            if !Task.isCancelled { ui.q = model.search }
+        }
     }
 
     /// Every word of the query appears in one of the fields.
-    func matches(_ q: String, _ fields: String...) -> Bool {
+    func matches(_ q: String, _ fields: String...) -> Bool { matches(q, fields) }
+    func matches(_ q: String, _ fields: [String]) -> Bool {
         let hay = fields.joined(separator: " ")
         return q.split(separator: " ").allSatisfy { hay.localizedStandardContains($0) }
     }

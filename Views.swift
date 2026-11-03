@@ -24,11 +24,12 @@ struct ContentView: View {
                     case .album(let a): AlbumDetail(album: a)
                     case .artist(let name): ArtistDetail(name: name)
                     case .spotifyAlbum(let a): SpotifyAlbumView(album: a)
+                    case .amAlbum(let a): AMAlbumView(album: a)
                     }
                 }
             }
             .overlay(alignment: .bottom) { ActivityBar() }
-            .overlay { if model.dropTarget == .library { DropOverlay(text: "Add to Library", detail: "Copies into \((model.importFolder as NSString).lastPathComponent)", icon: "square.and.arrow.down") } }
+            .overlay { if model.dropTarget == .library { DropOverlay(text: "Add to Library", detail: "Copies into \((model.importRoot as NSString).lastPathComponent)", icon: "square.and.arrow.down") } }
             .dropDestination(for: URL.self) { urls, _ in
                 Task { await model.importDropped(urls, toIPod: false) }
                 return true
@@ -41,6 +42,9 @@ struct ContentView: View {
         .toolbar {
             if model.on(.soulseek) || model.on(.appleMusic) || model.on(.youtube) {
                 ToolbarItem { DownloadsButton() }
+            }
+            if model.on(.musicAssistant) || model.on(.ownTone) {
+                ToolbarItem { PlayOnMenu(player: model.player, ma: model.ma) }
             }
             ToolbarItem { ActivityButton() }
             ToolbarItem {
@@ -68,6 +72,7 @@ struct ContentView: View {
             if let t = arg("--spotify-tab") { model.spotifyTab = t }
             model.spotifyArtist = arg("--spotify-artist")
             let m = model
+            Snapshot.listen(m)
             Task { await slsk.poll { m.on(.soulseek) } }
             await model.reload()
             if let t = arg("--open-lookup") { model.lookupAlbum = model.albums.first { $0.title == t } }
@@ -89,6 +94,7 @@ struct ContentView: View {
         .sheet(item: $model.editSmart) { SmartEditor(playlist: $0).environmentObject(model) }
         .modifier(PlaylistDialogs())
         .sheet(isPresented: $model.showMatch) { MatchSheet().environmentObject(model) }
+        .sheet(item: $model.linking) { LinkSheet(track: $0).environmentObject(model) }
         .sheet(isPresented: Binding(get: { model.merge != nil }, set: { if !$0 { model.merge = nil } })) {
             MergeSheet(albums: model.merge ?? []).environmentObject(model)
         }
@@ -99,7 +105,7 @@ struct ContentView: View {
                 Task { await model.trash(ts) }
             }
         } message: {
-            Text("The files go to the Trash (on a network share: a hidden .crate-trash folder there), so you can put them back. Copies already on the iPod stay there until you remove them.")
+            Text("The files go to the Trash (on a network share: a hidden .crate-trash folder there), so you can put them back. Copies on the iPod are removed at the next sync.")
         }
         .sheet(isPresented: Binding(get: { model.organize != nil }, set: { if !$0 { model.organize = nil } })) {
             OrganizerSheet(albums: model.organize ?? []).environmentObject(model)
@@ -295,10 +301,6 @@ struct Sidebar: View {
                         Button("Delete…", systemImage: "trash", role: .destructive) { model.confirmDeletePlaylist = .crate(p.id) }
                     }
                 }
-                if model.cratePlaylists.isEmpty {
-                    Button { model.newPlaylist() } label: { Label("New Playlist", systemImage: "plus") }
-                        .buttonStyle(.plain).foregroundStyle(.secondary)
-                }
             } header: {
                 HStack {
                     Text("Playlists")
@@ -345,9 +347,11 @@ struct Sidebar: View {
                 }
             }
 
-            if let db = model.db, !db.playlists.isEmpty || !model.onTheGo.isEmpty {
+            // playlists that are only on the iPod (made there or elsewhere); the ones Crate puts there show their
+            // iPod mark in their own section, so they aren't listed twice
+            if let db = model.db, !model.podOnlyPlaylists.isEmpty || !model.onTheGo.isEmpty {
                 Section(isExpanded: $ui.ipod) {
-                    ForEach(db.playlists) { p in
+                    ForEach(model.podOnlyPlaylists) { p in
                         let origin = model.origin(of: p)
                         HStack {
                             Label(model.podDisplayName(p), systemImage: origin.icon).lineLimit(1)
@@ -395,7 +399,7 @@ struct Sidebar: View {
                         .tag(Pane.playlist(p.id))
                         .contextMenu { PlaylistMenu(playlist: p) }
                     }
-                } header: { Text(source) }
+                } header: { Text("\(source) Playlists") }
             }
         }
         ShareNotice().padding(.horizontal, 10).padding(.top, 6)
@@ -429,7 +433,11 @@ struct PlaylistMenu: View {
             }
         }
         HiddenPlaylistButton(name: playlist.name)
-        Button(model.on(.ownTone) ? "Play on OwnTone" : "Open in Spotify", systemImage: "play.fill") { Task { await model.playURIs([playlist.uri]) } }
+        if playlist.subsonicID != nil {
+            Button("Play", systemImage: "play.fill") { Task { await model.playSongs(of: playlist) } }
+        } else if let uri = model.playURI(playlist) {
+            Button(model.playURILabel, systemImage: "play.fill") { Task { await model.playURIs([uri]) } }
+        }
         if model.ownToneEditable(playlist) {
             Divider()
             Button("Rename…", systemImage: "pencil") { model.startRename(.ownTone(playlist.id)) }
@@ -497,7 +505,7 @@ struct IPodCard: View {
                     }
                 }
                 CapacityBar(height: 6, incoming: max(0, model.pendingCount > 0 ? model.queuedBytes : 0))
-                if model.pendingCount > 0, !model.syncing {
+                if model.pendingCount > 0, !model.syncing, model.queuedBytes != 0 {
                     let q = model.queuedBytes
                     Text((q >= 0 ? "≈ \(ByteCountFormatter.string(fromByteCount: q, countStyle: .file)) to add" : "≈ \(ByteCountFormatter.string(fromByteCount: -q, countStyle: .file)) freed")
                          + (q > i.free ? " · doesn't fit" : ""))
