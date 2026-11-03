@@ -21,6 +21,17 @@ struct DownloadEntry: Identifiable {
     var reimport: (() -> Void)?
 }
 
+extension Model {
+    /// A Soulseek folder name as an album title: "1992 - Experience_ Expanded" → "Experience: Expanded",
+    /// "A Funk Odyssey (2001)" → "A Funk Odyssey".
+    nonisolated static func folderTitle(_ name: String) -> String {
+        var t = name.replacingOccurrences(of: "_ ", with: ": ").replacingOccurrences(of: "_", with: " ")
+        t = t.replacingOccurrences(of: #"^\s*[\[(]?(19|20)\d\d[\])]?\s*[-–.]\s*"#, with: "", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"\s*[\[(](19|20)\d\d[\])]\s*$"#, with: "", options: .regularExpression)
+        return t.trimmingCharacters(in: .whitespaces).isEmpty ? name : t.trimmingCharacters(in: .whitespaces)
+    }
+}
+
 enum DownloadFilter: String, CaseIterable { case all = "All", active = "In Progress", finished = "Finished" }
 
 extension Model {
@@ -30,7 +41,7 @@ extension Model {
             for j in slsk.jobs {
                 let lib = albums.first { Self.looseMatch($0.title, j.name) }
                 out.append(DownloadEntry(
-                    id: "slsk:" + j.id, source: .soulseek, title: lib?.title ?? j.name,
+                    id: "slsk:" + j.id, source: .soulseek, title: lib?.title ?? Self.folderTitle(j.name),
                     subtitle: [lib?.artist ?? j.parent, "\(j.succeeded) of \(j.files.count) files", "from \(j.username)",
                                j.finished ? "" : ByteCountFormatter.string(fromByteCount: Int64(j.speed), countStyle: .file) + "/s"]
                         .filter { !$0.isEmpty }.joined(separator: " · "),
@@ -111,11 +122,14 @@ struct DownloadsView: View {
                     }
                     .pickerStyle(.segmented).labelsHidden().fixedSize()
                     Spacer()
-                    Picker("Source", selection: $ui.source) {
-                        Text("All Sources").tag(PluginID?.none)
-                        ForEach(sources) { Label($0.name, systemImage: $0.icon).tag(PluginID?.some($0)) }
-                    }
-                    .fixedSize()
+                    Menu {
+                        Picker("Source", selection: $ui.source) {
+                            Text("All Sources").tag(PluginID?.none)
+                            ForEach(sources) { Label($0.name, systemImage: $0.icon).tag(PluginID?.some($0)) }
+                        }
+                        .pickerStyle(.inline)
+                    } label: { Text(ui.source?.name ?? "All Sources") }
+                    .glassMenu()
                 }
                 if shown.isEmpty {
                     ContentUnavailableView(all.isEmpty ? "Nothing downloading" : "Nothing here", systemImage: "tray",
@@ -139,18 +153,6 @@ struct DownloadsView: View {
         .sheet(isPresented: Binding(get: { ui.ytDetail != nil }, set: { if !$0 { ui.ytDetail = nil } })) {
             if let id = ui.ytDetail { YTJobDetail(id: id) }
         }
-        .toolbar {
-            ToolbarItem {
-                Menu {
-                    if model.on(.soulseek) {
-                        Button("Clear Finished Soulseek Downloads") { Task { await slsk.clearFinished() } }
-                    }
-                    Button("Clear Finished Apple Music Imports") { model.jobs.removeAll { $0.source == .appleMusic && !$0.active } }
-                    if model.on(.youtube) { Button("Clear Finished YouTube Downloads") { model.yt.jobs.removeAll(where: \.finished) } }
-                } label: { Label("Clear", systemImage: "checkmark.circle") }
-                .help("Remove finished downloads from the list")
-            }
-        }
         .task { await slsk.refreshDownloads() }
     }
 
@@ -158,7 +160,7 @@ struct DownloadsView: View {
         let active = all.filter { !$0.finished }
         return HStack(spacing: 16) {
             Image(systemName: active.isEmpty ? "arrow.down.circle" : "arrow.down.circle.dotted")
-                .font(.system(size: 38, weight: .light)).foregroundStyle(.tint)
+                .font(.system(size: 38, weight: .light)).foregroundStyle(active.isEmpty ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tint))
                 .symbolEffect(.pulse, isActive: !active.isEmpty)
             VStack(alignment: .leading, spacing: 3) {
                 Text(active.isEmpty ? "All caught up" : "Downloading \(active.count) album\(active.count == 1 ? "" : "s")").font(.title2.bold())
@@ -170,6 +172,16 @@ struct DownloadsView: View {
                 .font(.callout).foregroundStyle(.secondary)
             }
             Spacer()
+            // in the page rather than the toolbar, so the toolbar stays the same on every page
+            Menu {
+                if model.on(.soulseek) {
+                    Button("Clear Finished Soulseek Downloads") { Task { await slsk.clearFinished() } }
+                }
+                Button("Clear Finished Apple Music Imports") { model.jobs.removeAll { $0.source == .appleMusic && !$0.active } }
+                if model.on(.youtube) { Button("Clear Finished YouTube Downloads") { model.yt.jobs.removeAll(where: \.finished) } }
+            } label: { Label("Clear Finished", systemImage: "checkmark.circle") }
+            .glassMenu()
+            .help("Remove finished downloads from the list")
             if model.on(.soulseek) {
                 Button("Search Soulseek", systemImage: "magnifyingglass") { model.pane = .soulseek }.buttonStyle(.glass)
             }
@@ -197,9 +209,13 @@ struct SectionTitle: View {
 struct DownloadCard: View {
     var entry: DownloadEntry
     @ObservedObject var ui: DownloadsUI
+    @StateObject private var hover = HoverState()
 
     var body: some View {
         let open = ui.expanded.contains(entry.id)
+        let someFailed = entry.finished && !entry.failed && entry.files.contains(where: \.failed)
+        // a finished, imported row only needs its buttons when you reach for them
+        let quiet = entry.finished && entry.imported && !hover.on
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 14) {
                 Group {
@@ -220,9 +236,9 @@ struct DownloadCard: View {
                         if !entry.finished {
                             ProgressView(value: entry.progress).frame(width: 160)
                         }
-                        Label(entry.state, systemImage: entry.failed ? "exclamationmark.triangle.fill"
+                        Label(entry.state, systemImage: entry.failed || someFailed ? "exclamationmark.triangle.fill"
                               : entry.finished ? (entry.imported ? "checkmark.circle.fill" : "checkmark.circle") : "arrow.down")
-                            .font(.caption).foregroundStyle(entry.failed ? .red : entry.finished ? .green : .secondary)
+                            .font(.caption).foregroundStyle(entry.failed ? .red : someFailed ? .orange : entry.finished ? .green : .secondary)
                             .lineLimit(1)
                         if entry.finished, entry.imported, entry.source == .soulseek {
                             Text("· in library").font(.caption).foregroundStyle(.secondary)
@@ -232,6 +248,7 @@ struct DownloadCard: View {
                 Spacer()
                 if let r = entry.reimport {
                     Button(entry.imported ? "Import Again" : "Import", systemImage: "square.and.arrow.down", action: r).buttonStyle(.glass)
+                        .opacity(quiet ? 0 : 1)
                 }
                 if let id = entry.ytJob {
                     Button { ui.ytDetail = id } label: { Image(systemName: "info") }.buttonStyle(.glass).help("Details")
@@ -241,6 +258,7 @@ struct DownloadCard: View {
                 }
                 if let r = entry.remove {
                     Button(action: r) { Image(systemName: "trash") }.buttonStyle(.glass).help("Remove from the list (files stay)")
+                        .opacity(quiet ? 0 : 1)
                 }
                 if !entry.files.isEmpty {
                     Button {
@@ -253,6 +271,7 @@ struct DownloadCard: View {
             }
             .padding(12)
             .contentShape(.rect)
+            .onHover { hover.on = $0 }
             .onTapGesture(count: 2) { if let id = entry.ytJob { ui.ytDetail = id } }
             if open {
                 Divider().padding(.horizontal, 12)

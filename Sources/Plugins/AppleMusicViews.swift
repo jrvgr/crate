@@ -24,7 +24,7 @@ struct AMImportButtons: View {
         } else {
             Button("Import to Library", systemImage: "square.and.arrow.down") { model.importAppleMusic(album, toIPod: false) }
                 .buttonStyle(.glassProminent)
-            Button("Import and Add to iPod", systemImage: "ipod") { model.importAppleMusic(album, toIPod: true) }
+            Button("Import and Add to iPod", pod: model.ipod?.glyph) { model.importAppleMusic(album, toIPod: true) }
                 .buttonStyle(.glass).disabled(model.ipod == nil)
         }
     }
@@ -98,7 +98,7 @@ struct AMMenu: View {
         Button("Open", systemImage: "chevron.right") { model.path.append(.amAlbum(album)) }
         if !model.inLibrary(album) {
             Button("Import to Library", systemImage: "square.and.arrow.down") { model.importAppleMusic(album, toIPod: false) }
-            Button("Import and Add to iPod", systemImage: "ipod") { model.importAppleMusic(album, toIPod: true) }.disabled(model.ipod == nil)
+            Button("Import and Add to iPod", pod: model.ipod?.glyph) { model.importAppleMusic(album, toIPod: true) }.disabled(model.ipod == nil)
         }
     }
 }
@@ -161,7 +161,7 @@ struct AMAlbumList: View {
                 let todo = picked.filter { !model.inLibrary($0) }
                 Button("Import \(todo.count) Albums to Library", systemImage: "square.and.arrow.down") { todo.forEach { model.importAppleMusic($0, toIPod: false) } }
                     .disabled(todo.isEmpty)
-                Button("Import and Add to iPod", systemImage: "ipod") { todo.forEach { model.importAppleMusic($0, toIPod: true) } }
+                Button("Import and Add to iPod", pod: model.ipod?.glyph) { todo.forEach { model.importAppleMusic($0, toIPod: true) } }
                     .disabled(todo.isEmpty || model.ipod == nil)
             }
         } primaryAction: { ids in
@@ -198,7 +198,7 @@ struct AMCoverFlow: View {
                 if let a = current {
                     VStack(spacing: 3) {
                         Text(a.title).font(.title3.bold()).lineLimit(1)
-                        Text(a.artist + (a.year > 0 ? " · \(a.year)" : "") + " · \(a.tracks.count) songs").foregroundStyle(.secondary).lineLimit(1)
+                        Text(a.artist + (a.year > 0 ? " · \(a.year)" : "") + " · \(a.tracks.count) song\(a.tracks.count == 1 ? "" : "s")").foregroundStyle(.secondary).lineLimit(1)
                         Scrubber(count: albums.count, index: i) { flow.go(to: $0, count: albums.count) }
                             .frame(width: 260).padding(.top, 6)
                         HStack(spacing: 10) {

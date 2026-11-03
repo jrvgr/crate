@@ -12,8 +12,9 @@ albums via your account, or the older way through OwnTone), **Soulseek** (slskd:
 search, download, import), **Apple Music** (iTunes Match imports) and **YouTube** (yt-dlp). With all
 of them off Crate is a plain folder → iPod manager.
 
-- **Sidebar**: Library (Recently Added, Albums, Artists, Songs), Playlists (OwnTone's, Subsonic's,
-  plus the ones only on the iPod), Sources (one per plugin). Search is at the top of the sidebar and looks
+- **Sidebar**: Library (Recently Added, Albums, Artists, Songs, Playlists), Sources (one per plugin) and
+  the playlists you pin (right-click › Pin to Sidebar; kept as `pinnedPlaylists`). The Playlists page shows them all
+  as cards (Crate's, smart, only on the iPod, each server's), filtered by tab. Back/forward (⌘[ ⌘]) go through pages. Search is at the top of the sidebar and looks
   through everything (library, playlists, Apple Music, Spotify) with a jump to Soulseek.
   Downloads and Activity are toolbar buttons; the iPod card at the bottom opens the iPod page.
 - **Albums**: grid or Cover Flow (same geometry as `imac/CoverFlow`), filter On iPod / Not on
@@ -44,7 +45,7 @@ of them off Crate is a plain folder → iPod manager.
   Apple's 2.3 firmware ignores it, but Frogger lists songs under it in Artists and Genres, so a
   compilation or a "feat." song stays under one name.
 - **Downloads**: one list for Soulseek folders and Apple Music imports (filter by source/state).
-  Finished slskd folders (`/path/to/slskd/downloads/<folder>`) are copied into the import
+  Finished slskd folders (from its downloads folder as this Mac sees it) are copied into the import
   folder automatically. slskd logs in with your web username/password (password in the
   Keychain) or an API key; slskd's web port (5030 by default) has to be reachable from the Mac.
 - **Apple Music**: filter, On This Mac / In iCloud, sort, group (A–Z with an index, artist,
@@ -57,8 +58,9 @@ of them off Crate is a plain folder → iPod manager.
 - **Subsonic** (plugin, `Subsonic.swift`): a Subsonic server's songs join the library and its
   playlists show in the sidebar (OpenSubsonic JSON API, token login; server, username, music folder
   in Settings, the password in `secrets.json`). Songs whose files are in the music folder as this
-  Mac sees it (`/path/to/music`) are used from there; that needs real paths (Navidrome:
-  Settings › Players › Crate › Report Real Path). Others are downloaded (`download`, original file)
+  Mac sees it (set in Settings) are used from there; that needs real paths (Navidrome:
+  Settings › Players › Crate › Report Real Path; without it the folder still matches and Crate takes the file in it
+  whose name ends with or has the title). Others are downloaded (`download`, original file)
   into `~/Library/Caches/nl.jrvgr.crate/Subsonic` when a sync needs them, stream when played
   here and take their cover from `getCoverArt`. Imports, tag and cover edits ask for a `startScan`
   (admin users only), and Sync scrobbles the iPod's plays (Play Counts) to the server.
@@ -68,7 +70,8 @@ of them off Crate is a plain folder → iPod manager.
   replace) as `opensubsonic://track/<id>` (MA has the same Navidrome as a provider) or Spotify URIs;
   songs not on the Subsonic server can't go. The iPod's buttons, wheel (volume), Space and the menu
   bar drive MA's queue, and Crate reads the queue back once a second to show it; when the queue is
-  replaced elsewhere Crate lets go. HTTP `POST /api` with a long-lived token (MA › profile), kept in
+  replaced elsewhere Crate lets go. Picking another speaker moves what's playing there (same song and spot); picking
+  one that's already playing something else picks that up instead (its current song shows, the controls drive it). HTTP `POST /api` with a long-lived token (MA › profile), kept in
   secrets.json.
 - **Spotify** (plugin, `Spotify.swift`): reads your saved albums and playlists through the Web API
   (your own app on developer.spotify.com, PKCE login with a listener on 127.0.0.1:8765; refresh

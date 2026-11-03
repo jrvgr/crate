@@ -81,12 +81,18 @@ struct ArtistDetail: View {
                 VStack(alignment: .leading, spacing: 26) {
                     header(display, lib: lib, tracks: tracks, spotify: spotify, apple: apple)
                     if let lib {
-                        section("In Your Library", count: lib.albums.count)
-                        LazyVGrid(columns: columns, spacing: 26) {
-                            ForEach(lib.albums) { al in
-                                NavigationLink(value: Route.album(al)) { AlbumTile(album: al) }
-                                    .buttonStyle(.plain)
-                                    .contextMenu { AlbumMenu(album: al) }
+                        // albums, EPs and singles apart, like a record shop's bins
+                        ForEach(ReleaseKind.allCases, id: \.self) { kind in
+                            let list = lib.albums.filter { ReleaseKind.of($0) == kind }
+                            if !list.isEmpty {
+                                section(kind.title, count: list.count)
+                                LazyVGrid(columns: columns, spacing: 26) {
+                                    ForEach(list) { al in
+                                        NavigationLink(value: Route.album(al)) { AlbumTile(album: al) }
+                                            .buttonStyle(.plain)
+                                            .contextMenu { AlbumMenu(album: al) }
+                                    }
+                                }
                             }
                         }
                     }
@@ -129,21 +135,28 @@ struct ArtistDetail: View {
                             .buttonStyle(.glassProminent)
                         Button { Task { await model.play(tracks.shuffled()) } } label: { Image(systemName: "shuffle") }
                             .buttonStyle(.glass).help("Shuffle")
-                        if m != .onIPod {
-                            Button("Add All to iPod", systemImage: "plus") { model.addAll(lib) }
-                                .buttonStyle(.glass).disabled(model.ipod == nil)
+                        let kept = model.keptArtists.contains(lib.id)
+                        Menu {
+                            if m != .onIPod {
+                                Button("Add All to iPod", systemImage: "plus") { model.addAll(lib) }.disabled(model.ipod == nil)
+                            }
+                            if m != .none {
+                                Button("Remove All from iPod", systemImage: "minus") { model.removeAll(lib) }
+                            }
+                            Divider()
+                            Toggle(isOn: Binding(get: { kept }, set: { _ in model.toggleKeep(lib) })) {
+                                Label("Keep on iPod", systemImage: "pin")
+                            }
+                        } label: {
+                            Label { Text(ipodTitle(m, kept: kept)) } icon: { Image(symbol: kept ? "pin.fill" : m == .none ? "plus" : "ipod") }
                         }
-                        if m != .none {
-                            Button("Remove All", systemImage: "minus") { model.removeAll(lib) }.buttonStyle(.glass)
-                        }
-                        Toggle(isOn: Binding(get: { model.keptArtists.contains(lib.id) }, set: { _ in model.toggleKeep(lib) })) {
-                            Label("Keep on iPod", systemImage: "pin")
-                        }
-                        .toggleStyle(.button).buttonStyle(.glass)
-                        .help("Every album by \(lib.name) goes to the iPod, also ones you add later")
-                        Menu { AddToPlaylistMenu(tracks: tracks) } label: { Image(systemName: "text.badge.plus") }
-                            .menuStyle(.button).buttonStyle(.glass).menuIndicator(.hidden).fixedSize()
-                            .help("Add to Playlist")
+                        .glassMenu()
+                        .help(kept ? "Every album by \(lib.name) goes to the iPod, also ones you add later" : "Put \(lib.name) on the iPod")
+                        Menu {
+                            AddToPlaylistMenu(tracks: tracks)
+                        } label: { Image(systemName: "ellipsis") }
+                            .glassMenu(indicator: false)
+                            .help("More")
                     }
                     .padding(.top, 8)
                 }
@@ -152,10 +165,25 @@ struct ArtistDetail: View {
         }
     }
 
+    func ipodTitle(_ m: SyncMark, kept: Bool) -> String {
+        if kept { return "Kept on iPod" }
+        switch m {
+        case .none: return "Add to iPod"
+        case .onIPod: return "On iPod"
+        case .partial: return "Partly on iPod"
+        case .adding: return "Adding to iPod"
+        case .removing: return "Removing from iPod"
+        }
+    }
+
     func stats(_ lib: Artist?, tracks: [LibTrack], spotify: Int, apple: Int) -> String {
         var parts: [String] = []
         if let lib {
-            parts.append("\(lib.albums.count) album\(lib.albums.count == 1 ? "" : "s") · \(tracks.count) songs · "
+            let kinds = ReleaseKind.allCases.compactMap { k in
+                let n = lib.albums.filter { ReleaseKind.of($0) == k }.count
+                return n > 0 ? "\(n) \(n == 1 ? k.one : k.title.lowercased())" : nil
+            }
+            parts.append(kinds.joined(separator: " · ") + " · \(tracks.count) songs · "
                          + totalDuration(tracks.map(\.lengthMs).reduce(0, +)))
         } else {
             parts.append("Not in your library")
@@ -199,4 +227,12 @@ enum ArtistLetters {
             }
         }
     }
+}
+
+/// What a release is, from its number of songs: up to 3 a single, up to 6 an EP, longer an album.
+enum ReleaseKind: CaseIterable {
+    case album, ep, single
+    static func of(_ a: Album) -> ReleaseKind { a.tracks.count <= 3 ? .single : a.tracks.count <= 6 ? .ep : .album }
+    var title: String { switch self { case .album: "Albums"; case .ep: "EPs"; case .single: "Singles" } }
+    var one: String { switch self { case .album: "album"; case .ep: "EP"; case .single: "single" } }
 }

@@ -578,14 +578,18 @@ struct LiveIPod: View {
     @EnvironmentObject var model: Model
     @EnvironmentObject var player: Player
     var height: CGFloat
+    @StateObject private var last = LastPlaying()
     var body: some View {
         let t = player.current
-        // playing with the iPod unplugged: still a player, so keep it lit
-        let mode = t != nil && model.podArtMode == .offline ? .idle : model.podArtMode
-        IPodArt(mode: mode, name: model.podName, height: height, nowPlaying: t.map { t in
-            .init(title: t.title, artist: t.trackArtist.isEmpty ? t.artist : t.trackArtist, album: t.album,
-                  index: player.index + 1, count: player.queue.count, time: player.time, length: player.length, playing: player.playing)
-        }, controls: t.map { t in
+        let np = t.map { t in
+            IPodArt.NowPlaying(title: t.title, artist: t.trackArtist.isEmpty ? t.artist : t.trackArtist, album: t.album,
+                               index: player.index + 1, count: player.queue.count, time: player.time, length: player.length, playing: player.playing)
+        }
+        // a drawn remote, not the real iPod: always lit, no sync state; it keeps the frog so the sticker
+        // travels along when it lifts out. Once the music stops it still shrinks back into the card: keep
+        // the last song (paused) on its screen meanwhile instead of flipping to the menu.
+        IPodArt(mode: .idle, name: "", height: height, nowPlaying: np ?? last.value.map { var v = $0; v.playing = false; return v },
+                controls: t.map { t in
             .init(previous: { player.previous() }, toggle: { player.toggle() }, next: { player.next() },
                   menu: { if !model.path.isEmpty { model.path.removeLast() } },
                   select: {
@@ -595,7 +599,21 @@ struct LiveIPod: View {
                   seek: { player.seek($0 * player.length) },
                   position: player.length > 0 ? player.time / player.length : 0,
                   volume: player.volume, setVolume: { player.setVolume($0) })
-        }, frogger: model.podSettings.frogger == .installed)
+        }, frogger: model.froggerSticker)
+        .onChange(of: np) { _, v in if let v { last.value = v } }
+        .onAppear { last.value = np }
+    }
+}
+
+@MainActor
+final class LastPlaying: ObservableObject { var value: IPodArt.NowPlaying? }
+
+/// The real iPod as drawn: its name, sync state and sticker, never what Crate is playing.
+struct PodPicture: View {
+    @EnvironmentObject var model: Model
+    var height: CGFloat
+    var body: some View {
+        IPodArt(mode: model.podArtMode, name: model.podName, height: height, frogger: model.froggerSticker)
     }
 }
 
@@ -608,7 +626,7 @@ struct SidebarIPod: View {
     @StateObject private var hover = HoverState()
     var body: some View {
         let big = hover.on || model.syncing || model.dropTarget == .ipod
-        IPodArt(mode: model.podArtMode, name: model.podName, height: big ? 180 : 44, frogger: model.podSettings.frogger == .installed)
+        IPodArt(mode: model.podArtMode, name: model.podName, height: big ? 180 : 44, frogger: model.froggerSticker)
             .scaleEffect(model.dropTarget == .ipod ? 1.06 : 1)
             .animation(.spring(response: 0.45, dampingFraction: 0.62), value: big)
             .animation(.spring(response: 0.3, dampingFraction: 0.5), value: model.dropTarget == .ipod)

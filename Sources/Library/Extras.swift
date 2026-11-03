@@ -73,7 +73,7 @@ struct MatchSheet: View {
                             HStack(spacing: 12) {
                                 Toggle("", isOn: $s.rows[i].on).labelsHidden()
                                 VStack(alignment: .leading, spacing: 1) {
-                                    Label(r.pod.title, systemImage: "ipod").lineLimit(1)
+                                    Label(r.pod.title, pod: model.ipod?.glyph).lineLimit(1)
                                     Text("\(r.pod.artist) — \(r.pod.album)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -120,25 +120,41 @@ extension Model {
         ratings[t.key] = stars
         Store.save("ratings.json", ratings)
     }
+
+    /// The same for a song on the iPod (its library song's key when it's matched to one).
+    func rating(_ t: PodTrack) -> Int { ratings[aliases[t.key] ?? t.key] ?? t.stars }
+
+    func rate(_ t: PodTrack, _ stars: Int) {
+        ratings[aliases[t.key] ?? t.key] = stars
+        Store.save("ratings.json", ratings)
+    }
 }
 
-/// Five small stars; click one to rate, click the same again to clear.
+/// Five small stars; click one to rate, click the same again to clear. Unrated songs show them only on
+/// hover, and hovering previews the rating a click gives.
 struct StarPicker: View {
     var value: Int
     var set: (Int) -> Void
+    @StateObject private var hover = StarHover()
     var body: some View {
+        let shown = hover.star ?? value
         HStack(spacing: 1) {
             ForEach(1...5, id: \.self) { n in
-                Image(systemName: n <= value ? "star.fill" : "star")
+                Image(systemName: n <= shown ? "star.fill" : "star")
                     .font(.system(size: 9))
-                    .foregroundStyle(n <= value ? AnyShapeStyle(.secondary) : AnyShapeStyle(.quaternary))
+                    .foregroundStyle(n <= shown ? (hover.star != nil ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary)) : AnyShapeStyle(.quaternary))
                     .contentShape(.rect)
-                    .onTapGesture { set(n == value ? 0 : n) }
+                    .onHover { h in if h { hover.star = n } else if hover.star == n { hover.star = nil } }
+                    .onTapGesture { set(n == value ? 0 : n); hover.star = nil }
             }
         }
+        .opacity(value == 0 && hover.star == nil && !hover.row ? 0 : 1)
+        .onHover { hover.row = $0 }
         .help("Rating (written to the iPod on Sync)")
     }
 }
+
+final class StarHover: ObservableObject { @Published var star: Int?; @Published var row = false }
 
 // MARK: artists kept on the iPod
 

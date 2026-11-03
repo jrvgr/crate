@@ -13,7 +13,7 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 12) {
             // iPod
             HStack(spacing: 10) {
-                Image(systemName: "ipod").font(.title2).frame(width: 30)
+                Image.pod(model.ipod?.glyph, height: 24).frame(width: 30)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(model.ipod == nil ? "No iPod" : model.podName).font(.headline)
                     Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -60,7 +60,7 @@ struct MenuBarView: View {
                 Text("Downloading").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 ForEach(downloads.prefix(4)) { d in
                     HStack(spacing: 8) {
-                        Image(systemName: d.source.icon).foregroundStyle(d.source.tint).frame(width: 16)
+                        Image(symbol: d.source.icon).foregroundStyle(d.source.tint).frame(width: 16)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(d.title).font(.callout).lineLimit(1)
                             ProgressView(value: d.progress).controlSize(.mini)

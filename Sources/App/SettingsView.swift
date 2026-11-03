@@ -21,9 +21,9 @@ struct SettingsView: View {
         TabView(selection: $tab) {
             Tab("Library", systemImage: "square.stack", value: "Library") { LibrarySettings() }
             Tab("Plugins", systemImage: "puzzlepiece.extension", value: "Plugins") { PluginSettings() }
-            Tab("iPod", systemImage: "ipod", value: "iPod") { IPodSettingsInfo() }
         }
         .frame(width: 620, height: 600)
+        .onAppear { if tab == "iPod" { tab = "Library" } }     // the iPod tab is gone: its settings are on the iPod page
     }
 }
 
@@ -57,6 +57,30 @@ struct FolderField: View {
     }
 }
 
+extension Model {
+    struct LibrarySource { var title, detail, from, icon, help: String }
+
+    /// Where the library's songs come from besides the music folders: plugins and the import folder.
+    var librarySources: [LibrarySource] {
+        var out: [LibrarySource] = []
+        if on(.subsonic) {
+            let host = URL(string: subsonic.url)?.host ?? subsonic.url
+            out.append(.init(title: "Subsonic server", detail: [host, subsonic.musicFolder].filter { !$0.isEmpty }.joined(separator: " · "),
+                             from: "Subsonic plugin", icon: PluginID.subsonic.icon,
+                             help: "The server's songs; set up in Settings › Plugins › Subsonic"))
+        }
+        if on(.ownTone) {
+            out.append(.init(title: "OwnTone", detail: URL(string: ownToneURL)?.host ?? ownToneURL, from: "OwnTone plugin",
+                             icon: PluginID.ownTone.icon, help: "OwnTone's library; set up in Settings › Plugins › OwnTone"))
+        }
+        if !importRoot.isEmpty, !folders.contains(importRoot) {
+            out.append(.init(title: "Import folder", detail: importRoot, from: "Imports", icon: "square.and.arrow.down",
+                             help: "Always read, so new imports show up right away; set under Imports below"))
+        }
+        return out
+    }
+}
+
 struct LibrarySettings: View {
     @EnvironmentObject var model: Model
     @AppStorage("menuBarExtra") private var menuBar = true
@@ -74,9 +98,21 @@ struct LibrarySettings: View {
                         }
                         .tag(f)
                     }
+                    // what else the library reads, so an empty list doesn't look like no music; these are set elsewhere
+                    ForEach(model.librarySources, id: \.title) { src in
+                        HStack(spacing: 8) {
+                            Image(symbol: src.icon).foregroundStyle(.secondary).frame(width: 16)
+                            Text(src.title).lineLimit(1)
+                            Text(src.detail).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                            Spacer(minLength: 4)
+                            Text(src.from).font(.caption).foregroundStyle(.tertiary)
+                        }
+                        .selectionDisabled()
+                        .help(src.help)
+                    }
                 }
                 .frame(height: 110)
-                .overlay { if model.folders.isEmpty { Text("No folders").foregroundStyle(.secondary) } }
+                .overlay { if model.folders.isEmpty && model.librarySources.isEmpty { Text("No folders").foregroundStyle(.secondary) } }
                 HStack(spacing: 4) {
                     Button { if let p = chooseFolder("Choose a folder with music") , !model.folders.contains(p) { model.folders.append(p) } } label: {
                         Image(systemName: "plus").frame(width: 18)
@@ -91,7 +127,7 @@ struct LibrarySettings: View {
                 }
                 .buttonStyle(.borderless)
             } header: { Text("Music Folders") } footer: {
-                Text("Crate reads every audio file in these folders (Artist/Album/Track, or the files' tags).")
+                Text("Crate reads every audio file in these folders (Artist/Album/Track, or the files' tags). The grey rows come from plugins and the import folder; change them there.")
             }
             Section {
                 FolderField(title: "Import into", path: model.$importFolder, help: "Where dropped files, imports and downloads go; empty: the music folder")
@@ -105,6 +141,8 @@ struct LibrarySettings: View {
             }
             Section {
                 Toggle("Show Crate in the menu bar", isOn: $menuBar)
+                Toggle("Frogger features", isOn: $model.froggerFeatures)
+                    .help("The frog sticker, hiding songs from the iPod's Artists and Albums, the Cover Studio and cover art on Sync, and the Frogger section on the iPod's page. Turn off for a stock iPod")
                 SettingsTransferRow()
             } header: { Text("App") }
             Section {
@@ -331,26 +369,5 @@ struct PluginHeader: View {
             Toggle("", isOn: on).toggleStyle(.switch).labelsHidden()
         }
         .padding(.vertical, 4)
-    }
-}
-
-struct IPodSettingsInfo: View {
-    @EnvironmentObject var model: Model
-    var body: some View {
-        Form {
-            Section {
-                if let i = model.ipod {
-                    LabeledContent("Connected", value: "\(model.podName) – \(i.modelName)")
-                    LabeledContent("Lossless converted to", value: "\(model.podSettings.aacKbps) kbps AAC")
-                    LabeledContent("Eject after sync", value: model.podSettings.ejectAfterSync ? "On" : "Off")
-                    Button("Open iPod Settings") { model.search = ""; model.pane = .ipod; NSApp.keyWindow?.close() }
-                } else {
-                    Text("No iPod connected").foregroundStyle(.secondary)
-                }
-            } footer: {
-                Text("Each iPod keeps its own settings (name, conversion, On-The-Go, eject after sync) on its Summary page in the sidebar.")
-            }
-        }
-        .formStyle(.grouped)
     }
 }

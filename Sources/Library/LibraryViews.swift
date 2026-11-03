@@ -119,6 +119,14 @@ struct AlbumsView: View {
         .navigationSubtitle("\(list.count) albums")
         .toolbar {
             ToolbarItem(placement: .navigation) {
+                Picker("View", selection: model.$albumView) {
+                    Image(systemName: "square.grid.2x2").tag("grid").help("Grid")
+                    Image(systemName: "list.bullet").tag("list").help("List")
+                    Image(systemName: "rectangle.stack").tag("flow").help("Cover Flow")
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
+            }
+            ToolbarItem(placement: .navigation) {
                 Menu {
                     Picker("Show", selection: $model.albumFilter) {
                         ForEach(AlbumFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -131,18 +139,11 @@ struct AlbumsView: View {
                     Toggle("Group by Artist", isOn: model.$albumsByArtist)
                         .disabled(model.albumView != "grid")
                 } label: {
-                    Label(model.albumFilter == .all ? "Show and Sort" : model.albumFilter.rawValue,
-                          systemImage: model.albumFilter == .all ? "line.3.horizontal.decrease" : "line.3.horizontal.decrease.circle.fill")
+                    Label(model.albumFilter == .all ? model.albumSort.rawValue : "\(model.albumFilter.rawValue) · \(model.albumSort.rawValue)",
+                          systemImage: model.albumFilter == .all ? "arrow.up.arrow.down" : "line.3.horizontal.decrease.circle.fill")
+                        .labelStyle(.titleAndIcon)
                 }
                 .help("Show all albums or only those on / not on the iPod, and sort them")
-            }
-            ToolbarItem(placement: .navigation) {
-                Picker("View", selection: model.$albumView) {
-                    Image(systemName: "square.grid.2x2").tag("grid").help("Grid")
-                    Image(systemName: "list.bullet").tag("list").help("List")
-                    Image(systemName: "rectangle.stack").tag("flow").help("Cover Flow")
-                }
-                .pickerStyle(.segmented).labelsHidden().fixedSize()
             }
         }
     }
@@ -196,23 +197,29 @@ struct AlbumList: View {
         let decades = Set(albums.map(\.year).filter { $0 > 0 }.map { $0 / 10 * 10 }).sorted(by: >)
         return HStack(spacing: 10) {
             FilterField(prompt: "Album, artist, song, genre, year", text: $ui.query)
-            Picker("Genre", selection: $ui.genre) {
-                Text("All Genres").tag("")
-                Divider()
-                ForEach(genres, id: \.self) { Text($0).tag($0) }
-            }
-            .labelsHidden().fixedSize()
-            Picker("Decade", selection: $ui.decade) {
-                Text("Any Year").tag(0)
-                Divider()
-                ForEach(decades, id: \.self) { Text("\(String($0))s").tag($0) }
-                Text("No Year").tag(-1)
-            }
-            .labelsHidden().fixedSize()
-            Toggle("Lossless", isOn: $ui.lossless).toggleStyle(.button)
+            Menu {
+                Picker("Genre", selection: $ui.genre) {
+                    Text("All Genres").tag("")
+                    Divider()
+                    ForEach(genres, id: \.self) { Text($0).tag($0) }
+                }
+                .pickerStyle(.inline)
+            } label: { Text(ui.genre.isEmpty ? "All Genres" : ui.genre) }
+            .glassMenu()
+            Menu {
+                Picker("Decade", selection: $ui.decade) {
+                    Text("Any Year").tag(0)
+                    Divider()
+                    ForEach(decades, id: \.self) { Text("\(String($0))s").tag($0) }
+                    Text("No Year").tag(-1)
+                }
+                .pickerStyle(.inline)
+            } label: { Text(ui.decade == 0 ? "Any Year" : ui.decade < 0 ? "No Year" : "\(String(ui.decade))s") }
+            .glassMenu()
+            Toggle("Lossless", isOn: $ui.lossless).toggleStyle(.button).buttonStyle(.glass)
                 .help("Albums with FLAC, WAV or AIFF files (converted to AAC on the iPod)")
             Spacer()
-            if ui.filtering { Button("Clear") { ui.clear() }.buttonStyle(.borderless) }
+            if ui.filtering { Button("Clear") { ui.clear() }.buttonStyle(.glass) }
         }
         .controlSize(.small)
         .padding(.horizontal, 12).padding(.vertical, 8)
@@ -311,9 +318,11 @@ struct AlbumMenu: View {
         }
         if m == .onIPod || m == .partial || m == .removing {
             Button(m == .removing ? "Keep on iPod" : "Remove from iPod", systemImage: "minus.circle") { model.toggleRemove(album) }
-            let hidden = album.tracks.allSatisfy(model.isHidden)
-            Button(hidden ? "Show in iPod Library" : "Hide from iPod Library", systemImage: hidden ? "eye" : "eye.slash") {
-                model.setHidden(album.tracks, !hidden)
+            if model.froggerFeatures {
+                let hidden = album.tracks.allSatisfy(model.isHidden)
+                Button(hidden ? "Show in iPod Library" : "Hide from iPod Library", systemImage: hidden ? "eye" : "eye.slash") {
+                    model.setHidden(album.tracks, !hidden)
+                }
             }
         }
         if !model.isPodOnly(album) {
@@ -343,6 +352,7 @@ struct AlbumMenu: View {
 
 struct AlbumTile: View {
     @EnvironmentObject var model: Model
+    @StateObject private var hover = HoverState()
     var album: Album
 
     var body: some View {
@@ -366,7 +376,8 @@ struct AlbumTile: View {
                     }
                     .buttonStyle(.plain)
                     .padding(8)
-                    .opacity(m == .none && model.ipod == nil ? 0 : 1)
+                    // on the iPod or not is the usual state: only on hover; partly, queued and removing always show
+                    .opacity((m == .none && model.ipod == nil) || ((m == .none || m == .onIPod) && !hover.on) ? 0 : 1)
                 }
             Text(album.title).font(.headline).lineLimit(1)
             let year = album.year > 0 ? album.year : (model.metadata[album.id]?.year ?? 0)
@@ -374,6 +385,7 @@ struct AlbumTile: View {
                 .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
         }
         .contentShape(.rect)
+        .onHover { hover.on = $0 }
         .draggable(URL(fileURLWithPath: album.folder)) {
             Cover(image: model.artwork[album.id], seed: album.id).frame(width: 90, height: 90).clipShape(.rect(cornerRadius: 10))
         }
@@ -434,7 +446,7 @@ struct AlbumDetail: View {
                                 .filter { !$0.isEmpty }.joined(separator: " · "))
                             .foregroundStyle(.secondary)
                         let hidden = model.hiddenCount(album)
-                        if hidden.hidden > 0 {
+                        if model.froggerFeatures, hidden.hidden > 0 {
                             Label(hidden.hidden == hidden.onIPod ? "Hidden from Artists and Albums on the iPod (still in its playlists)"
                                   : "\(hidden.hidden) of \(hidden.onIPod) songs hidden from Artists and Albums on the iPod", systemImage: "eye.slash")
                                 .font(.callout).foregroundStyle(.secondary)
@@ -462,10 +474,12 @@ struct AlbumDetail: View {
                                     .buttonStyle(.glass).help("Edit Tags…")
                                 Button { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: album.folder) } label: { Image(systemName: "folder") }
                                     .buttonStyle(.glass).help("Show in Finder")
-                                Button {
-                                    Task { studio.open = true; await studio.select(album, model: model) }
-                                } label: { Image(systemName: "camera.filters") }
-                                    .buttonStyle(.glass).help("Cover Studio… (how this cover looks on Frogger's Now Playing page)")
+                                if model.froggerFeatures {
+                                    Button {
+                                        Task { studio.open = true; await studio.select(album, model: model) }
+                                    } label: { Image(systemName: "camera.filters") }
+                                        .buttonStyle(.glass).help("Cover Studio… (how this cover looks on Frogger's Now Playing page)")
+                                }
                             }
                         }
                         .padding(.top, 8)
@@ -574,7 +588,7 @@ struct PlaylistView: View {
                                        systemImage: m == .removing ? "arrow.uturn.backward" : "minus") { model.toggleRemove(pod) }
                                     .buttonStyle(.glass)
                             }
-                            if !onPodLib.isEmpty {
+                            if !onPodLib.isEmpty, model.froggerFeatures {
                                 Button(allHidden ? "Show in iPod Library" : "Hide from iPod Library", systemImage: allHidden ? "eye" : "eye.slash") {
                                     model.setHidden(onPodLib, !allHidden)
                                 }
@@ -677,7 +691,7 @@ struct TrackRow: View {
         .contextMenu {
             if let m = model.libraryTrack(for: track) {
                 Button("Go to Album", systemImage: "square.stack") { model.path.append(.album(m.album)) }
-                if let podTrack {
+                if let podTrack, model.froggerFeatures {
                     Button(hidden ? "Show in iPod Library" : "Hide from iPod Library", systemImage: hidden ? "eye" : "eye.slash") {
                         model.setHidden([podTrack], !hidden)
                     }
@@ -891,11 +905,15 @@ struct SpotifyGrid: View {
                             }
                             .clipShape(.rect(cornerRadius: 12))
                             .overlay(alignment: .topTrailing) {
-                                Image(systemName: model.hasFiles(a) ? "checkmark" : "dot.radiowaves.left.and.right")
-                                    .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
-                                    .frame(width: 24, height: 24)
-                                    .glassEffect(.regular.tint(model.hasFiles(a) ? .green : Color(red: 0.11, green: 0.73, blue: 0.33)), in: .circle)
-                                    .padding(7)
+                                // streaming is the norm on this page; only the albums you also have files for are marked
+                                if model.hasFiles(a) {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+                                        .frame(width: 24, height: 24)
+                                        .glassEffect(.regular.tint(.green), in: .circle)
+                                        .help("In the library")
+                                        .padding(7)
+                                }
                             }
                         Text(a.name).font(.headline).lineLimit(1)
                         Text("\(a.artist) · \(a.trackCount) saved").font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
@@ -1185,16 +1203,22 @@ struct ArtistList: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             HStack(spacing: 10) {
                 FilterField(prompt: "Artist or album", text: $ui.query)
-                Picker("Show", selection: $ui.show) { ForEach(AlbumFilter.allCases, id: \.self) { Text($0 == .all ? "All Artists" : $0.rawValue).tag($0) } }
-                    .labelsHidden().fixedSize()
-                Picker("Genre", selection: $ui.genre) {
-                    Text("All Genres").tag("")
-                    Divider()
-                    ForEach(genres, id: \.self) { Text($0).tag($0) }
-                }
-                .labelsHidden().fixedSize()
+                Menu {
+                    Picker("Show", selection: $ui.show) { ForEach(AlbumFilter.allCases, id: \.self) { Text($0 == .all ? "All Artists" : $0.rawValue).tag($0) } }
+                        .pickerStyle(.inline)
+                } label: { Text(ui.show == .all ? "All Artists" : ui.show.rawValue) }
+                .glassMenu()
+                Menu {
+                    Picker("Genre", selection: $ui.genre) {
+                        Text("All Genres").tag("")
+                        Divider()
+                        ForEach(genres, id: \.self) { Text($0).tag($0) }
+                    }
+                    .pickerStyle(.inline)
+                } label: { Text(ui.genre.isEmpty ? "All Genres" : ui.genre) }
+                .glassMenu()
                 Spacer()
-                if ui.filtering { Button("Clear") { ui.clear() }.buttonStyle(.borderless) }
+                if ui.filtering { Button("Clear") { ui.clear() }.buttonStyle(.glass) }
             }
             .controlSize(.small)
             .padding(.horizontal, 12).padding(.vertical, 8)
@@ -1291,7 +1315,8 @@ struct AppleMusicView: View {
             } else { grid(list, order: order, groups: groups, artistGrid: artistGrid, letters: letters, artistLetters: artistLetters) }
         }
         .navigationTitle("Apple Music")
-        .navigationSubtitle(ui.byArtist && ui.artist == nil ? "\(Set(list.map { $0.artist.lowercased() }).count) artists" : "\(list.count) albums")
+        .navigationSubtitle(model.amLoading && model.amAlbums.isEmpty ? "Reading the Music library…"
+                            : ui.byArtist && ui.artist == nil ? "\(Set(list.map { $0.artist.lowercased() }).count) artists" : "\(list.count) albums")
         .task { if model.amAlbums.isEmpty { await model.loadAppleMusic() } }
         .onChange(of: model.amHideImported) { model.amHidden = Set(model.amAlbums.filter(model.inLibrary).map(\.id)) }
         .onDisappear { model.amHidden = Set(model.amAlbums.filter(model.inLibrary).map(\.id)) }
@@ -1316,7 +1341,7 @@ struct AppleMusicView: View {
                         .pickerStyle(.inline)
                     Picker("Group By", selection: $ui.group) { ForEach(AMUI.Group.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
                         .pickerStyle(.inline)
-                } label: { Label("Sort and Group", systemImage: "arrow.up.arrow.down") }
+                } label: { Label(ui.sort.rawValue, systemImage: "arrow.up.arrow.down").labelStyle(.titleAndIcon) }
                 .help("Sort and group")
             }
             ToolbarItem(placement: .navigation) {
@@ -1435,7 +1460,7 @@ struct AMTile: View {
                     else if busy == nil {
                         Menu {
                             Button("Import to Library", systemImage: "square.and.arrow.down") { model.importAppleMusic(album, toIPod: false) }
-                            Button("Import and Add to iPod", systemImage: "ipod") { model.importAppleMusic(album, toIPod: true) }
+                            Button("Import and Add to iPod", pod: model.ipod?.glyph) { model.importAppleMusic(album, toIPod: true) }
                                 .disabled(model.ipod == nil)
                         } label: {
                             Image(systemName: "arrow.down").font(.system(size: 12, weight: .bold)).frame(width: 26, height: 26)
@@ -1447,7 +1472,7 @@ struct AMTile: View {
                     }
                 }
             Text(album.title).font(.headline).lineLimit(1)
-            Text(album.artist + (album.year > 0 ? " · \(album.year)" : "") + " · \(album.tracks.count) songs")
+            Text(album.artist + (album.year > 0 ? " · \(album.year)" : "") + " · \(album.tracks.count) song\(album.tracks.count == 1 ? "" : "s")")
                 .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
         }
         .contentShape(.rect)
@@ -1485,7 +1510,7 @@ struct LetterIndex: View {
         VStack(spacing: 0) {
             ForEach(letters, id: \.self) { l in
                 Text(l).font(.caption2.bold())
-                    .foregroundStyle(ui.current == l ? AnyShapeStyle(.primary) : AnyShapeStyle(.tint))
+                    .foregroundStyle(ui.current == l ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                     .scaleEffect(ui.current == l ? 1.35 : 1)
                     .frame(width: 18, height: row)
             }
@@ -1586,25 +1611,30 @@ struct SourceArtistHeader: View {
 /// an eye on the cover, with how many of its songs when only some are.
 struct HiddenMark: View {
     @EnvironmentObject var model: Model
+    @StateObject private var hover = HoverState()
     var album: Album
     var compact = false
 
     var body: some View {
         let h = model.hiddenCount(album)
-        if h.hidden > 0 {
+        if model.froggerFeatures, h.hidden > 0 {
             let all = h.hidden == h.onIPod
             let help = all ? "Hidden from Artists and Albums on the iPod; it still plays from its playlists"
                            : "\(h.hidden) of \(h.onIPod) songs hidden from Artists and Albums on the iPod"
             if compact {
                 Image(systemName: "eye.slash").foregroundStyle(.secondary).help(help)
             } else {
+                // says what it means on hover: the eye alone isn't obvious
                 HStack(spacing: 4) {
                     Image(systemName: "eye.slash")
-                    if !all { Text("\(h.hidden)/\(h.onIPod)").monospacedDigit() }
+                    if hover.on { Text(all ? "Hidden on the iPod" : "\(h.hidden) of \(h.onIPod) hidden on the iPod") }
+                    else if !all { Text("\(h.hidden)/\(h.onIPod)").monospacedDigit() }
                 }
                 .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
-                .padding(.horizontal, all ? 0 : 8).frame(minWidth: 26, minHeight: 26)
+                .padding(.horizontal, all && !hover.on ? 0 : 8).frame(minWidth: 26, minHeight: 26)
                 .glassEffect(.regular.tint(.black.opacity(0.35)), in: .capsule)
+                .animation(.snappy(duration: 0.15), value: hover.on)
+                .onHover { hover.on = $0 }
                 .help(help)
             }
         }

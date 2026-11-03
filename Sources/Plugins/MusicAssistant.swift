@@ -105,7 +105,10 @@ final class MusicAssistant: ObservableObject {
         catch { self.error = error.localizedDescription }
     }
 
-    struct QueueState { var index, items: Int; var elapsed, duration: Double; var playing: Bool; var volume: Double? }
+    struct QueueState {
+        var index, items: Int; var elapsed, duration: Double; var playing: Bool; var volume: Double?
+        var title = "", artist = "", album = ""          // what's playing, for a queue Crate didn't start
+    }
 
     func state(_ queue: String) async -> QueueState? {
         guard let q = try? await call("player_queues/get", ["queue_id": queue]) as? [String: Any] else { return nil }
@@ -115,8 +118,12 @@ final class MusicAssistant: ObservableObject {
         let playing = q["state"] as? String == "playing"
         // MA stamps the position when it last reported; add the time since
         if playing, let at = q["elapsed_time_last_updated"] as? Double { elapsed += max(0, Date().timeIntervalSince1970 - at) }
+        let item = q["current_item"] as? [String: Any], media = item?["media_item"] as? [String: Any]
         return QueueState(index: q["current_index"] as? Int ?? 0, items: q["items"] as? Int ?? 0, elapsed: elapsed,
-                          duration: (q["current_item"] as? [String: Any])?["duration"] as? Double ?? 0, playing: playing, volume: vol)
+                          duration: item?["duration"] as? Double ?? 0, playing: playing, volume: vol,
+                          title: media?["name"] as? String ?? item?["name"] as? String ?? "",
+                          artist: ((media?["artists"] as? [[String: Any]])?.first?["name"] as? String) ?? "",
+                          album: ((media?["album"] as? [String: Any])?["name"] as? String) ?? "")
     }
 
     /// A library song as MA knows it: the Subsonic server's id, or its Spotify URI.
@@ -170,7 +177,7 @@ struct PlayOnMenu: View {
     var body: some View {
         let remote = player.output != "mac"
         Menu {
-            Picker("Play On", selection: player.$output) {
+            Picker("Play On", selection: Binding(get: { player.output }, set: { player.move(to: $0) })) {
                 Label("This Mac", systemImage: "laptopcomputer").tag("mac")
                 if model.on(.musicAssistant) {
                     ForEach(ma.players) { p in Label(p.name, systemImage: p.group ? "hifispeaker.2" : "hifispeaker").tag("ma:" + p.id) }
@@ -185,6 +192,8 @@ struct PlayOnMenu: View {
             Label(remote ? model.remoteName ?? "Speaker" : "This Mac", systemImage: remote ? "hifispeaker.fill" : "hifispeaker")
         }
         .help(remote ? "Playing on \(model.remoteName ?? "a speaker"); click to change" : "Play on this Mac or a speaker")
-        .task(id: model.on(.musicAssistant)) { if model.on(.musicAssistant), ma.configured { try? await ma.loadPlayers() } }
+        .task(id: model.on(.musicAssistant)) {
+            if model.on(.musicAssistant), ma.configured { try? await ma.loadPlayers(); player.pickUp() }
+        }
     }
 }

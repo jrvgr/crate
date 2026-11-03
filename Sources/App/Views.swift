@@ -19,13 +19,18 @@ struct ContentView: View {
                     if !model.search.isEmpty { SearchView() }
                     else { PaneView(pane: model.pane ?? .albums) }
                 }
+                .modifier(BackForward())
                 .navigationDestination(for: Route.self) { r in
+                    Group {
                     switch r {
                     case .album(let a): AlbumDetail(album: a)
                     case .artist(let name): ArtistDetail(name: name)
                     case .spotifyAlbum(let a): SpotifyAlbumView(album: a)
                     case .amAlbum(let a): AMAlbumView(album: a)
                     }
+                    }
+                    .navigationBarBackButtonHidden(true)    // the window's own back button covers it
+                    .modifier(BackForward())
                 }
             }
             .overlay(alignment: .bottom) { ActivityBar() }
@@ -39,6 +44,7 @@ struct ContentView: View {
         .searchFocused($searchFocused)
         .onChange(of: model.focusSearch) { searchFocused = true }
         .quickLookPreview($model.quickLook)
+        .onChange(of: model.place) { old, _ in model.visited(from: old) }
         .toolbar {
             if model.on(.soulseek) || model.on(.appleMusic) || model.on(.youtube) {
                 ToolbarItem { DownloadsButton() }
@@ -120,6 +126,21 @@ struct ContentView: View {
     }
 }
 
+/// Back and forward through pages and what's open on them; first in the toolbar on every page.
+struct BackForward: ViewModifier {
+    @EnvironmentObject var model: Model
+    func body(content: Content) -> some View {
+        content.toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                Button { model.goBack() } label: { Label("Back", systemImage: "chevron.left") }
+                    .disabled(model.back.isEmpty).keyboardShortcut("[", modifiers: .command).help("Back")
+                Button { model.goForward() } label: { Label("Forward", systemImage: "chevron.right") }
+                    .disabled(model.forward.isEmpty).keyboardShortcut("]", modifiers: .command).help("Forward")
+            }
+        }
+    }
+}
+
 extension ContentView {
     var trashTitle: String {
         let ts = model.confirmTrash ?? []
@@ -147,6 +168,7 @@ struct PaneView: View {
         case .appleMusic: AppleMusicView()
         case .soulseek: SoulseekView()
         case .downloads: DownloadsView()
+        case .playlists: PlaylistsPage()
         case .playlist(let id):
             if let p = model.playlists.first(where: { $0.id == id }) { PlaylistView(playlist: p) }
             else { ContentUnavailableView("Playlist not found", systemImage: "music.note.list") }
@@ -179,7 +201,7 @@ enum SyncMark {
         case .onIPod: return .green
         case .partial: return .orange
         case .adding: return .accentColor
-        case .removing: return .red
+        case .removing: return .gray      // not red: the accent may be red, and adding uses it
         }
     }
     var help: String {
@@ -259,7 +281,9 @@ final class SidebarUI: ObservableObject {
 
 struct Sidebar: View {
     @EnvironmentObject var model: Model
+    @EnvironmentObject var player: Player
     @StateObject private var ui = SidebarUI()
+    @Namespace private var pod
 
     var body: some View {
         // Clicking a row always goes to its top level, also when it's already selected with an album open.
@@ -272,6 +296,7 @@ struct Sidebar: View {
                 SidebarRow(title: "Albums", icon: "square.stack", count: model.allAlbums.count).tag(Pane.albums)
                 SidebarRow(title: "Artists", icon: "music.microphone", count: model.artists.count).tag(Pane.artists)
                 SidebarRow(title: "Songs", icon: "music.note", count: model.libTracks.count).tag(Pane.songs)
+                SidebarRow(title: "Playlists", icon: "music.note.list", count: model.playlistCount).tag(Pane.playlists)
                 Label("Needs Attention", systemImage: "stethoscope").tag(Pane.health)
                 Label("Year in Review", systemImage: "chart.bar.xaxis").tag(Pane.review)
             }
@@ -284,126 +309,53 @@ struct Sidebar: View {
                     }
                 }
             }
-            Section(isExpanded: $ui.playlists) {
-                ForEach(model.cratePlaylists) { p in
-                    HStack {
-                        Label(p.name, systemImage: "music.note.list").lineLimit(1)
-                        Spacer()
-                        if p.onIPod { SidebarMark(mark: model.crateNeedsSync(p) ? .adding : .onIPod) }
-                    }
-                    .tag(Pane.cratePlaylist(p.id))
-                    .contextMenu {
-                        Button("Rename…", systemImage: "pencil") { model.startRename(.crate(p.id)) }
-                        Button(p.onIPod ? "Don't Keep on iPod" : "Keep on iPod", systemImage: "ipod") {
-                            if let i = model.cratePlaylist(p.id) { model.cratePlaylists[i].onIPod.toggle() }
-                        }
-                        Divider()
-                        Button("Delete…", systemImage: "trash", role: .destructive) { model.confirmDeletePlaylist = .crate(p.id) }
-                    }
-                }
-            } header: {
-                HStack {
-                    Text("Playlists")
-                    Spacer()
-                    Button { model.newPlaylist() } label: { Image(systemName: "plus") }
-                        .buttonStyle(.borderless).help("New Playlist")
-                }
-            }
-
-            Section(isExpanded: $ui.smart) {
-                ForEach(model.smartPlaylists) { p in
-                    HStack {
-                        Label(p.name, systemImage: "gearshape.2").lineLimit(1)
-                        Spacer()
-                        if p.onIPod { SidebarMark(mark: model.smartNeedingSync.contains(p.id) ? .adding : .onIPod) }
-                    }
-                    .tag(Pane.smart(p.id))
-                    .contextMenu {
-                        Button("Edit Rules…", systemImage: "slider.horizontal.3") { model.editSmart = p }
-                        Button("Delete", systemImage: "trash", role: .destructive) { model.deleteSmart(p) }
-                    }
-                }
-                if model.smartPlaylists.isEmpty {
-                    ForEach(SmartPlaylist.suggestions(genres: model.topGenres).prefix(4)) { p in
-                        Button { model.editSmart = p } label: { Label(p.name, systemImage: "sparkles") }
-                            .buttonStyle(.plain).foregroundStyle(.secondary).help("Suggested; click to set it up")
-                    }
-                }
-            } header: {
-                HStack {
-                    Text("Smart Playlists")
-                    Spacer()
-                    Menu {
-                        Button("New Smart Playlist…") { model.editSmart = SmartPlaylist() }
-                        Divider()
-                        Section("Suggestions") {
-                            ForEach(SmartPlaylist.suggestions(genres: model.topGenres).filter { s in !model.smartPlaylists.contains { $0.name == s.name } }) { p in
-                                Button(p.name) { model.editSmart = p }
-                            }
-                        }
-                    } label: { Image(systemName: "plus") }
-                    .menuStyle(.button).buttonStyle(.borderless).menuIndicator(.hidden).fixedSize()
-                    .help("New smart playlist, or start from a suggestion")
-                }
-            }
-
-            // playlists that are only on the iPod (made there or elsewhere); the ones Crate puts there show their
-            // iPod mark in their own section, so they aren't listed twice
-            if let db = model.db, !model.podOnlyPlaylists.isEmpty || !model.onTheGo.isEmpty {
-                Section(isExpanded: $ui.ipod) {
-                    ForEach(model.podOnlyPlaylists) { p in
-                        let origin = model.origin(of: p)
+            let pins = model.pinned.compactMap { p in model.pinLabel(p).map { (p, $0) } }
+            if !pins.isEmpty {
+                Section("Pinned") {
+                    ForEach(pins, id: \.0) { pane, l in
                         HStack {
-                            Label(model.podDisplayName(p), systemImage: origin.icon).lineLimit(1)
+                            Label(l.name, systemImage: l.icon).lineLimit(1)
                             Spacer()
-                            if model.playlistsToRemove.contains(p.id) { SidebarMark(mark: .removing) }
-                            else if model.podEdits[p.id] != nil { SidebarMark(mark: .adding) }
-                            else { Text("\(p.items.count)").font(.caption).foregroundStyle(.secondary).monospacedDigit() }
+                            SidebarMark(mark: l.mark)
                         }
-                        .tag(Pane.podPlaylist(p.id))
-                        .help(origin.help)
-                        .contextMenu {
-                            Button("Rename…", systemImage: "pencil") { model.startRename(.pod(p.id)) }
-                            Button(model.playlistsToRemove.contains(p.id) ? "Keep on iPod" : "Remove from iPod", systemImage: "minus.circle") {
-                                model.toggleRemove(p)
-                            }
-                            HiddenPlaylistButton(name: p.name)
-                        }
+                        .tag(pane)
+                        .contextMenu { PinButton(pane: pane) }
                     }
-                    ForEach(model.onTheGo, id: \.self) { l in
-                        let name: String = switch l.kind {
-                        case .onTheGo: "On-The-Go (new)"
-                        case .saved(let n): "New Playlist \(n) (new)"
-                        case .synced(let i): (db.playlists.indices.contains(i - 1) ? model.podDisplayName(db.playlists[i - 1]) : "Playlist") + " (changed)"
-                        }
-                        HStack {
-                            Label(name, systemImage: "hand.tap")
-                            Spacer()
-                            SidebarMark(mark: model.podSavedLists.contains(l) ? .adding : .none)
-                        }
-                        .help("\(l.trackIDs.count) songs, as made on the iPod; kept on Sync")
-                    }
-                } header: { Text("On \(model.podName)") }
-            }
-
-            ForEach(model.remoteSources, id: \.self) { source in
-                Section(isExpanded: Binding(get: { !ui.collapsed.contains(source) }, set: { open in
-                    if open { ui.collapsed.remove(source) } else { ui.collapsed.insert(source) }
-                })) {
-                    ForEach(model.playlists.filter { model.source(of: $0) == source }) { p in
-                        HStack {
-                            Label(p.name, systemImage: "music.note.list").lineLimit(1)
-                            Spacer()
-                            SidebarMark(mark: model.mark(p))
-                        }
-                        .tag(Pane.playlist(p.id))
-                        .contextMenu { PlaylistMenu(playlist: p) }
-                    }
-                } header: { Text("\(source) Playlists") }
+                    // reorder by dragging (pins counts only the playlists still there)
+                    .onMove { var p = pins.map(\.0); p.move(fromOffsets: $0, toOffset: $1); model.pinned = p }
+                }
             }
         }
+        .dropDestination(for: String.self) { items, _ in model.pinDropped(items) }
         ShareNotice().padding(.horizontal, 10).padding(.top, 6)
-        IPodCard().padding(10)
+        // when music starts the remote lifts out of the card's iPod, which leaves an icon behind
+        VStack(spacing: 0) {
+            if player.current != nil { PlayerCard(ns: pod).padding(.top, 10) }
+            IPodCard(ns: pod).padding(10)
+        }
+        .animation(.spring(response: 0.5, dampingFraction: 0.8), value: player.current == nil)
+        }
+    }
+}
+
+/// A sidebar group's header: the chevron always shows (List only shows its own on hover) and the whole title toggles.
+struct SidebarHeader<Trailing: View>: View {
+    var title: String
+    @Binding var open: Bool
+    @ViewBuilder var trailing: Trailing
+    var body: some View {
+        HStack(spacing: 4) {
+            Button { withAnimation(.snappy(duration: 0.2)) { open.toggle() } } label: {
+                HStack(spacing: 4) {
+                    Text(title)
+                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
+                        .rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(.tertiary)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            trailing
         }
     }
 }
@@ -426,7 +378,7 @@ struct PlaylistMenu: View {
     var body: some View {
         let pod = model.podPlaylist(for: playlist)
         Button(model.playlistsToAdd.contains(playlist.id) ? "Don't Sync" : pod == nil ? "Add to iPod" : "Update on iPod",
-               systemImage: "ipod") { model.toggleAdd(playlist) }
+               pod: model.ipod?.glyph) { model.toggleAdd(playlist) }
         if let pod {
             Button(model.playlistsToRemove.contains(pod.id) ? "Keep on iPod" : "Remove from iPod", systemImage: "minus.circle") {
                 model.toggleRemove(pod)
@@ -453,8 +405,10 @@ struct HiddenPlaylistButton: View {
     var name: String
     var body: some View {
         let on = model.isHiddenPlaylist(name)
-        Button(on ? "Show Its Songs in iPod Library" : "Hide Its Songs from iPod Library", systemImage: on ? "eye" : "eye.slash") {
-            model.toggleHiddenPlaylist(name)
+        if model.froggerFeatures {
+            Button(on ? "Show Its Songs in iPod Library" : "Hide Its Songs from iPod Library", systemImage: on ? "eye" : "eye.slash") {
+                model.toggleHiddenPlaylist(name)
+            }
         }
     }
 }
@@ -462,25 +416,29 @@ struct HiddenPlaylistButton: View {
 struct IPodCard: View {
     @EnvironmentObject var model: Model
     @EnvironmentObject var player: Player
-    @Namespace private var ns
+    @StateObject private var hover = HoverState()
+    var ns: Namespace.ID
 
     var body: some View {
-        // big while syncing, for a drop, and while playing (it's the player then)
-        let playing = player.current != nil
-        let big = model.syncing || model.dropTarget == .ipod || playing
+        // big while syncing and for a drop, unless the player card already shows a big iPod
+        let big = (model.syncing || model.dropTarget == .ipod) && player.current == nil
         VStack(alignment: .leading, spacing: 8) {
             if big {
                 // as wide as the card
                 Color.clear.aspectRatio(IPodArt.aspect, contentMode: .fit)
-                    .overlay { GeometryReader { g in LiveIPod(height: g.size.height) } }
+                    .overlay { GeometryReader { g in PodPicture(height: g.size.height) } }
                     .matchedGeometryEffect(id: "ipod", in: ns)
-                    .scaleEffect(model.dropTarget == .ipod ? 1.06 : 1)
                     .frame(maxWidth: .infinity)
             }
             if let i = model.ipod, let db = model.db {
                 HStack(spacing: 10) {
-                    if !big {
-                        LiveIPod(height: 46)
+                    if player.current != nil {
+                        // the player card already draws an iPod (lifted out of this one): two read oddly
+                        Image.pod(i.glyph, height: 30).frame(width: 34, height: 34)
+                            // gone at once when the iPod comes back, so it doesn't fade under the one landing there
+                            .foregroundStyle(.secondary).transition(.asymmetric(insertion: .opacity, removal: .identity))
+                    } else if !big {
+                        PodPicture(height: 46)
                             .matchedGeometryEffect(id: "ipod", in: ns)
                     }
                     VStack(alignment: .leading, spacing: 1) {
@@ -491,18 +449,14 @@ struct IPodCard: View {
                                 .help("Its song database won't open: \(e). Crate shows the last copy it read and won't sync until this is fixed.")
                         } else {
                         Text(model.connected ? "\(db.tracks.count) songs · \(ByteCountFormatter.string(fromByteCount: i.free, countStyle: .file)) free"
-                             : "Not connected · \(db.tracks.count) songs")
+                             : "Not connected")
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         }
                     }
                     Spacer(minLength: 0)
-                    if model.connected {
-                        Button { model.eject() } label: { Image(systemName: "eject.fill").foregroundStyle(.secondary) }
-                            .buttonStyle(.plain)
-                            .disabled(model.syncing).help("Eject")
-                    } else {
-                        Image(systemName: "powerplug").foregroundStyle(.tertiary).help("Not connected")
-                    }
+                    // one icon: the card opens the iPod page (its settings live there); Eject is in its context menu
+                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(model.pane == .ipod || hover.on ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
                 }
                 CapacityBar(height: 6, incoming: max(0, model.pendingCount > 0 ? model.queuedBytes : 0))
                 if model.pendingCount > 0, !model.syncing, model.queuedBytes != 0 {
@@ -519,9 +473,9 @@ struct IPodCard: View {
                         Button("Show") { model.showSync = true }.font(.caption).buttonStyle(.link)
                     }
                 } else if model.pendingCount > 0 && !model.connected {
-                    Label("\(model.pendingCount) change\(model.pendingCount == 1 ? "" : "s") \(model.podSettings.syncOnConnect ? "sync when connected" : "waiting")",
-                          systemImage: "clock.arrow.circlepath")
+                    Label("\(model.pendingCount) change\(model.pendingCount == 1 ? "" : "s") waiting", systemImage: "clock.arrow.circlepath")
                         .font(.caption).foregroundStyle(.secondary)
+                        .help(model.podSettings.syncOnConnect ? "They sync by themselves when the iPod is plugged in" : "They sync when you press Sync")
                 } else if model.pendingCount > 0 {
                     Button { model.reviewSync() } label: {
                         Label("Sync \(model.pendingCount) change\(model.pendingCount == 1 ? "" : "s")", systemImage: "arrow.triangle.2.circlepath")
@@ -531,7 +485,7 @@ struct IPodCard: View {
                 }
             } else {
                 HStack(spacing: 10) {
-                    Image(systemName: "ipod").font(.system(size: 24, weight: .light)).frame(width: 34, height: 34)
+                    Image.pod(height: 30).frame(width: 34, height: 34)
                     VStack(alignment: .leading, spacing: 1) {
                         Text("No iPod").font(.headline)
                         Text("Connect it over USB").font(.caption)
@@ -542,15 +496,46 @@ struct IPodCard: View {
         }
         .padding(12)
         .animation(.spring(response: 0.45, dampingFraction: 0.7), value: big)
-        .glassEffect(model.dropTarget == .ipod ? .regular.tint(.accentColor) : .regular, in: .rect(cornerRadius: 16))
-        .overlay { if model.dropTarget == .ipod { RoundedRectangle(cornerRadius: 16).strokeBorder(.tint, lineWidth: 2) } }
+        // a drop only lifts the glass a little: the accent (red here) read as an error
+        .glassEffect(model.dropTarget == .ipod ? .regular.tint(.primary.opacity(0.08)) : .regular, in: .rect(cornerRadius: 16))
+        .overlay { if model.dropTarget == .ipod { RoundedRectangle(cornerRadius: 16).strokeBorder(.primary.opacity(0.2), lineWidth: 1) } }
         .contentShape(.rect)
+        .onHover { hover.on = $0 }
         .onTapGesture { if model.ipod != nil { model.search = ""; model.pane = .ipod } }
-        .help("Drop music here to add it to the library and the iPod")
-        .dropDestination(for: URL.self) { urls, _ in
-            Task { await model.importDropped(urls, toIPod: true) }
-            return true
+        .contextMenu {
+            if model.ipod != nil {
+                Button("Show iPod", pod: model.ipod?.glyph) { model.search = ""; model.pane = .ipod }
+                Button("Sync…", systemImage: "arrow.triangle.2.circlepath") { model.reviewSync() }.disabled(model.pendingCount == 0 || model.syncing)
+                Button("Eject", systemImage: "eject") { model.eject() }.disabled(!model.connected || model.syncing)
+            }
+        }
+        .help("Open the iPod's page and settings; drop music or playlists here to add them to the iPod")
+        .dropDestination(for: PodDrop.self) { items, _ in
+            let urls = items.compactMap { if case .url(let u) = $0 { u } else { nil } }
+            let texts = items.compactMap { if case .text(let t) = $0 { t } else { nil } }
+            if !urls.isEmpty { Task { await model.importDropped(urls, toIPod: true) } }
+            return model.queueDropped(texts) || !urls.isEmpty
         } isTargeted: { on in model.dropTarget = on ? .ipod : (model.dropTarget == .ipod ? nil : model.dropTarget) }
+    }
+}
+
+/// The player while something plays: a drawn iPod whose buttons and wheel drive whatever speaker
+/// is playing. Kept apart from the real iPod's card so it doesn't read as the iPod playing.
+struct PlayerCard: View {
+    @EnvironmentObject var model: Model
+    var ns: Namespace.ID
+
+    var body: some View {
+        // no card of its own: just the remote, with where it plays under it
+        VStack(spacing: 6) {
+            Color.clear.aspectRatio(IPodArt.aspect, contentMode: .fit)
+                .overlay { GeometryReader { g in LiveIPod(height: g.size.height) } }
+                .matchedGeometryEffect(id: "ipod", in: ns)
+            Text("on \(model.outputName)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        }
+        .padding(.horizontal, 28)
+        .frame(maxWidth: .infinity)
+        .help("Crate's remote for \(model.outputName), not the iPod itself")
     }
 }
 
@@ -618,7 +603,7 @@ struct ActivityBar: View {
                 }
                 Button("Details") { model.showSync = true }.buttonStyle(.glass).controlSize(.small)
             } else if let j = current {
-                Image(systemName: j.icon).foregroundStyle(.tint).frame(width: 18)
+                Image(symbol: j.icon).foregroundStyle(.tint).frame(width: 18)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(j.title + (running.count > 1 ? "  +\(running.count - 1) more" : "")).font(.callout.weight(.semibold)).lineLimit(1)
                     if let p = j.progress { ProgressView(value: p) }
@@ -684,7 +669,7 @@ struct ActivityButton: View {
                         VStack(spacing: 0) {
                             ForEach(model.jobs) { j in
                                 HStack(alignment: .top, spacing: 10) {
-                                    Image(systemName: j.icon).foregroundStyle(j.active ? Color.accentColor : .secondary).frame(width: 18)
+                                    Image(symbol: j.icon).foregroundStyle(j.active ? Color.accentColor : .secondary).frame(width: 18)
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(j.title).font(.callout.weight(.medium)).lineLimit(1)
                                         if j.state == .running, let p = j.progress { ProgressView(value: p) }
@@ -720,7 +705,7 @@ struct SyncSheet: View {
     var body: some View {
         HStack(alignment: .top, spacing: 26) {
         // the iPod itself, big enough to watch: its screen shows the sync, the wheel spins
-        IPodArt(mode: model.podArtMode, name: model.podName, height: model.syncing ? 260 : 230, frogger: model.podSettings.frogger == .installed)
+        IPodArt(mode: model.podArtMode, name: model.podName, height: model.syncing ? 260 : 230, frogger: model.froggerSticker)
             .animation(.spring(response: 0.55, dampingFraction: 0.55), value: model.syncing)
             .frame(width: 160, height: 260)
             .padding(.top, 6)

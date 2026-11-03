@@ -19,11 +19,21 @@ enum Snapshot {
         }
     }
 
-    private static let panes: [String: Pane] = ["recent": .recent, "albums": .albums, "artists": .artists, "songs": .songs,
+    private static let panes: [String: Pane] = ["recent": .recent, "albums": .albums, "artists": .artists, "songs": .songs, "playlists": .playlists,
                                                  "ipod": .ipod, "health": .health, "spotify": .spotify, "downloads": .downloads,
                                                  "soulseek": .soulseek, "apple-music": .appleMusic, "youtube": .youtube]
 
     static func take(_ what: String, to file: String, _ model: Model) async {
+        if what.hasPrefix("album-info:") {       // where an album's songs and cover come from, as text
+            let t = String(what.dropFirst(11))
+            let out = model.allAlbums.filter { $0.title == t }.map { a in
+                (["folder: " + a.folder, "id: " + a.id, "artwork: \(model.artwork[a.id] != nil)",
+                  "cached: \(FileManager.default.fileExists(atPath: ArtCache.file("album:" + a.folder).path))"]
+                 + a.tracks.map { "track: " + $0.path }).joined(separator: "\n")
+            }.joined(separator: "\n--\n")
+            try? out.write(toFile: file, atomically: true, encoding: .utf8)
+            return
+        }
         var settings = false
         if what.hasPrefix("settings:") {
             UserDefaults.standard.set(String(what.dropFirst(9)), forKey: "settingsTab")
