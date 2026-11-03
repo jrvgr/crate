@@ -215,8 +215,7 @@ struct LookupSheet: View {
     func progress(_ r: MBRelease) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 14) {
-                AsyncImage(url: MusicBrainz.coverURL(r, size: 500)) { $0.resizable().scaledToFill() }
-                    placeholder: { Color.secondary.opacity(0.15) }
+                CachedImage(url: MusicBrainz.coverURL(r, size: 500), seed: "Metadata.swift:1")
                     .frame(width: 120, height: 120).clipShape(.rect(cornerRadius: 12))
                 VStack(alignment: .leading, spacing: 3) {
                     Text(r.title).font(.title3.bold())

@@ -64,6 +64,7 @@ enum LibraryLoader {
         guard let e = FileManager.default.enumerator(atPath: folder) else { return [] }
         var out: [LibTrack] = []
         while let rel = e.nextObject() as? String {
+            if (rel as NSString).lastPathComponent.hasPrefix(".") { e.skipDescendants(); continue }     // .crate-trash and friends
             guard audioExts.contains((rel as NSString).pathExtension.lowercased()), !known.contains(folder + "/" + rel) else { continue }
             out.append(await track(folder + "/" + rel, relative: rel))
         }

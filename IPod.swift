@@ -159,7 +159,19 @@ enum Syncer {
     }
 
     /// Copies (or converts) one library track into iPod_Control/Music and returns its database entry.
-    static func add(_ t: LibTrack, to ipod: IPodInfo, albumCount: Int, id: UInt32, settings: PodSettings = .init()) async throws -> PodTrack {
+    /// Converts a track that needs it into `dir` on this Mac (done ahead of time, several at once);
+    /// nil when the file goes to the iPod as it is.
+    static func prepare(_ t: LibTrack, settings: PodSettings, in dir: URL) async throws -> URL? {
+        guard settings.needsConversion(t) else { return nil }
+        guard FileManager.default.fileExists(atPath: t.path) else { throw SyncError.missingSource(t.path) }
+        let dst = dir.appendingPathComponent(UUID().uuidString + ".m4a")
+        let src = t.path
+        try await Task.detached { try Self.convert(src, to: dst, kbps: settings.aacKbps) }.value
+        return dst
+    }
+
+    /// `prepared`: the converted file from `prepare`, copied instead of converting here.
+    static func add(_ t: LibTrack, to ipod: IPodInfo, albumCount: Int, id: UInt32, settings: PodSettings = .init(), prepared: URL? = nil) async throws -> PodTrack {
         guard FileManager.default.fileExists(atPath: t.path) else { throw SyncError.missingSource(t.path) }
         let convert = settings.needsConversion(t)
         let aac = convert || t.ext != "mp3"
@@ -172,11 +184,17 @@ enum Syncer {
             name = String((0..<4).map { _ in "ABCDEFGHIJKLMNOPQRSTUVWXYZ".randomElement()! }) + "." + ext
             dst = dir.appendingPathComponent(name)
         } while FileManager.default.fileExists(atPath: dst.path)
-        if convert {
+        if let prepared {
+            try await Task.detached { try FileManager.default.copyItem(at: prepared, to: dst) }.value
+            try? FileManager.default.removeItem(at: prepared)
+        } else if convert {
             let src = t.path
             try await Task.detached { try Self.convert(src, to: dst, kbps: settings.aacKbps) }.value
         }
-        else { try FileManager.default.copyItem(atPath: t.path, toPath: dst.path) }
+        else {
+            let src = t.path
+            try await Task.detached { try FileManager.default.copyItem(atPath: src, toPath: dst.path) }.value
+        }
         let info = await audioInfo(dst)
         let size = (try? FileManager.default.attributesOfItem(atPath: dst.path)[.size] as? Int) ?? 0
         let location = ":iPod_Control:Music:\(folder):\(name)"
@@ -341,5 +359,19 @@ extension Syncer {
         }
         c.stray = orphans(ipod, db: db)
         return c
+    }
+}
+
+/// A counting semaphore for async code (limits how many conversions run at once).
+actor Slots {
+    private var free: Int
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    init(_ n: Int) { free = n }
+    func take() async {
+        if free > 0 { free -= 1; return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+    func give() {
+        if waiting.isEmpty { free += 1 } else { waiting.removeFirst().resume() }
     }
 }

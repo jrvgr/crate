@@ -114,7 +114,7 @@ struct ArtistExtras: View {
                         ForEach(info.releases) { r in
                             let have = owned.contains(loose(r.title))
                             VStack(alignment: .leading, spacing: 5) {
-                                AsyncImage(url: r.cover) { $0.resizable().scaledToFill() } placeholder: { Cover(image: nil, seed: r.id) }
+                                CachedImage(url: r.cover, seed: "ArtistInfo.swift:11")
                                     .frame(width: 130, height: 130).clipShape(.rect(cornerRadius: 10))
                                     .opacity(have ? 1 : 0.55)
                                     .overlay(alignment: .topTrailing) { if have { MarkBadge(mark: .onIPod, size: 22).help("In your library").padding(6) } }

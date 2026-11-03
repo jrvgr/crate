@@ -84,7 +84,7 @@ struct MissingAlbumsSheet: View {
                     ForEach($s.rows) { $r in
                         HStack(spacing: 12) {
                             Toggle("", isOn: $r.include).labelsHidden().disabled(r.queued || s.finding)
-                            AsyncImage(url: model.artURL(r.album.artworkPath)) { $0.resizable().scaledToFill() } placeholder: { Cover(image: nil, seed: r.album.uri) }
+                            CachedImage(url: model.artURL(r.album.artworkPath), seed: "Missing.swift:3")
                                 .frame(width: 40, height: 40).clipShape(.rect(cornerRadius: 6))
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(r.album.name).font(.headline).lineLimit(1)

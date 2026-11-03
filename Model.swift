@@ -356,8 +356,12 @@ final class Model: ObservableObject {
         for ar in artists where artistArt[ar.id] == nil {
             if let d = LibraryLoader.artistImage(ar), let img = NSImage(data: d) { artistArt[ar.id] = img }
         }
+        // cached copies first (instant), then whatever is still missing from the files themselves
         for a in albums where artwork[a.id] == nil {
-            if let d = await LibraryLoader.artwork(for: a), let img = NSImage(data: d) { artwork[a.id] = img }
+            if let img = ArtCache.image("album:" + a.folder) { artwork[a.id] = img }
+        }
+        for a in albums where artwork[a.id] == nil {
+            if let d = await LibraryLoader.artwork(for: a), let img = ArtCache.store(d, for: "album:" + a.folder) ?? NSImage(data: d) { artwork[a.id] = img }
         }
     }
 
@@ -374,7 +378,9 @@ final class Model: ObservableObject {
         let oldArt = oldID.flatMap { artwork[$0] }
         rebuild()
         if let newID = fresh.values.first?.album.lowercased() {
-            if let d = cover, let img = NSImage(data: d) { artwork[newID] = img } else if artwork[newID] == nil { artwork[newID] = oldArt }
+            let folder = albums.first { $0.id == newID }?.folder ?? ""
+            if let d = cover, let img = ArtCache.store(d, for: "album:" + folder) ?? NSImage(data: d) { artwork[newID] = img }
+            else if artwork[newID] == nil { artwork[newID] = oldArt }
         }
         if on(.ownTone) { await ownToneRescan(ownToneURL) }
     }
@@ -698,14 +704,37 @@ final class Model: ObservableObject {
             }
         }
         syncPhase = "Adding songs"; syncTotal = work.count
+        // Conversions run ahead, several at once on this Mac; the iPod gets one copy at a time, in order.
+        let settings = podSettings
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("crate-convert-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let cores = ProcessInfo.processInfo.activeProcessorCount
+        let slots = Slots(max(2, cores - 2))
+        let ahead = max(4, cores * 2)       // how far conversions may run ahead of the copying
+        var prepared: [Int: Task<URL?, Error>] = [:]
+        func schedule(_ i: Int) {
+            guard i < work.count, prepared[i] == nil else { return }
+            let t = work[i].1
+            prepared[i] = Task.detached {
+                guard settings.needsConversion(t) else { return nil }
+                await slots.take()
+                defer { Task { await slots.give() } }
+                return try await Syncer.prepare(t, settings: settings, in: tmp)
+            }
+        }
         for (n, (album, var t)) in work.enumerated() {
+            for i in n...min(n + ahead, work.count - 1) { schedule(i) }
+            syncCurrent = (settings.needsConversion(t) ? "Converting " : "Copying ") + "\(t.trackArtist.isEmpty ? t.artist : t.trackArtist) – \(t.title)"
+            let ready: URL?
+            do { ready = try await prepared[n]?.value } catch { rep.failures.append("\(t.title): \(error.localizedDescription)"); syncDone = n + 1; continue }
+            prepared[n] = nil
             if podSettings.fillTagsFromMetadata, let mb = metadata[album.id] {
                 if t.year == 0 { t.year = mb.year }
                 if t.genre.isEmpty { t.genre = mb.genre }
             }
-            syncCurrent = "\(podSettings.needsConversion(t) ? "Converting" : "Copying") \(t.trackArtist.isEmpty ? t.artist : t.trackArtist) – \(t.title)"
             do {
-                db.tracks.append(try await Syncer.add(t, to: ipod, albumCount: album.tracks.count, id: db.nextID, settings: podSettings))
+                db.tracks.append(try await Syncer.add(t, to: ipod, albumCount: album.tracks.count, id: db.nextID, settings: podSettings, prepared: ready))
                 rep.added += 1
                 if n % 10 == 9 { try Syncer.write(db, to: ipod) }    // keep the database current during long syncs
             } catch { rep.failures.append("\(t.title): \(error.localizedDescription)") }
@@ -802,7 +831,7 @@ final class Model: ObservableObject {
         }
         try? fm.removeItem(atPath: album.folder + "/cover.jpg")
         guard fm.createFile(atPath: album.folder + "/cover.jpg", contents: d) else { return "couldn't write cover.jpg" }
-        artwork[album.id] = img
+        artwork[album.id] = ArtCache.store(d, for: "album:" + album.folder) ?? img
         if on(.ownTone) { step("Asking OwnTone to rescan"); await ownToneRescan(ownToneURL) }
         return existing.isEmpty ? "cover saved" : "cover replaced"
     }
@@ -863,6 +892,37 @@ final class Model: ObservableObject {
     }
 
     var podOnlyAlbums: [Album] { podAlbums.filter(isPodOnly) }
+
+    /// Where a remote playlist comes from (a sidebar group of its own).
+    func source(of p: OTPlaylist) -> String { p.spotifyID != nil ? "Spotify" : "OwnTone" }
+    var remoteSources: [String] { ["Spotify", "OwnTone"].filter { s in playlists.contains { source(of: $0) == s } } }
+
+    /// Where a playlist on the iPod came from.
+    enum PodOrigin { case spotify, ownTone, smart, onTheGo, ipod
+        var icon: String {
+            switch self {
+            case .spotify: return "dot.radiowaves.left.and.right"
+            case .ownTone: return "hifispeaker"
+            case .smart: return "gearshape.2"
+            case .onTheGo: return "hand.tap"
+            case .ipod: return "ipod"
+            }
+        }
+        var help: String {
+            switch self {
+            case .spotify: return "Copied from a Spotify playlist"
+            case .ownTone: return "Copied from an OwnTone playlist"
+            case .smart: return "Kept up to date from a smart playlist"
+            case .onTheGo: return "Made on the iPod (On-The-Go)"
+            case .ipod: return "Only on the iPod"
+            }
+        }
+    }
+    func origin(of p: PodPlaylist) -> PodOrigin {
+        if smartPlaylists.contains(where: { $0.name == p.name }) { return .smart }
+        if let r = playlists.first(where: { $0.name == p.name }) { return r.spotifyID != nil ? .spotify : .ownTone }
+        return p.name.hasPrefix("On-The-Go") ? .onTheGo : .ipod
+    }
 
     /// Drag and drop onto the window (library) or the iPod card (library + queue).
     func importDropped(_ urls: [URL], toIPod: Bool) async {
@@ -949,7 +1009,7 @@ final class Model: ObservableObject {
         guard let u = url.flatMap({ URL(string: $0.absoluteString.replacingOccurrences(of: "600x600bb", with: "1200x1200bb")) }),
               let (d, _) = try? await URLSession.shared.data(from: u), let img = NSImage(data: d) else { return }
         if fm.createFile(atPath: lib.folder + "/cover.jpg", contents: d) {
-            artwork[lib.id] = img
+            artwork[lib.id] = ArtCache.store(d, for: "album:" + lib.folder) ?? img
             if on(.ownTone) { await ownToneRescan(ownToneURL) }
         }
     }

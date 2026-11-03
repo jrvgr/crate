@@ -315,7 +315,7 @@ struct YouTubeView: View {
                         ForEach(yt.results) { r in
                             let s = YouTube.split(r.title, channel: r.channel)
                             HStack(spacing: 12) {
-                                AsyncImage(url: r.thumb) { $0.resizable().scaledToFill() } placeholder: { Color.secondary.opacity(0.15) }
+                                CachedImage(url: r.thumb, seed: "YouTube.swift:9")
                                     .frame(width: 96, height: 54).clipShape(.rect(cornerRadius: 8))
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(r.title).font(.headline).lineLimit(1)

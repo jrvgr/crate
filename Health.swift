@@ -231,8 +231,7 @@ struct BatchMetadataSheet: View {
                             Toggle("", isOn: $r.include).labelsHidden().disabled(r.chosen == nil || s.applying)
                             Cover(image: model.artwork[r.album.id], seed: r.album.id).frame(width: 44, height: 44).clipShape(.rect(cornerRadius: 6))
                             Image(systemName: "arrow.right").foregroundStyle(.tertiary)
-                            AsyncImage(url: r.chosen.map { MusicBrainz.coverURL($0, size: 250) }) { $0.resizable().scaledToFill() }
-                                placeholder: { RoundedRectangle(cornerRadius: 6).fill(.quaternary) }
+                            CachedImage(url: r.chosen.map { MusicBrainz.coverURL($0, size: 250) }, seed: "Health.swift:2")
                                 .frame(width: 44, height: 44).clipShape(.rect(cornerRadius: 6))
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(r.album.title).font(.headline).lineLimit(1)

@@ -441,8 +441,7 @@ struct TrackRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            AsyncImage(url: model.artURL(track.artworkPath)) { $0.resizable().scaledToFill() }
-                placeholder: { Cover(image: nil, seed: track.album) }
+            CachedImage(url: model.artURL(track.artworkPath), seed: "LibraryViews.swift:5")
                 .frame(width: 34, height: 34).clipShape(.rect(cornerRadius: 5))
             VStack(alignment: .leading, spacing: 1) {
                 Text(track.title).lineLimit(1)
@@ -500,7 +499,7 @@ struct Mosaic: View {
         }
     }
     func cover(_ p: String) -> some View {
-        AsyncImage(url: model.artURL(p)) { $0.resizable().scaledToFill() } placeholder: { Cover(image: nil, seed: p) }
+        CachedImage(url: model.artURL(p), seed: "LibraryViews.swift:6")
     }
 }
 
@@ -560,11 +559,22 @@ struct Cover: View {
         if let image {
             Image(nsImage: image).resizable().scaledToFill()
         } else {
-            let h = Double(abs(seed.hashValue % 360)) / 360
-            LinearGradient(colors: [Color(hue: h, saturation: 0.55, brightness: 0.75),
-                                    Color(hue: (h + 0.12).truncatingRemainder(dividingBy: 1), saturation: 0.6, brightness: 0.45)],
-                           startPoint: .topLeading, endPoint: .bottomTrailing)
-                .overlay { Image(systemName: "music.note").font(.system(size: 40, weight: .light)).foregroundStyle(.white.opacity(0.8)) }
+            // a muted colour of its own per album (the same every launch) with a faint record
+            let h = Double(seed.unicodeScalars.reduce(UInt32(5381)) { ($0 &* 33) &+ $1.value } % 360) / 360
+            GeometryReader { g in
+                let d = min(g.size.width, g.size.height)
+                ZStack {
+                    LinearGradient(colors: [Color(hue: h, saturation: 0.22, brightness: 0.36), Color(hue: h, saturation: 0.28, brightness: 0.2)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                    ForEach(0..<4) { i in
+                        Circle().strokeBorder(.white.opacity(0.07), lineWidth: max(0.5, d * 0.006))
+                            .frame(width: d * (0.72 - CGFloat(i) * 0.12), height: d * (0.72 - CGFloat(i) * 0.12))
+                    }
+                    Circle().fill(Color(hue: h, saturation: 0.35, brightness: 0.55).opacity(0.5)).frame(width: d * 0.22, height: d * 0.22)
+                    Circle().fill(.black.opacity(0.35)).frame(width: d * 0.03, height: d * 0.03)
+                }
+                .frame(width: g.size.width, height: g.size.height)
+            }
         }
     }
 }
@@ -602,9 +612,7 @@ struct SpotifyGrid: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Color.clear.aspectRatio(1, contentMode: .fit)
                             .overlay {
-                                AsyncImage(url: model.artURL(a.artworkPath)) {
-                                    $0.resizable().scaledToFill()
-                                } placeholder: { Cover(image: nil, seed: a.uri) }
+                                CachedImage(url: model.artURL(a.artworkPath), seed: "LibraryViews.swift:7")
                             }
                             .clipShape(.rect(cornerRadius: 12))
                             .overlay(alignment: .topTrailing) {
@@ -656,7 +664,7 @@ struct ArtistImage: View {
     var body: some View {
         if let img = model.artistArt[artist.id] { Image(nsImage: img).resizable().scaledToFill() }
         else if let p = model.artistInfo[artist.id]?.photo, let u = URL(string: p), !p.isEmpty {
-            AsyncImage(url: u) { $0.resizable().scaledToFill() } placeholder: { Cover(image: artist.albums.lazy.compactMap { model.artwork[$0.id] }.first, seed: artist.id) }
+            CachedImage(url: u, seed: artist.id)
         }
         else { Cover(image: artist.albums.lazy.compactMap { model.artwork[$0.id] }.first, seed: artist.id) }
     }
@@ -924,7 +932,7 @@ struct AMTile: View {
         VStack(alignment: .leading, spacing: 6) {
             Color.clear.aspectRatio(1, contentMode: .fit)
                 .overlay {
-                    AsyncImage(url: model.amArt[album.id]) { $0.resizable().scaledToFill() } placeholder: { Cover(image: nil, seed: album.id) }
+                    CachedImage(url: model.amArt[album.id], seed: "LibraryViews.swift:8")
                 }
                 .clipShape(.rect(cornerRadius: 14))
                 .shadow(color: .black.opacity(0.25), radius: 8, y: 4)

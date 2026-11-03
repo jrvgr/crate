@@ -198,7 +198,7 @@ struct DownloadCard: View {
             HStack(spacing: 14) {
                 Group {
                     if let img = entry.image { Image(nsImage: img).resizable().scaledToFill() }
-                    else if let u = entry.artURL { AsyncImage(url: u) { $0.resizable().scaledToFill() } placeholder: { Cover(image: nil, seed: entry.title) } }
+                    else if let u = entry.artURL { CachedImage(url: u, seed: "Downloads.swift:10") }
                     else { Cover(image: nil, seed: entry.title) }
                 }
                 .frame(width: 56, height: 56).clipShape(.rect(cornerRadius: 9))

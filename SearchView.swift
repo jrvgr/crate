@@ -100,9 +100,7 @@ struct SearchView: View {
                         VStack(spacing: 0) {
                             ForEach(sp.prefix(10)) { a in
                                 HStack(spacing: 12) {
-                                    AsyncImage(url: model.artURL(a.artworkPath)) {
-                                        $0.resizable().scaledToFill()
-                                    } placeholder: { Cover(image: nil, seed: a.uri) }
+                                    CachedImage(url: model.artURL(a.artworkPath), seed: "SearchView.swift:4")
                                     .frame(width: 34, height: 34).clipShape(.rect(cornerRadius: 5))
                                     VStack(alignment: .leading, spacing: 1) {
                                         Text(a.name).lineLimit(1)

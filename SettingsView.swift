@@ -10,6 +10,7 @@ final class SettingsUI: ObservableObject {
     @Published var ownToneStatus = ""
     @Published var testing: PluginID?
     @Published var password = ""
+    @Published var trashSize: Int64 = 0
     @Published var passwordSaved = false
 }
 
@@ -90,6 +91,18 @@ struct LibrarySettings: View {
                 .buttonStyle(.borderless)
             } header: { Text("Music Folders") } footer: {
                 Text("Crate reads every audio file in these folders (Artist/Album/Track, or the files' tags).")
+            }
+            Section {
+                LabeledContent("Deleted from shares") {
+                    HStack {
+                        Text(ui.trashSize > 0 ? ByteCountFormatter.string(fromByteCount: ui.trashSize, countStyle: .file) : "Empty").foregroundStyle(.secondary)
+                        Button("Show") { model.crateTrash.first.map { NSWorkspace.shared.open(URL(fileURLWithPath: $0)) } }.disabled(ui.trashSize == 0)
+                        Button("Empty Crate Trash", role: .destructive) { model.emptyCrateTrash(); ui.trashSize = 0 }.disabled(ui.trashSize == 0)
+                    }
+                }
+                .task { ui.trashSize = model.crateTrashSize() }
+            } header: { Text("Crate Trash") } footer: {
+                Text("Network shares have no Trash, so Crate keeps what you delete there in a hidden .crate-trash folder until you empty it.")
             }
             Section {
                 FolderField(title: "Import into", path: model.$importFolder, help: "Where dropped files, imports and downloads are copied")

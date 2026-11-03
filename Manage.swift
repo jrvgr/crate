@@ -4,18 +4,32 @@ import SwiftUI
 
 extension Model {
     /// Moves the files to the Trash and takes them out of the library and the iPod queue.
+    var trashRoots: [String] { folders + [importFolder, (importFolder as NSString).deletingLastPathComponent] }
+
+    /// To the Trash; on network shares (which have none) into a hidden .crate-trash folder in the
+    /// same music folder, kept by date, so it can still be put back.
+    func discard(_ path: String) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        if (try? FileManager.default.trashItem(at: url, resultingItemURL: nil)) != nil { return true }
+        let root = Organizer.root(of: path, roots: trashRoots) ?? (path as NSString).deletingLastPathComponent
+        let day = Date().formatted(.iso8601.year().month().day())
+        let rel = path.hasPrefix(root + "/") ? String(path.dropFirst(root.count + 1)) : (path as NSString).lastPathComponent
+        let dst = root + "/.crate-trash/" + day + "/" + rel
+        try? FileManager.default.createDirectory(atPath: (dst as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(atPath: dst)
+        return (try? FileManager.default.moveItem(atPath: path, toPath: dst)) != nil
+    }
+
     func trash(_ tracks: [LibTrack]) async {
         let paths = tracks.map(\.path)
         var failed = 0
         let folders = Set(paths.map { ($0 as NSString).deletingLastPathComponent })
-        for p in paths {
-            do { try FileManager.default.trashItem(at: URL(fileURLWithPath: p), resultingItemURL: nil) } catch { failed += 1 }
-        }
+        for p in paths where !discard(p) { failed += 1 }
         // album folders left with only covers or nothing go too
         for f in folders {
             let left = ((try? FileManager.default.contentsOfDirectory(atPath: f)) ?? []).filter { $0 != ".DS_Store" }
             if !left.contains(where: { LibraryLoader.audioExts.contains(($0 as NSString).pathExtension.lowercased()) }) {
-                try? FileManager.default.trashItem(at: URL(fileURLWithPath: f), resultingItemURL: nil)
+                _ = discard(f)
             }
         }
         let gone = Set(paths)
@@ -24,8 +38,21 @@ extension Model {
         rebuild()
         toAdd = toAdd.filter { id in albums.contains { $0.id == id } || !ids.contains(id) }
         if on(.ownTone) { await ownToneRescan(ownToneURL) }
-        notify("Moved \(paths.count - failed) file\(paths.count - failed == 1 ? "" : "s") to the Trash" + (failed > 0 ? ", \(failed) couldn't be moved" : ""))
+        notify("Deleted \(paths.count - failed) file\(paths.count - failed == 1 ? "" : "s")" + (failed > 0 ? ", \(failed) couldn't be moved" : ""))
     }
+
+    /// The .crate-trash folders on the shares: their size, and emptying them for good.
+    var crateTrash: [String] { Set(trashRoots).map { $0 + "/.crate-trash" }.filter { FileManager.default.fileExists(atPath: $0) } }
+    func crateTrashSize() -> Int64 {
+        crateTrash.reduce(Int64(0)) { sum, dir in
+            var n = Int64(0)
+            for case let rel as String in FileManager.default.enumerator(atPath: dir) ?? .init() {
+                n += Int64((try? FileManager.default.attributesOfItem(atPath: dir + "/" + rel))?[.size] as? Int ?? 0)
+            }
+            return sum + n
+        }
+    }
+    func emptyCrateTrash() { crateTrash.forEach { try? FileManager.default.removeItem(atPath: $0) } }
 }
 
 @MainActor

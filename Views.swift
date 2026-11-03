@@ -94,7 +94,7 @@ struct ContentView: View {
                 Task { await model.trash(ts) }
             }
         } message: {
-            Text("The files go to the Trash, so you can put them back. Copies already on the iPod stay there until you remove them.")
+            Text("The files go to the Trash (on a network share: a hidden .crate-trash folder there), so you can put them back. Copies already on the iPod stay there until you remove them.")
         }
         .sheet(isPresented: Binding(get: { model.organize != nil }, set: { if !$0 { model.organize = nil } })) {
             OrganizerSheet(albums: model.organize ?? []).environmentObject(model)
@@ -232,8 +232,21 @@ struct SidebarMark: View {
 
 // MARK: sidebar
 
+/// Which sidebar groups are open (remembered).
+@MainActor
+final class SidebarUI: ObservableObject {
+    @AppStorage("sidebarSmart") var smart = true
+    @AppStorage("sidebarIPod") var ipod = true
+    @AppStorage("sidebarCollapsed") private var collapsedText = ""
+    var collapsed: Set<String> {
+        get { Set(collapsedText.split(separator: "\n").map(String.init)) }
+        set { collapsedText = newValue.sorted().joined(separator: "\n"); objectWillChange.send() }
+    }
+}
+
 struct Sidebar: View {
     @EnvironmentObject var model: Model
+    @StateObject private var ui = SidebarUI()
 
     var body: some View {
         // Clicking a row always goes to its top level, also when it's already selected with an album open.
@@ -258,37 +271,55 @@ struct Sidebar: View {
                     }
                 }
             }
-            let ownLists = model.playlists
-            Section {
-                    ForEach(model.smartPlaylists) { p in
-                        HStack {
-                            Label(p.name, systemImage: "gearshape.2").lineLimit(1)
-                            Spacer()
-                            if p.onIPod { SidebarMark(mark: model.smartNeedsSync(p) ? .adding : .onIPod) }
-                        }
-                        .tag(Pane.smart(p.id))
-                        .contextMenu {
-                            Button("Edit Rules…", systemImage: "slider.horizontal.3") { model.editSmart = p }
-                            Button("Delete", systemImage: "trash", role: .destructive) { model.deleteSmart(p) }
-                        }
+            Section(isExpanded: $ui.smart) {
+                ForEach(model.smartPlaylists) { p in
+                    HStack {
+                        Label(p.name, systemImage: "gearshape.2").lineLimit(1)
+                        Spacer()
+                        if p.onIPod { SidebarMark(mark: model.smartNeedsSync(p) ? .adding : .onIPod) }
                     }
-                    ForEach(ownLists) { p in
-                        HStack {
-                            Label(p.name, systemImage: p.spotifyID != nil ? "dot.radiowaves.left.and.right" : "music.note.list").lineLimit(1)
-                            Spacer()
-                            SidebarMark(mark: model.mark(p))
-                        }
-                        .tag(Pane.playlist(p.id))
-                        .contextMenu { PlaylistMenu(playlist: p) }
+                    .tag(Pane.smart(p.id))
+                    .contextMenu {
+                        Button("Edit Rules…", systemImage: "slider.horizontal.3") { model.editSmart = p }
+                        Button("Delete", systemImage: "trash", role: .destructive) { model.deleteSmart(p) }
                     }
-                    ForEach(model.podOnlyPlaylists) { p in
+                }
+                if model.smartPlaylists.isEmpty {
+                    ForEach(SmartPlaylist.suggestions(genres: model.topGenres).prefix(4)) { p in
+                        Button { model.editSmart = p } label: { Label(p.name, systemImage: "sparkles") }
+                            .buttonStyle(.plain).foregroundStyle(.secondary).help("Suggested; click to set it up")
+                    }
+                }
+            } header: {
+                HStack {
+                    Text("Smart Playlists")
+                    Spacer()
+                    Menu {
+                        Button("New Smart Playlist…") { model.editSmart = SmartPlaylist() }
+                        Divider()
+                        Section("Suggestions") {
+                            ForEach(SmartPlaylist.suggestions(genres: model.topGenres).filter { s in !model.smartPlaylists.contains { $0.name == s.name } }) { p in
+                                Button(p.name) { model.editSmart = p }
+                            }
+                        }
+                    } label: { Image(systemName: "plus") }
+                    .menuStyle(.button).buttonStyle(.borderless).menuIndicator(.hidden).fixedSize()
+                    .help("New smart playlist, or start from a suggestion")
+                }
+            }
+
+            if let db = model.db, !db.playlists.isEmpty || !model.onTheGo.isEmpty {
+                Section(isExpanded: $ui.ipod) {
+                    ForEach(db.playlists) { p in
+                        let origin = model.origin(of: p)
                         HStack {
-                            Label(p.name, systemImage: "ipod").lineLimit(1)
+                            Label(p.name, systemImage: origin.icon).lineLimit(1)
                             Spacer()
-                            SidebarMark(mark: model.mark(p))
+                            if model.playlistsToRemove.contains(p.id) { SidebarMark(mark: .removing) }
+                            else { Text("\(p.items.count)").font(.caption).foregroundStyle(.secondary).monospacedDigit() }
                         }
                         .tag(Pane.podPlaylist(p.id))
-                        .help("Only on the iPod")
+                        .help(origin.help)
                         .contextMenu {
                             Button(model.playlistsToRemove.contains(p.id) ? "Keep on iPod" : "Remove from iPod", systemImage: "minus.circle") {
                                 model.toggleRemove(p)
@@ -297,21 +328,30 @@ struct Sidebar: View {
                     }
                     ForEach(model.onTheGo, id: \.self) { l in
                         HStack {
-                            Label("On-The-Go", systemImage: "ipod")
+                            Label("On-The-Go (new)", systemImage: "hand.tap")
                             Spacer()
                             SidebarMark(mark: model.podSettings.importOnTheGo ? .adding : .none)
                         }
                         .help("\(l.trackIDs.count) songs made on the iPod; saved as a playlist on Sync")
                     }
-            } header: {
-                HStack {
-                    Text("Playlists")
-                    Spacer()
-                    Button { model.editSmart = SmartPlaylist() } label: { Image(systemName: "plus") }
-                        .buttonStyle(.borderless).help("New Smart Playlist")
-                }
+                } header: { Text("On \(model.podName)") }
             }
 
+            ForEach(model.remoteSources, id: \.self) { source in
+                Section(isExpanded: Binding(get: { !ui.collapsed.contains(source) }, set: { open in
+                    if open { ui.collapsed.remove(source) } else { ui.collapsed.insert(source) }
+                })) {
+                    ForEach(model.playlists.filter { model.source(of: $0) == source }) { p in
+                        HStack {
+                            Label(p.name, systemImage: "music.note.list").lineLimit(1)
+                            Spacer()
+                            SidebarMark(mark: model.mark(p))
+                        }
+                        .tag(Pane.playlist(p.id))
+                        .contextMenu { PlaylistMenu(playlist: p) }
+                    }
+                } header: { Text(source) }
+            }
         }
         IPodCard().padding(10)
         }

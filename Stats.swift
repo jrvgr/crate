@@ -55,6 +55,35 @@ struct SmartPlaylist: Codable, Hashable, Identifiable {
     var onIPod = false
 }
 
+extension SmartPlaylist {
+    /// Ready-made smart playlists, plus one for each of the library's biggest genres.
+    static func suggestions(genres: [String]) -> [SmartPlaylist] {
+        func r(_ f: SmartRule.Field, _ o: SmartRule.Op, _ v: String = "") -> SmartRule { SmartRule(field: f, op: o, value: v) }
+        var out = [
+            SmartPlaylist(name: "Recently Added", rules: [r(.added, .withinDays, "30")], limit: 0, order: .recent),
+            SmartPlaylist(name: "Most Played", rules: [r(.plays, .atLeast, "3")], limit: 100, order: .mostPlayed),
+            SmartPlaylist(name: "Top Rated", rules: [r(.rating, .atLeast, "4")], order: .rating),
+            SmartPlaylist(name: "Forgotten Favourites", rules: [r(.plays, .atLeast, "5"), r(.lastPlayed, .notWithinDays, "180")], limit: 100, order: .random),
+            SmartPlaylist(name: "Not Played Yet", rules: [r(.onIPod, .yes), r(.plays, .atMost, "0")], limit: 100, order: .random),
+            SmartPlaylist(name: "Something New for the iPod", rules: [r(.onIPod, .no)], limit: 50, order: .random),
+            SmartPlaylist(name: "Lossless", rules: [r(.format, .is, "flac")], order: .artist),
+            SmartPlaylist(name: "The 90s", rules: [r(.year, .atLeast, "1990"), r(.year, .atMost, "1999")], order: .random),
+            SmartPlaylist(name: "The 2000s", rules: [r(.year, .atLeast, "2000"), r(.year, .atMost, "2009")], order: .random),
+        ]
+        out += genres.prefix(4).map { g in SmartPlaylist(name: g, rules: [r(.genre, .contains, g)], limit: 100, order: .random) }
+        return out
+    }
+}
+
+extension Model {
+    /// The library's most common genres ("Electronic, Idm" counts for both).
+    var topGenres: [String] {
+        let all = libTracks.flatMap { t in t.genre.split(whereSeparator: { ",;/".contains($0) }).map { $0.trimmingCharacters(in: .whitespaces).capitalized } }
+            .filter { !$0.isEmpty }
+        return Dictionary(grouping: all) { $0 }.sorted { $0.value.count > $1.value.count }.map(\.key)
+    }
+}
+
 enum SmartStore {
     static var url: URL { PodCache.dir.appendingPathComponent("smart-playlists.json") }
     static func load() -> [SmartPlaylist] { (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode([SmartPlaylist].self, from: $0) } ?? [] }

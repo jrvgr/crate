@@ -150,6 +150,26 @@ enum Main {
             }
             RunLoop.main.run()
         }
+        if let i = args.firstIndex(of: "--convert-bench"), args.count > i + 1 {     // FLAC → AAC of a folder: one by one, then in parallel (temp files only)
+            let dir = args[i + 1], done = DispatchSemaphore(value: 0)
+            Task {
+                let ts = await LibraryLoader.scan(dir).filter(\.needsConversion)
+                let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("crate-bench"); try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+                let s = PodSettings()
+                var t0 = Date()
+                for t in ts { _ = try? await Syncer.prepare(t, settings: s, in: tmp) }
+                print("\(ts.count) songs one by one: \(Int(Date().timeIntervalSince(t0))) s")
+                t0 = Date()
+                let slots = Slots(max(2, ProcessInfo.processInfo.activeProcessorCount - 2))
+                await withTaskGroup(of: Void.self) { g in
+                    for t in ts { g.addTask { await slots.take(); _ = try? await Syncer.prepare(t, settings: s, in: tmp); await slots.give() } }
+                }
+                print("in parallel: \(Int(Date().timeIntervalSince(t0))) s")
+                try? FileManager.default.removeItem(at: tmp)
+                done.signal()
+            }
+            done.wait(); return
+        }
         if let i = args.firstIndex(of: "--write-tags"), args.count > i + 3 { writeTags(args[i + 1], args[i + 2], args[i + 3]); return }
         if let i = args.firstIndex(of: "--lookup"), args.count > i + 2 { lookup(args[i + 1], args[i + 2]); return }
         spaceKey()
