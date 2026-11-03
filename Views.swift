@@ -229,6 +229,14 @@ struct Sidebar: View {
                 Label("Year in Review", systemImage: "chart.bar.xaxis").tag(Pane.review)
             }
 
+            let sources = [PluginID.spotify, .appleMusic, .soulseek, .youtube].filter { model.on($0) }
+            if !sources.isEmpty {
+                Section("Sources") {
+                    ForEach(sources) { p in
+                        Label(p.name, systemImage: p.icon).tag(p == .spotify ? Pane.spotify : p == .appleMusic ? .appleMusic : p == .youtube ? .youtube : .soulseek)
+                    }
+                }
+            }
             let ownLists = model.playlists
             Section {
                     ForEach(model.smartPlaylists) { p in
@@ -283,14 +291,6 @@ struct Sidebar: View {
                 }
             }
 
-            let sources = [PluginID.spotify, .appleMusic, .soulseek, .youtube].filter { model.on($0) }
-            if !sources.isEmpty {
-                Section("Sources") {
-                    ForEach(sources) { p in
-                        Label(p.name, systemImage: p.icon).tag(p == .spotify ? Pane.spotify : p == .appleMusic ? .appleMusic : p == .youtube ? .youtube : .soulseek)
-                    }
-                }
-            }
         }
         IPodCard().padding(10)
         }
@@ -327,12 +327,24 @@ struct PlaylistMenu: View {
 
 struct IPodCard: View {
     @EnvironmentObject var model: Model
+    @StateObject private var hover = HoverState()
+    @Namespace private var ns
 
     var body: some View {
+        let big = hover.on || model.syncing || model.dropTarget == .ipod
         VStack(alignment: .leading, spacing: 8) {
             if let i = model.ipod, let db = model.db {
-                SidebarIPod()
+                if big {
+                    IPodArt(mode: model.podArtMode, name: model.podName, height: 180)
+                        .matchedGeometryEffect(id: "ipod", in: ns)
+                        .scaleEffect(model.dropTarget == .ipod ? 1.06 : 1)
+                        .frame(maxWidth: .infinity)
+                }
                 HStack(spacing: 10) {
+                    if !big {
+                        IPodArt(mode: model.podArtMode, name: model.podName, height: 46)
+                            .matchedGeometryEffect(id: "ipod", in: ns)
+                    }
                     VStack(alignment: .leading, spacing: 1) {
                         Text(model.podName).font(.headline).lineLimit(1).minimumScaleFactor(0.8)
                         Text(model.connected ? "\(db.tracks.count) songs · \(ByteCountFormatter.string(fromByteCount: i.free, countStyle: .file)) free"
@@ -379,6 +391,8 @@ struct IPodCard: View {
             }
         }
         .padding(12)
+        .animation(.spring(response: 0.45, dampingFraction: 0.7), value: big)
+        .onHover { hover.on = $0 }
         .glassEffect(model.dropTarget == .ipod ? .regular.tint(.accentColor) : .regular, in: .rect(cornerRadius: 16))
         .overlay { if model.dropTarget == .ipod { RoundedRectangle(cornerRadius: 16).strokeBorder(.tint, lineWidth: 2) } }
         .contentShape(.rect)
