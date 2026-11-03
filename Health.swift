@@ -25,7 +25,8 @@ enum Issue: String, CaseIterable, Identifiable {
 }
 
 extension Model {
-    func issues(_ a: Album) -> [Issue] {
+    /// `sizes`: each song's file size, nil when the file is gone (probed off the main thread).
+    func issues(_ a: Album, sizes: [String: Int?]) -> [Issue] {
         var out: [Issue] = []
         if artwork[a.id] == nil { out.append(.noCover) }
         if a.year == 0 && (metadata[a.id]?.year ?? 0) == 0 { out.append(.noYear) }
@@ -35,20 +36,24 @@ extension Model {
         if expectedSongs(a) != nil { out.append(.incomplete) }
         let titles = a.tracks.map { $0.title.lowercased().filter { $0.isLetter || $0.isNumber } }
         if Set(titles).count < titles.count, Set(a.tracks.map(\.discNumber)).count <= 1 { out.append(.duplicates) }
-        if a.tracks.contains(where: { $0.ext == "mp3" && $0.lengthMs > 0 && (1..<160).contains(fileKbps($0)) }) { out.append(.lowQuality) }
-        if a.tracks.contains(where: { !FileManager.default.fileExists(atPath: $0.path) }) { out.append(.missing) }
+        let kbps = { (t: LibTrack) in ((sizes[t.path] ?? nil) ?? 0) * 8 / max(t.lengthMs, 1) }
+        if a.tracks.contains(where: { $0.ext == "mp3" && $0.lengthMs > 0 && (1..<160).contains(kbps($0)) }) { out.append(.lowQuality) }
+        if a.tracks.contains(where: { sizes[$0.path].map { $0 == nil } ?? false }) { out.append(.missing) }
         return out
     }
 
-    private func fileKbps(_ t: LibTrack) -> Int {
-        let size = (try? FileManager.default.attributesOfItem(atPath: t.path))?[.size] as? Int ?? 0
-        return size * 8 / max(t.lengthMs, 1)
+    /// Library albums with at least one issue (albums only on the iPod aren't checked).
+    func unhealthy(sizes: [String: Int?]) -> [(Album, [Issue])] {
+        guard !loading else { return [] }
+        return albums.compactMap { a in let i = issues(a, sizes: sizes); return i.isEmpty ? nil : (a, i) }
     }
 
-    /// Library albums with at least one issue (albums only on the iPod aren't checked).
-    var unhealthy: [(Album, [Issue])] {
-        guard !loading else { return [] }
-        return albums.compactMap { a in let i = issues(a); return i.isEmpty ? nil : (a, i) }
+    /// Size of each file (nil when missing), read in the background: the files are on shares, and
+    /// a stat each on the main thread froze the window.
+    nonisolated static func probe(_ paths: [String]) async -> [String: Int?] {
+        await Task.detached {
+            Dictionary(paths.map { p in (p, (try? FileManager.default.attributesOfItem(atPath: p))?[.size] as? Int) }, uniquingKeysWith: { a, _ in a })
+        }.value
     }
 }
 
@@ -56,6 +61,8 @@ extension Model {
 final class HealthUI: ObservableObject {
     @Published var filter: Issue?
     @Published var cache: [(Album, [Issue])] = []
+    var sizes: [String: Int?] = [:]                   // file probes so far
+    @Published var dedupe = false
 }
 
 struct HealthView: View {
@@ -89,6 +96,19 @@ struct HealthView: View {
                         }
                         Spacer()
                         Button("Review Matches…") { model.batchAlbums = fixable }.buttonStyle(.glassProminent)
+                    }
+                    .padding(14).glassEffect(.regular, in: .rect(cornerRadius: 16))
+                }
+                if !model.loading, !model.libTracks.isEmpty, ui.filter == nil || ui.filter == .duplicates {
+                    HStack(spacing: 12) {
+                        Image(systemName: "square.on.square").font(.title2).foregroundStyle(.tint)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Find duplicate songs").font(.headline)
+                            Text("The same song in more than one file, across all albums; the best copy stays, you check the rest before they go to the Trash.")
+                                .font(.callout).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Review Duplicates…") { ui.dedupe = true }.buttonStyle(.glass)
                     }
                     .padding(14).glassEffect(.regular, in: .rect(cornerRadius: 16))
                 }
@@ -127,9 +147,14 @@ struct HealthView: View {
             }
             .padding(24).padding(.bottom, 60)
         }
+        .sheet(isPresented: $ui.dedupe) { DedupeSheet() }
         .navigationTitle("Needs Attention")
         .navigationSubtitle("\(all.count) album\(all.count == 1 ? "" : "s")")
-        .task(id: "\(model.albums.count)-\(model.artwork.count)-\(model.metadata.count)-\(model.loading)") { ui.cache = model.unhealthy }
+        .task(id: "\(model.albums.count)-\(model.artwork.count)-\(model.metadata.count)-\(model.loading)") {
+            let paths = model.albums.flatMap { $0.tracks.map(\.path) }.filter { ui.sizes[$0] == nil }
+            if !paths.isEmpty { ui.sizes.merge(await Model.probe(paths)) { _, new in new } }
+            ui.cache = model.unhealthy(sizes: ui.sizes)
+        }
     }
 }
 

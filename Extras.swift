@@ -18,7 +18,7 @@ enum Store {
 
 extension Model {
     /// The iPod key of a library song (its own key, or the one it was paired with).
-    func podKey(_ libKey: String) -> String { aliases.first { $0.value == libKey }?.key ?? libKey }
+    func podKey(_ libKey: String) -> String { podKeyByLib[libKey] ?? libKey }
 
     /// iPod songs with no library song of the same album and title, and library songs whose album is
     /// partly on the iPod, paired up where the title (ignoring punctuation) and artist look alike.

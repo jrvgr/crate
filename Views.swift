@@ -39,7 +39,6 @@ struct ContentView: View {
         .onChange(of: model.focusSearch) { searchFocused = true }
         .quickLookPreview($model.quickLook)
         .toolbar {
-            ToolbarItem(placement: .principal) { MiniPlayer() }
             if model.on(.soulseek) || model.on(.appleMusic) || model.on(.youtube) {
                 ToolbarItem { DownloadsButton() }
             }
@@ -66,6 +65,8 @@ struct ContentView: View {
                                  ("--open-soulseek", .soulseek), ("--open-downloads", .downloads), ("--open-health", .health), ("--open-youtube", .youtube), ("--open-review", .review), ("--open-albums", .albums)]
             where args.contains(flag) { model.pane = pane }
             if let q = arg("--search") { model.search = q }
+            if let t = arg("--spotify-tab") { model.spotifyTab = t }
+            model.spotifyArtist = arg("--spotify-artist")
             let m = model
             Task { await slsk.poll { m.on(.soulseek) } }
             await model.reload()
@@ -82,9 +83,11 @@ struct ContentView: View {
                 model.syncTotal = 40; model.syncDone = 17; model.syncCurrent = "Converting Aphex Twin – Xtal"; model.showSync = true
             }
         }
-        .sheet(item: $model.lookupAlbum) { LookupSheet(album: $0).environmentObject(model) }
-        .sheet(item: $model.editAlbum) { TagEditor(album: $0).environmentObject(model) }
+        // Find Metadata and Edit Tags happen on the album's own page
+        .onChange(of: model.lookupAlbum) { _, a in if a != nil { model.editAlbum = nil }; model.showAlbumPage(a) }
+        .onChange(of: model.editAlbum) { _, a in if a != nil { model.lookupAlbum = nil }; model.showAlbumPage(a) }
         .sheet(item: $model.editSmart) { SmartEditor(playlist: $0).environmentObject(model) }
+        .modifier(PlaylistDialogs())
         .sheet(isPresented: $model.showMatch) { MatchSheet().environmentObject(model) }
         .sheet(isPresented: Binding(get: { model.merge != nil }, set: { if !$0 { model.merge = nil } })) {
             MergeSheet(albums: model.merge ?? []).environmentObject(model)
@@ -144,6 +147,7 @@ struct PaneView: View {
         case .podPlaylist(let id):
             if let p = model.db?.playlists.first(where: { $0.id == id }) { PodPlaylistView(playlist: p) }
             else { ContentUnavailableView("Playlist not on the iPod", systemImage: "music.note.list") }
+        case .cratePlaylist(let id): CratePlaylistView(id: id)
         }
     }
 }
@@ -238,6 +242,7 @@ struct SidebarMark: View {
 @MainActor
 final class SidebarUI: ObservableObject {
     @AppStorage("sidebarSmart") var smart = true
+    @AppStorage("sidebarPlaylists") var playlists = true
     @AppStorage("sidebarIPod") var ipod = true
     @AppStorage("sidebarCollapsed") private var collapsedText = ""
     var collapsed: Set<String> {
@@ -273,12 +278,42 @@ struct Sidebar: View {
                     }
                 }
             }
+            Section(isExpanded: $ui.playlists) {
+                ForEach(model.cratePlaylists) { p in
+                    HStack {
+                        Label(p.name, systemImage: "music.note.list").lineLimit(1)
+                        Spacer()
+                        if p.onIPod { SidebarMark(mark: model.crateNeedsSync(p) ? .adding : .onIPod) }
+                    }
+                    .tag(Pane.cratePlaylist(p.id))
+                    .contextMenu {
+                        Button("Rename…", systemImage: "pencil") { model.startRename(.crate(p.id)) }
+                        Button(p.onIPod ? "Don't Keep on iPod" : "Keep on iPod", systemImage: "ipod") {
+                            if let i = model.cratePlaylist(p.id) { model.cratePlaylists[i].onIPod.toggle() }
+                        }
+                        Divider()
+                        Button("Delete…", systemImage: "trash", role: .destructive) { model.confirmDeletePlaylist = .crate(p.id) }
+                    }
+                }
+                if model.cratePlaylists.isEmpty {
+                    Button { model.newPlaylist() } label: { Label("New Playlist", systemImage: "plus") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                }
+            } header: {
+                HStack {
+                    Text("Playlists")
+                    Spacer()
+                    Button { model.newPlaylist() } label: { Image(systemName: "plus") }
+                        .buttonStyle(.borderless).help("New Playlist")
+                }
+            }
+
             Section(isExpanded: $ui.smart) {
                 ForEach(model.smartPlaylists) { p in
                     HStack {
                         Label(p.name, systemImage: "gearshape.2").lineLimit(1)
                         Spacer()
-                        if p.onIPod { SidebarMark(mark: model.smartNeedsSync(p) ? .adding : .onIPod) }
+                        if p.onIPod { SidebarMark(mark: model.smartNeedingSync.contains(p.id) ? .adding : .onIPod) }
                     }
                     .tag(Pane.smart(p.id))
                     .contextMenu {
@@ -315,26 +350,34 @@ struct Sidebar: View {
                     ForEach(db.playlists) { p in
                         let origin = model.origin(of: p)
                         HStack {
-                            Label(p.name, systemImage: origin.icon).lineLimit(1)
+                            Label(model.podDisplayName(p), systemImage: origin.icon).lineLimit(1)
                             Spacer()
                             if model.playlistsToRemove.contains(p.id) { SidebarMark(mark: .removing) }
+                            else if model.podEdits[p.id] != nil { SidebarMark(mark: .adding) }
                             else { Text("\(p.items.count)").font(.caption).foregroundStyle(.secondary).monospacedDigit() }
                         }
                         .tag(Pane.podPlaylist(p.id))
                         .help(origin.help)
                         .contextMenu {
+                            Button("Rename…", systemImage: "pencil") { model.startRename(.pod(p.id)) }
                             Button(model.playlistsToRemove.contains(p.id) ? "Keep on iPod" : "Remove from iPod", systemImage: "minus.circle") {
                                 model.toggleRemove(p)
                             }
+                            HiddenPlaylistButton(name: p.name)
                         }
                     }
                     ForEach(model.onTheGo, id: \.self) { l in
-                        HStack {
-                            Label("On-The-Go (new)", systemImage: "hand.tap")
-                            Spacer()
-                            SidebarMark(mark: model.podSettings.importOnTheGo ? .adding : .none)
+                        let name: String = switch l.kind {
+                        case .onTheGo: "On-The-Go (new)"
+                        case .saved(let n): "New Playlist \(n) (new)"
+                        case .synced(let i): (db.playlists.indices.contains(i - 1) ? model.podDisplayName(db.playlists[i - 1]) : "Playlist") + " (changed)"
                         }
-                        .help("\(l.trackIDs.count) songs made on the iPod; saved as a playlist on Sync")
+                        HStack {
+                            Label(name, systemImage: "hand.tap")
+                            Spacer()
+                            SidebarMark(mark: model.podSavedLists.contains(l) ? .adding : .none)
+                        }
+                        .help("\(l.trackIDs.count) songs, as made on the iPod; kept on Sync")
                     }
                 } header: { Text("On \(model.podName)") }
             }
@@ -355,6 +398,7 @@ struct Sidebar: View {
                 } header: { Text(source) }
             }
         }
+        ShareNotice().padding(.horizontal, 10).padding(.top, 6)
         IPodCard().padding(10)
         }
     }
@@ -384,34 +428,64 @@ struct PlaylistMenu: View {
                 model.toggleRemove(pod)
             }
         }
+        HiddenPlaylistButton(name: playlist.name)
         Button(model.on(.ownTone) ? "Play on OwnTone" : "Open in Spotify", systemImage: "play.fill") { Task { await model.playURIs([playlist.uri]) } }
+        if model.ownToneEditable(playlist) {
+            Divider()
+            Button("Rename…", systemImage: "pencil") { model.startRename(.ownTone(playlist.id)) }
+            Button("Delete…", systemImage: "trash", role: .destructive) { model.confirmDeletePlaylist = .ownTone(playlist.id) }
+        }
+    }
+}
+
+/// Marks a playlist as hidden: its songs (unless another playlist has them) stay out of the iPod's
+/// Artists/Albums, and it shows up as "~Name" on the iPod.
+struct HiddenPlaylistButton: View {
+    @EnvironmentObject var model: Model
+    var name: String
+    var body: some View {
+        let on = model.isHiddenPlaylist(name)
+        Button(on ? "Show Its Songs in iPod Library" : "Hide Its Songs from iPod Library", systemImage: on ? "eye" : "eye.slash") {
+            model.toggleHiddenPlaylist(name)
+        }
     }
 }
 
 struct IPodCard: View {
     @EnvironmentObject var model: Model
+    @EnvironmentObject var player: Player
     @Namespace private var ns
 
     var body: some View {
-        let big = model.syncing || model.dropTarget == .ipod
+        // big while syncing, for a drop, and while playing (it's the player then)
+        let playing = player.current != nil
+        let big = model.syncing || model.dropTarget == .ipod || playing
         VStack(alignment: .leading, spacing: 8) {
+            if big {
+                // as wide as the card
+                Color.clear.aspectRatio(IPodArt.aspect, contentMode: .fit)
+                    .overlay { GeometryReader { g in LiveIPod(height: g.size.height) } }
+                    .matchedGeometryEffect(id: "ipod", in: ns)
+                    .scaleEffect(model.dropTarget == .ipod ? 1.06 : 1)
+                    .frame(maxWidth: .infinity)
+            }
             if let i = model.ipod, let db = model.db {
-                if big {
-                    IPodArt(mode: model.podArtMode, name: model.podName, height: 180)
-                        .matchedGeometryEffect(id: "ipod", in: ns)
-                        .scaleEffect(model.dropTarget == .ipod ? 1.06 : 1)
-                        .frame(maxWidth: .infinity)
-                }
                 HStack(spacing: 10) {
                     if !big {
-                        IPodArt(mode: model.podArtMode, name: model.podName, height: 46)
+                        LiveIPod(height: 46)
                             .matchedGeometryEffect(id: "ipod", in: ns)
                     }
                     VStack(alignment: .leading, spacing: 1) {
                         Text(model.podName).font(.headline).lineLimit(1).minimumScaleFactor(0.8)
+                        if let e = model.podReadError {
+                            Label("Can't read the iPod", systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption).foregroundStyle(.red).lineLimit(1)
+                                .help("Its song database won't open: \(e). Crate shows the last copy it read and won't sync until this is fixed.")
+                        } else {
                         Text(model.connected ? "\(db.tracks.count) songs · \(ByteCountFormatter.string(fromByteCount: i.free, countStyle: .file)) free"
                              : "Not connected · \(db.tracks.count) songs")
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
                     }
                     Spacer(minLength: 0)
                     if model.connected {
@@ -432,7 +506,7 @@ struct IPodCard: View {
                 if model.syncing {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.mini)
-                        Text("Syncing \(model.syncDone) of \(model.syncTotal)").font(.caption).foregroundStyle(.secondary)
+                        Text(model.syncTotal > 0 ? "\(model.syncPhase) \(model.syncDone) of \(model.syncTotal)" : model.syncPhase).font(.caption).foregroundStyle(.secondary)
                         Spacer()
                         Button("Show") { model.showSync = true }.font(.caption).buttonStyle(.link)
                     }
@@ -532,7 +606,7 @@ struct ActivityBar: View {
                     .symbolEffect(.rotate, isActive: true)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Syncing \(model.podName)").font(.callout.weight(.semibold)).lineLimit(1)
-                    ProgressView(value: Double(model.syncDone), total: Double(max(model.syncTotal, 1)))
+                    SyncBar()
                 }
                 Button("Details") { model.showSync = true }.buttonStyle(.glass).controlSize(.small)
             } else if let j = current {
@@ -638,7 +712,7 @@ struct SyncSheet: View {
     var body: some View {
         HStack(alignment: .top, spacing: 26) {
         // the iPod itself, big enough to watch: its screen shows the sync, the wheel spins
-        IPodArt(mode: model.podArtMode, name: model.podName, height: model.syncing ? 260 : 230)
+        IPodArt(mode: model.podArtMode, name: model.podName, height: model.syncing ? 260 : 230, frogger: model.podSettings.frogger == .installed)
             .animation(.spring(response: 0.55, dampingFraction: 0.55), value: model.syncing)
             .frame(width: 160, height: 260)
             .padding(.top, 6)
@@ -717,12 +791,28 @@ struct SyncSheet: View {
                     PlanRow(icon: "music.note.list", tint: .red, title: "Remove \(p.playlistsRemove.count) playlist\(p.playlistsRemove.count == 1 ? "" : "s")",
                             detail: p.playlistsRemove.joined(separator: ", "))
                 }
+                if !p.playlistsEdit.isEmpty {
+                    PlanRow(icon: "music.note.list", tint: .purple, title: "Change \(p.playlistsEdit.count) playlist\(p.playlistsEdit.count == 1 ? "" : "s")",
+                            detail: p.playlistsEdit.joined(separator: ", ") + " (edited in Crate)")
+                }
                 if p.onTheGo > 0 {
-                    PlanRow(icon: "music.note.list", tint: .green, title: "Save \(p.onTheGo) On-The-Go list\(p.onTheGo == 1 ? "" : "s")",
-                            detail: "Made on the iPod; kept as “On-The-Go N” playlists")
+                    PlanRow(icon: "music.note.list", tint: .green, title: "Save \(p.onTheGo) playlist\(p.onTheGo == 1 ? "" : "s") from the iPod",
+                            detail: "Made or changed on the iPod; saved ones become Crate playlists")
                 }
                 if let n = p.rename {
                     PlanRow(icon: "pencil.circle.fill", tint: .purple, title: "Rename to “\(n)”", detail: "Was “\(model.db?.name ?? "")”")
+                }
+                if p.retag > 0 {
+                    PlanRow(icon: "pencil.circle.fill", tint: .purple, title: "Update the tags of \(p.retag) song\(p.retag == 1 ? "" : "s")",
+                            detail: "Merged or edited in Crate; the iPod's copies get the new album and title")
+                }
+                if !p.markPlaylists.isEmpty {
+                    PlanRow(icon: "eye.slash", tint: .secondary, title: "Rename \(p.markPlaylists.count) playlist\(p.markPlaylists.count == 1 ? "" : "s")",
+                            detail: p.markPlaylists.joined(separator: ", "))
+                }
+                if p.hide + p.unhide > 0 {
+                    PlanRow(icon: "eye.slash", tint: .secondary, title: hideTitle(p),
+                            detail: "Hidden songs stay out of Artists and Albums but still play from playlists (needs Frogger)")
                 }
                 if model.checkingFiles {
                     PlanRow(icon: "checkmark.shield", tint: .secondary, title: "Checking the files…", detail: "Broken or cut-off files are skipped")
@@ -778,25 +868,36 @@ struct SyncSheet: View {
                     Spacer()
                     if model.syncTotal > 0 { Text("\(model.syncDone) of \(model.syncTotal)").monospacedDigit().foregroundStyle(.secondary) }
                 }
-                ProgressView(value: Double(model.syncDone), total: Double(max(model.syncTotal, 1)))
+                SyncBar()
                 Text(model.syncCurrent.isEmpty ? " " : model.syncCurrent).font(.callout).foregroundStyle(.secondary).lineLimit(1)
             }
             .padding(16)
             .glassEffect(.regular, in: .rect(cornerRadius: 14))
             VStack(alignment: .leading, spacing: 8) {
-                for_phase("Removing songs", after: ["Adding songs", "Measuring loudness", "Writing playlists", "Writing the database", "Done"])
-                for_phase("Adding songs", after: ["Measuring loudness", "Writing playlists", "Writing the database", "Done"])
-                if model.podSettings.soundCheck { for_phase("Measuring loudness", after: ["Writing playlists", "Writing the database", "Done"]) }
-                for_phase("Writing playlists", after: ["Writing the database", "Done"])
-                for_phase("Writing the database", after: ["Done"])
+                ForEach(phases, id: \.self) { for_phase($0) }
             }
             .padding(.horizontal, 4)
             Text("Keep the iPod connected until the sync is done.").font(.caption).foregroundStyle(.secondary)
         }
     }
 
-    func for_phase(_ name: String, after: [String]) -> some View {
-        let done = after.contains(model.syncPhase), now = model.syncPhase == name
+    /// The sync's phases in order (Model.sync).
+    var phases: [String] {
+        ["Removing songs", "Fixing song files", "Adding songs"] + (model.podSettings.soundCheck ? ["Measuring loudness"] : []) + ["Writing playlists"]
+            + (model.podSettings.calendars || model.podSettings.reminders ? ["Calendars and To Do"] : [])
+            + ["Writing the database", "Cover art"]
+    }
+
+    /// Where the sync is in `phases`: reading playlists happens while songs are gathered for adding.
+    var phaseIndex: Int {
+        let p = model.syncPhase
+        if p == "Done" { return phases.count }
+        if p.hasPrefix("Reading playlist") { return phases.firstIndex(of: "Adding songs") ?? 0 }
+        return phases.firstIndex(of: p) ?? -1
+    }
+
+    func for_phase(_ name: String) -> some View {
+        let i = phases.firstIndex(of: name) ?? 0, done = i < phaseIndex, now = i == phaseIndex
         return HStack(spacing: 10) {
             Image(systemName: done ? "checkmark.circle.fill" : now ? "circle.dotted" : "circle")
                 .foregroundStyle(done ? .green : now ? Color.accentColor : .secondary)
@@ -817,6 +918,7 @@ struct SyncSheet: View {
             HStack(spacing: 12) {
                 Stat(value: "\(r.added)", label: "added")
                 Stat(value: "\(r.removed)", label: "removed")
+                if r.replaced > 0 { Stat(value: "\(r.replaced)", label: "fixed") }
                 Stat(value: "\(r.playlists)", label: "playlists")
                 Stat(value: r.seconds >= 60 ? "\(Int(r.seconds) / 60)m \(Int(r.seconds) % 60)s" : "\(Int(r.seconds))s", label: "took")
             }
@@ -869,5 +971,17 @@ struct Stat: View {
         }
         .frame(maxWidth: .infinity).padding(.vertical, 10)
         .glassEffect(.regular, in: .rect(cornerRadius: 12))
+    }
+}
+
+/// The sync's progress: the current phase's count, or a moving bar for a phase without one.
+struct SyncBar: View {
+    @EnvironmentObject var model: Model
+    var body: some View {
+        if model.syncTotal > 0 {
+            ProgressView(value: Double(min(model.syncDone, model.syncTotal)), total: Double(model.syncTotal))
+        } else {
+            ProgressView().progressViewStyle(.linear)
+        }
     }
 }

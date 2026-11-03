@@ -61,10 +61,55 @@ enum Main {
         if let i = args.firstIndex(of: "--add-folder"), args.count > i + 1 { addFolder(args[i + 1]); return }
         if let i = args.firstIndex(of: "--remove-album"), args.count > i + 1 { removeAlbum(args[i + 1]); return }
         if let i = args.firstIndex(of: "--playlist-test"), args.count > i + 1 { playlistTest(args[i + 1]); return }
+        if let i = args.firstIndex(of: "--pod-files"), args.count > i + 1 { podFiles(args[i + 1]); return }
+        if let i = args.firstIndex(of: "--froggerart"), args.count > i + 1 { froggerArt(args[i + 1]); return }
+        if let i = args.firstIndex(of: "--frogger-test"), args.count > i + 2 {     // install/remove/restore on a partition image file, no root
+            if args[i + 1] == "devices" { print(Frogger.devices(of: URL(fileURLWithPath: args[i + 2])).map { "\($0.disk) \($0.firmware)" } ?? "none"); exit(0) }
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/sh")
+            let action: Frogger.Action = args[i + 1] == "remove" ? .remove
+                : args[i + 1] == "restore" ? .restore(Frogger.savedBackups.last { $0.lastPathComponent.contains("-stock") }!) : .install
+            p.arguments = ["-c", Frogger.command(action, raw: args[i + 2])]
+            try? p.run(); p.waitUntilExit(); exit(p.terminationStatus)
+        }
         if let i = args.firstIndex(of: "--remove-playlist"), args.count > i + 1 { removePlaylist(args[i + 1]); return }
         if let i = args.firstIndex(of: "--model-test"), args.count > i + 1 { modelTest(args[i + 1]); return }
+        if let i = args.firstIndex(of: "--apply-tags"), args.count > i + 1 { applyTags(args[i + 1]); return }
+        if args.contains("--sync") { syncNow(); return }
+        if let i = args.firstIndex(of: "--remux"), args.count > i + 2 {     // MP4Layout: rearrange a file for the iPod
+            do { try MP4Layout.remux(args[i + 1], to: URL(fileURLWithPath: args[i + 2])) } catch { print(error.localizedDescription); exit(1) }
+            print("iPod layout before: \(MP4Layout.iPodReady(args[i + 1])), after: \(MP4Layout.iPodReady(args[i + 2]))"); return
+        }
+        if let i = args.firstIndex(of: "--render-ipod"), args.count > i + 1 {      // the iPod drawing (with the Frogger sticker) as a PNG
+            let out = args[i + 1]
+            Task { @MainActor in
+                let v = HStack(spacing: 40) {
+                    IPodArt(mode: .idle, name: "My iPod", height: 420, frogger: true)
+                    FrogSticker(size: 160)
+                }.padding(40).background(Color(white: 0.93))
+                let r = ImageRenderer(content: v); r.scale = 2
+                if let img = r.nsImage, let tiff = img.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: out)); print("wrote", out)
+                }
+                exit(0)
+            }
+            RunLoop.main.run(); return
+        }
         if let i = args.firstIndex(of: "--apple-music-download"), args.count > i + 1 { appleMusicDownload(args[i + 1]); return }
         if args.contains("--apple-music") { appleMusic(); return }
+        if let i = args.firstIndex(of: "--dupes"), args.count > i + 1 {     // read only: duplicate songs in a folder
+            let folder = args[i + 1]
+            Task {
+                let groups = Dedupe.find(await LibraryLoader.scan(folder))
+                for g in groups {
+                    print(g.sameAlbum ? "same album" : "other albums", "·", g.copies[0].artist, "–", g.copies[0].title)
+                    for t in g.copies { print("   ", t.path == g.keep ? "keep " : "trash", t.ext, g.sizes[t.path] ?? 0, t.path) }
+                }
+                print("\(groups.count) groups, \(groups.filter(\.sameAlbum).count) on the same album")
+                exit(0)
+            }
+            RunLoop.main.run()
+        }
         if args.contains("--callback-test") {     // the Spotify login's local listener, fed a fake redirect
             Task { @MainActor in
                 let cb = Callback(port: SpotifyAPI.port)
@@ -264,6 +309,22 @@ enum Main {
         done.wait()
     }
 
+    /// Writes FroggerArt for the connected iPod's database to `out` instead of onto the iPod (reads the
+    /// iPod only), with covers found the way a sync finds them (the library, Crate's cover cache, the song
+    /// files on the iPod): for checking the file without a sync.
+    static func froggerArt(_ out: String) {
+        Task { @MainActor in
+            guard let ipod = IPodInfo.find(), let db = try? ITunesDB.read(Data(contentsOf: ipod.dbURL)) else { print("no iPod/database"); exit(1) }
+            let m = Model()
+            await m.reload()
+            let start = Date()
+            let n = await FroggerArt.write(db, to: ipod, albums: m.albums, dst: URL(fileURLWithPath: out))
+            print("\(db.tracks.count) tracks, \(m.albums.count) library albums, \(n) covers -> \(out) (covers took \(String(format: "%.1f", Date().timeIntervalSince(start))) s)")
+            exit(0)
+        }
+        RunLoop.main.run()
+    }
+
     /// Removes one album (by title) from the connected iPod.
     static func removeAlbum(_ title: String) {
         guard let ipod = IPodInfo.find(), var db = try? ITunesDB.read(Data(contentsOf: ipod.dbURL)) else { print("no iPod/database"); return }
@@ -274,6 +335,23 @@ enum Main {
         catch { print("write failed: \(error)") }
     }
 
+    /// What a sync would keep from the playlist files in a copy of an iPod's iTunes folder (iTunesDB with its
+    /// file time, OTGPlaylistInfo*, FroggerPlaylist_*): read only.
+    static func podFiles(_ path: String) {
+        let dir = URL(fileURLWithPath: path), url = dir.appendingPathComponent("iTunesDB")
+        guard let db = try? ITunesDB.read(Data(contentsOf: url)),
+              let time = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date else { print("no iTunesDB in \(path)"); exit(1) }
+        let title = Dictionary(db.tracks.map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
+        print("iTunesDB \(Int(time.timeIntervalSince1970)), library order \(db.libraryOrder), playlists \(db.playlists.map(\.name))")
+        for f in OnTheGo.load(dir: dir, db: db, dbTime: time) {
+            print("\(f.url.lastPathComponent): \(f.kind) -> \(f.trackIDs) \(f.trackIDs.map { title[$0] ?? "?" })")
+        }
+        var after = db
+        let (saved, edited) = after.applyFromPod(OnTheGo.load(dir: dir, db: db, dbTime: time))
+        for (n, ids) in saved { print("New Playlist \(n) for Crate: \(ids)") }
+        for p in after.playlists where edited.contains(p.id) { print("\(p.name) becomes \(p.items.map(\.trackID))") }
+    }
+
     /// Offline playlist checks on a copy of a database: a new playlist and an On-The-Go list survive a
     /// round trip, a removed track drops out of them, and a kept playlist stays byte for byte.
     static func playlistTest(_ path: String) {
@@ -282,14 +360,67 @@ enum Main {
             print("need a database with 4+ tracks"); exit(1)
         }
         let ids = db.tracks.map(\.id)
+        check(try! ITunesDB.read(db.serialize()).master == ids, "master playlist read back in track order")
+        db.playlists.append(PodPlaylist(name: "Mix", items: [.init(trackID: ids[0])]))
+        let mix = db.playlists.count, mixID = db.playlists.last!.id      // FroggerPlaylist_<mix>
         db.playlists.append(PodPlaylist(name: "Crate Test", items: [ids[0], ids[1], ids[2], ids[0]].map { .init(trackID: $0) }))
-        let otg = OnTheGo.parse(OnTheGo.make([3, 1]))
-        check(otg == [3, 1], "On-The-Go file parses: \(otg ?? [])")
-        db.importOnTheGo([OnTheGo(url: URL(fileURLWithPath: "/dev/null"), trackIDs: otg!.map { ids[$0] })])
+        // the files the iPod saves, in a folder like its iTunes/; songs count in the master playlist's order
+        db.master = [ids[2], ids[0], ids[1], ids[3]] + ids.dropFirst(4)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("crate-otg-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let dbTime = Date(timeIntervalSince1970: 1_790_000_000)
+        let stamp = 1_790_000_000 + TimeZone.current.secondsFromGMT(for: dbTime)     // FAT's local time, read as UTC
+        for (name, refs, s) in [("OTGPlaylistInfo", [3, 2], stamp), ("OTGPlaylistInfo_2", [1, 0], stamp), ("FroggerPlaylist_\(mix)", [1, 2, 0, 3], stamp),
+                                ("OTGPlaylistInfo_3", [0], stamp - 86_400), ("FroggerPlaylist_99", [0], stamp)] {
+            try! OnTheGo.make(refs, stamp: s).write(to: dir.appendingPathComponent(name))
+        }
+        try! Data("not a playlist".utf8).write(to: dir.appendingPathComponent("OTGPlaylistInfo_4"))
+        check(OnTheGo.parse(OnTheGo.make([3, 1])) == [3, 1], "playlist file parses")
+        let files = OnTheGo.load(dir: dir, db: db, dbTime: dbTime)
+        check(files.map(\.kind) == [.synced(mix), .synced(99), .onTheGo, .saved(2)], "files read, stale and broken ones skipped: \(files.map(\.kind))")
+        check(files[0].trackIDs == [ids[0], ids[1], ids[2], ids[3]] && files[3].trackIDs == [ids[0], ids[2]], "songs counted in the master playlist's order")
+        check(OnTheGo.load(dir: dir, db: db, dbTime: dbTime.addingTimeInterval(600)).isEmpty, "nothing read for a newer iTunesDB")
+        // FroggerHidden: songs hidden (or shown again) on the iPod, by track list index and id; a moved song is skipped
+        let hid1 = PodHides.make([(1, ids[1], false), (3, ids[3], false), (0, ids[2], false)], stamp: stamp, version: 1)
+        check(PodHides.parse(hid1, db: db, dbTime: dbTime) == [.init(index: 1, shown: false), .init(index: 3, shown: false)],
+              "hidden songs read (version 1), a mismatched entry skipped")
+        let hid = PodHides.make([(1, ids[1], false), (3, ids[3], true), (0, ids[2], true)], stamp: stamp)
+        let ents = PodHides.parse(hid, db: db, dbTime: dbTime)
+        check(ents == [.init(index: 1, shown: false), .init(index: 3, shown: true)], "hidden and shown songs read (version 2)")
+        let choices = PodHides.choices(ents ?? [], db: db), rule: Set = [db.tracks[3].key]     // a hidden playlist has song 3
+        check(choices == [db.tracks[1].key: true, db.tracks[3].key: false] && !(choices[db.tracks[3].key] ?? rule.contains(db.tracks[3].key)),
+              "hidden songs become a hide choice, shown ones a show choice over the playlist rule")
+        check(PodHides.parse(hid, db: db, dbTime: dbTime.addingTimeInterval(600)) == nil, "hidden songs ignored for a newer iTunesDB")
+        check(PodHides.parse(Data("FRGH".utf8), db: db, dbTime: dbTime) == nil && PodHides.parse(hid.prefix(40), db: db, dbTime: dbTime) == nil,
+              "broken or cut-off hidden file ignored")
+        var v3 = [UInt8](hid); v3[4] = 3
+        check(PodHides.parse(Data(v3), db: db, dbTime: dbTime) == nil, "hidden file of an unknown version ignored")
+        // FroggerSkips: skips on the iPod by track list index and id, with the last skip's time (1904-based)
+        let mac = 3_800_000_000, macDate = Date(timeIntervalSince1970: Double(mac - 2_082_844_800))
+        let sk = PodSkips.make([(1, ids[1], 2, mac), (3, ids[3], 1, 0), (0, ids[2], 5, mac)], stamp: stamp)
+        check(PodSkips.parse(sk, db: db, dbTime: dbTime) == [PodSkips.Entry(index: 1, count: 2, last: macDate), PodSkips.Entry(index: 3, count: 1, last: nil)],
+              "skips read, a moved song (wrong id at its index) left out")
+        check(PodSkips.parse(sk, db: db, dbTime: dbTime.addingTimeInterval(600)) == nil, "skips ignored for a newer iTunesDB (stale file)")
+        check(PodSkips.parse(Data("FRGS".utf8), db: db, dbTime: dbTime) == nil && PodSkips.parse(sk.prefix(40), db: db, dbTime: dbTime) == nil,
+              "broken or cut-off skips file ignored")
+        let summed = PodSkips.add([("a", PodSkips.Entry(index: 1, count: 2, last: macDate)), ("b", PodSkips.Entry(index: 3, count: 1, last: nil))],
+                                  to: ["a": PodSkip(count: 3, last: macDate.addingTimeInterval(-60)), "b": PodSkip(count: 1, last: macDate)])
+        check(summed == ["a": PodSkip(count: 5, last: macDate), "b": PodSkip(count: 2, last: macDate)], "skips added to Crate's, the later time kept")
+        let (saved, edited) = db.applyFromPod(files)
+        check(saved.count == 1 && saved[0].0 == 2 && saved[0].1 == [ids[0], ids[2]], "New Playlist 2 handed to Crate")
+        check(edited == [mixID], "only Mix replaced (FroggerPlaylist_99 has no playlist)")
         var back = try! ITunesDB.read(db.serialize())
+        check(back.playlists.first { $0.id == mixID }?.items.map(\.trackID) == [ids[0], ids[1], ids[2], ids[3]], "Mix as edited on the iPod after a round trip")
         check(back.playlists.map(\.name) == db.playlists.map(\.name), "names: \(back.playlists.map(\.name))")
         check(back.playlists[back.playlists.count - 2].items.map(\.trackID) == [ids[0], ids[1], ids[2], ids[0]], "items kept, duplicates too")
         check(back.playlists.last!.items.map(\.trackID) == [ids[3], ids[1]], "On-The-Go imported in order")
+        var marked = back
+        marked.playlists[marked.playlists.count - 2].rename("~Crate Test")
+        let markedBack = try! ITunesDB.read(marked.serialize())
+        check(markedBack.playlists[markedBack.playlists.count - 2].name == "~Crate Test"
+              && markedBack.playlists[markedBack.playlists.count - 2].items == back.playlists[back.playlists.count - 2].items
+              && markedBack.playlists.map(\.id) == back.playlists.map(\.id), "renamed playlist keeps its id and items")
         let kept = back.playlists
         let again = try! ITunesDB.read(back.serialize())
         check(again.playlists == kept, "playlist records identical after a second round trip")
@@ -306,7 +437,7 @@ enum Main {
             d += le(0x60); d += le(0x10); d += le(n)
             d += [UInt8](repeating: 0, count: 0x60 - 16)
             for i in 0..<n {
-                let e: [Int] = i == 1 ? [3, 3_000_000_000, 0, 80] : [0, 0, 0, 0]
+                let e: [Int] = i == 1 ? [3, 3_000_000_000, 754_000, 80] : [0, 0, 0, 0]
                 for v in e { d += le(v) }
             }
             return Data(d)
@@ -317,6 +448,26 @@ enum Main {
         check(pc.mergePlayCounts(PlayCounts.parse(file(pc.tracks.count))!) == 1, "Play Counts merged into one track")
         let merged = try! ITunesDB.read(pc.serialize())
         check(plays(merged.tracks[1]) == p0 + 3 && [UInt8](merged.tracks[1].raw!)[0x1F] == 80, "plays +3 and rating kept after a round trip")
+        let mb = [UInt8](merged.tracks[1].raw!)
+        check(Int(mb[0x6C]) | Int(mb[0x6D]) << 8 | Int(mb[0x6E]) << 16 == 754_000, "bookmark (Resume Mixes) kept after a round trip")
+        var rt = merged
+        let loc = rt.tracks[1].location
+        rt.retag(1, PodRetag(title: "Renamed Song", album: "Merged Album", artist: "Someone Else"))
+        let renamed = try! ITunesDB.read(rt.serialize())
+        check(renamed.tracks[1].album == "Merged Album" && renamed.tracks[1].title == "Renamed Song" && renamed.tracks[1].artist == "Someone Else"
+              && renamed.tracks[1].location == loc && plays(renamed.tracks[1]) == p0 + 3 && renamed.tracks.count == merged.tracks.count,
+              "retagged song keeps its file and play count after a round trip")
+        rt.retag(1, PodRetag(title: "Renamed Song", album: "Merged Album", artist: "Someone Else", albumArtist: "Album Person"))
+        rt.retag(1, PodRetag(title: "Renamed Song", album: "Merged Album", artist: "Someone Else"))   // nil keeps it
+        let credited = try! ITunesDB.read(rt.serialize())
+        check(credited.tracks[1].albumArtist == "Album Person" && credited.tracks[1].artist == "Someone Else"
+              && plays(credited.tracks[1]) == p0 + 3, "album artist set by a retag, kept by the next one, after a round trip")
+        rt.setHidden(1, true)
+        let hidden = try! ITunesDB.read(rt.serialize())
+        check(hidden.tracks[1].hidden && !hidden.tracks[0].hidden && [UInt8](hidden.tracks[1].raw!)[ITunesDB.hideOffset] == UInt8(ascii: "H")
+              && plays(hidden.tracks[1]) == p0 + 3, "hide flag survives a round trip and keeps the record")
+        rt.setHidden(1, false)
+        check(!(try! ITunesDB.read(rt.serialize())).tracks[1].hidden, "hide flag clears")
         exit(0)
     }
 
@@ -342,6 +493,91 @@ enum Main {
             m.toggleAdd(lib); await m.sync()
             print("after add: \(m.db?.tracks.count ?? -1) tracks, state \(m.state(lib)) | \(m.report?.error ?? "ok, \(m.report?.failures.count ?? 0) failures")")
             exit(0)
+        }
+        RunLoop.main.run()
+    }
+
+    /// Writes a tag plan into library files the way the tag editor does, so the iPod's copies follow at the next
+    /// sync (Model.refreshFiles queues their retags), and queues retags for songs that are only on the iPod.
+    /// Quit the app first: it keeps the queued retags in memory and would save over these. The plan is JSON:
+    /// {"files": [[path, field, old, new], …] (field: title/artist/albumartist/album/genre/year),
+    ///  "pod": [{"album", "title", "artist", "albumArtist"}, …] (matched on album + title)}.
+    static func applyTags(_ planPath: String) {
+        Task { @MainActor in
+            guard let d = FileManager.default.contents(atPath: planPath),
+                  let plan = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { print("can't read \(planPath)"); exit(1) }
+            let m = Model()
+            await m.reload()
+            print("library: \(m.libTracks.count) songs, iPod: \(m.db?.tracks.count ?? -1) tracks")
+            var edits: [String: TagEdit] = [:], order: [String] = []
+            for row in plan["files"] as? [[Any]] ?? [] {
+                guard row.count >= 4, let path = row[0] as? String, let field = row[1] as? String else { continue }
+                if edits[path] == nil { order.append(path); edits[path] = TagEdit() }
+                let text = row[3] as? String, number = (row[3] as? Int) ?? (row[3] as? String).flatMap(Int.init)
+                switch field {
+                case "title": edits[path]!.title = text
+                case "artist": edits[path]!.artist = text
+                case "albumartist": edits[path]!.albumArtist = text
+                case "album": edits[path]!.album = text
+                case "genre": edits[path]!.genre = text
+                case "year": edits[path]!.year = number
+                default: print("unknown field \(field)")
+                }
+            }
+            var written: [String] = [], failed = 0
+            for path in order {
+                do { if try TagWriter.write(path, edits[path]!) { written.append(path) } }
+                catch { failed += 1; print("FAILED \(path): \(error.localizedDescription)") }
+            }
+            let before = m.retags.count
+            await m.refreshFiles(written)
+            var pod = 0
+            for r in plan["pod"] as? [[String: String]] ?? [] {
+                let key = TrackKey.make(album: r["album"] ?? "", title: r["title"] ?? "")
+                guard m.db?.tracks.contains(where: { $0.key == key }) == true else { print("not on the iPod: \(key)"); continue }
+                m.retags[key] = PodRetag(title: r["title"] ?? "", album: r["album"] ?? "", artist: r["artist"] ?? "", albumArtist: r["albumArtist"])
+                pod += 1
+            }
+            print("\(written.count) files written, \(failed) failed, \(m.retags.count - before - pod) iPod retags from them, \(pod) for iPod-only songs")
+            exit(failed == 0 ? 0 : 1)
+        }
+        RunLoop.main.run()
+    }
+
+    /// Syncs the connected iPod with everything queued, exactly as the Sync button does (the review is
+    /// printed instead of shown). Quit the app first.
+    static func syncNow() {
+        Task { @MainActor in
+            let m = Model()
+            await m.reload()
+            guard m.ipod != nil, m.connected else { print("no iPod connected"); exit(1) }
+            let p = m.makePlan()
+            if CommandLine.arguments.contains("--dry-run") {
+                print("plan: add \(p.addAlbums.count) albums/\(p.addSongs) songs (\(p.convertSongs) converted), remove \(p.removeAlbums.map(\.title)) /\(p.removeSongs) songs, retag \(p.retag), hide \(p.hide), show \(p.unhide), playlists +\(p.playlistsAdd) -\(p.playlistsRemove)")
+                if var db = m.db {      // hide flags as the sync decides them: after this sync's retags
+                    for i in db.tracks.indices { if let r = m.retags[db.tracks[i].key] { db.retag(i, r) } }
+                    let rule = m.ruleHidden(db.playlists, tracks: db.tracks)
+                    for t in db.tracks where t.hidden != m.wantsHidden(t.key, rule) { print((t.hidden ? "would show: " : "would hide: ") + "\(t.artist) – \(t.title)") }
+                    print("lossless to replace: \(db.tracks.filter(\.isLossless).count)")
+                }
+                exit(0)
+            }
+            print("plan: add \(p.addAlbums.count) albums/\(p.addSongs) songs (\(p.convertSongs) converted), remove \(p.removeAlbums.count) albums/\(p.removeSongs) songs, "
+                  + "retag \(p.retag), hide \(p.hide), show \(p.unhide), playlists +\(p.playlistsAdd.count) -\(p.playlistsRemove.count)")
+            var last = ""
+            let tick = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+                MainActor.assumeIsolated {
+                    let line = m.syncPhase + (m.syncTotal > 0 ? " \(m.syncDone)/\(m.syncTotal)" : "")
+                    if line != last { print(line); last = line }
+                }
+            }
+            await m.sync()
+            tick.invalidate()
+            guard let r = m.report else { print("sync didn't run"); exit(1) }
+            print("done in \(Int(r.seconds)) s: added \(r.added), removed \(r.removed), lossless replaced \(r.replaced), playlists \(r.playlists), play counts merged \(r.playCounts)"
+                  + (r.error.map { " | ERROR \($0)" } ?? ""))
+            r.failures.forEach { print("  failed: \($0)") }
+            exit(r.error == nil ? 0 : 1)
         }
         RunLoop.main.run()
     }

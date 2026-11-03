@@ -19,7 +19,10 @@ struct YTItem: Identifiable, Hashable {
     var title, artist, album, albumArtist: String
     var track = 0, trackCount = 0, year = 0
     var state = "Waiting", progress = 0.0
-    var done = false, failed = false
+    var done = false, failed = false, cancelled = false
+    var video = "", videoTitle = "", channel = ""   // what yt-dlp actually picked
+    var error = ""
+    var log: [String] = []
 }
 
 struct YTJob: Identifiable, Hashable {
@@ -29,6 +32,7 @@ struct YTJob: Identifiable, Hashable {
     var items: [YTItem]
     var started = Date()
     var finished: Bool { items.allSatisfy { $0.done || $0.failed } }
+    var cancelled: Bool { items.contains(where: \.cancelled) }
     var progress: Double { items.isEmpty ? 0 : items.map { $0.done || $0.failed ? 1 : $0.progress }.reduce(0, +) / Double(items.count) }
 }
 
@@ -41,6 +45,7 @@ final class YouTube: ObservableObject {
     @Published var error: String?
     @Published var jobs: [YTJob] = []
     private var running = false
+    private var procs: [UUID: Process] = [:]     // item id → its running yt-dlp
     var onFiles: (([URL], UUID) async -> Void)?
 
     /// Crate's own copy (downloaded on request), then the usual places: Homebrew, nix, MacPorts.
@@ -82,7 +87,7 @@ final class YouTube: ObservableObject {
     }
 
     /// Runs yt-dlp; `line` gets every output line as it comes.
-    func run(_ args: [String], line: (@MainActor (String) -> Void)? = nil) async throws -> String {
+    func run(_ args: [String], line: (@MainActor (String) -> Void)? = nil, started: ((Process) -> Void)? = nil) async throws -> String {
         guard let bin = binary else { throw SyncError.missingSource("yt-dlp (get it in Settings › Plugins › YouTube)") }
         return try await withCheckedThrowingContinuation { cont in
             let p = Process(), out = Pipe()
@@ -110,7 +115,7 @@ final class YouTube: ObservableObject {
                 if p.terminationStatus == 0 { cont.resume(returning: text) }
                 else { cont.resume(throwing: SyncError.missingSource(text.split(separator: "\n").last { $0.contains("ERROR") }.map(String.init) ?? "yt-dlp failed")) }
             }
-            do { try p.run() } catch { cont.resume(throwing: error) }
+            do { try p.run(); started?(p) } catch { cont.resume(throwing: error) }
         }
     }
 
@@ -190,33 +195,48 @@ final class YouTube: ObservableObject {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let cover = await Self.coverData(job.art)
         var files: [URL] = []
-        for item in job.items where !item.done && !item.failed {
+        for itemID in job.items.map(\.id) {
+            func current() -> YTItem? { jobs.first { $0.id == id }?.items.first { $0.id == itemID } }
+            guard let item = current(), !item.done, !item.failed else { continue }
             func set(_ f: (inout YTItem) -> Void) {
-                guard let j = jobs.firstIndex(where: { $0.id == id }), let i = jobs[j].items.firstIndex(where: { $0.id == item.id }) else { return }
+                guard let j = jobs.firstIndex(where: { $0.id == id }), let i = jobs[j].items.firstIndex(where: { $0.id == itemID }) else { return }
                 f(&jobs[j].items[i])
             }
             set { $0.state = "Downloading" }
             do {
-                let out = try await run(["-f", "bestaudio[ext=m4a]/bestaudio", "--no-playlist", "--newline", "--no-warnings",
+                defer { procs[itemID] = nil }
+                let out = try await run(["-f", "bestaudio[ext=m4a]/bestaudio", "--no-playlist", "--newline", "--no-warnings", "--progress",
                                          "--progress-template", "download:%(progress._percent_str)s", "-o", dir.path + "/%(id)s.%(ext)s",
-                                         "--print", "after_move:filepath", item.source]) { line in
-                    if let p = Double(line.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "%", with: "")) { set { $0.progress = p / 100 } }
-                }
+                                         "--print", "before_dl:@@%(webpage_url)s\t%(title)s\t%(channel)s",
+                                         "--print", "after_move:filepath", item.source], line: { line in
+                    let t = line.trimmingCharacters(in: .whitespaces)
+                    if let p = Double(t.replacingOccurrences(of: "%", with: "")) { set { $0.progress = p / 100 }; return }
+                    if t.hasPrefix("@@") {
+                        let f = t.dropFirst(2).components(separatedBy: "\t")
+                        set { $0.video = f[0]; $0.videoTitle = f.count > 1 ? f[1] : ""; $0.channel = f.count > 2 ? f[2] : "" }
+                        return
+                    }
+                    set { $0.log.append(line); if $0.log.count > 300 { $0.log.removeFirst() } }
+                }, started: { [weak self] p in self?.procs[itemID] = p })
+                guard current()?.cancelled != true else { continue }
                 guard let path = out.split(separator: "\n").last(where: { $0.hasPrefix("/") }).map(String.init) else { throw SyncError.missingSource("no file") }
                 var url = URL(fileURLWithPath: path)
-                if url.pathExtension.lowercased() != "m4a" { url = try await convert(url) }
+                if url.pathExtension.lowercased() != "m4a" { set { $0.state = "Converting" }; url = try await convert(url) }
                 set { $0.state = "Tagging" }
                 let e = TagEdit(title: item.title, artist: item.artist, albumArtist: item.albumArtist, album: item.album,
                                 year: item.year > 0 ? item.year : nil, track: item.track > 0 ? item.track : nil,
                                 trackCount: item.trackCount > 0 ? item.trackCount : nil, cover: cover)
                 let u = url
                 _ = try await Task.detached { try TagWriter.write(u.path, e) }.value
+                guard current()?.cancelled != true else { continue }
                 // a readable file name, so the import folder looks sane
                 let named = dir.appendingPathComponent((item.track > 0 ? String(format: "%02d ", item.track) : "") + Organizer.clean(item.title) + ".m4a")
                 try? FileManager.default.moveItem(at: url, to: named)
                 files.append(FileManager.default.fileExists(atPath: named.path) ? named : url)
                 set { $0.state = "Done"; $0.done = true; $0.progress = 1 }
-            } catch { set { $0.state = error.localizedDescription; $0.failed = true } }
+            } catch {
+                set { if !$0.cancelled { $0.state = error.localizedDescription; $0.error = error.localizedDescription; $0.failed = true } }
+            }
         }
         if !files.isEmpty { await onFiles?(files, id) }
         try? FileManager.default.removeItem(at: dir)
@@ -240,6 +260,16 @@ final class YouTube: ObservableObject {
     static func coverData(_ s: String) async -> Data? {
         guard let u = URL(string: s), !s.isEmpty, let (d, _) = try? await URLSession.shared.data(from: u), NSImage(data: d) != nil else { return nil }
         return d
+    }
+
+    /// Stops a job (or one song of it): waiting songs are skipped and a running yt-dlp is killed.
+    /// Songs that already finished stay and are still imported.
+    func cancel(_ id: UUID, item: UUID? = nil) {
+        guard let j = jobs.firstIndex(where: { $0.id == id }) else { return }
+        for i in jobs[j].items.indices where !jobs[j].items[i].done && !jobs[j].items[i].failed && (item == nil || jobs[j].items[i].id == item) {
+            jobs[j].items[i].cancelled = true; jobs[j].items[i].failed = true; jobs[j].items[i].state = "Cancelled"
+            procs[jobs[j].items[i].id]?.terminate()
+        }
     }
 
     func remove(_ id: UUID) { jobs.removeAll { $0.id == id && $0.finished } }

@@ -3,7 +3,7 @@ import AVFoundation
 
 // The music on the shares: OwnTone's local files plus extra folders scanned directly.
 
-struct LibTrack: Identifiable, Hashable {
+struct LibTrack: Identifiable, Hashable, Codable {
     var id: String { path }
     var title, artist, album, genre: String          // artist = album artist (for grouping)
     var trackNumber, discNumber, year, lengthMs: Int
@@ -60,15 +60,45 @@ enum LibraryLoader {
 
     /// Scans a folder; tags come from AVFoundation where it can read them, otherwise from
     /// the Artist/Album/NN Title layout.
+    /// A scanned file's tags, kept while its date and size stay the same.
+    struct Scanned: Codable { var modified: Double; var size: Int; var track: LibTrack }
+
+    /// Reads the folder's songs: files that haven't changed since the last scan come from the cache,
+    /// the rest are read eight at a time (a network share mostly waits).
     static func scan(_ folder: String, skipping known: Set<String> = []) async -> [LibTrack] {
         guard let e = FileManager.default.enumerator(atPath: folder) else { return [] }
-        var out: [LibTrack] = []
+        var files: [(rel: String, modified: Double, size: Int)] = []
         while let rel = e.nextObject() as? String {
             if (rel as NSString).lastPathComponent.hasPrefix(".") { e.skipDescendants(); continue }     // .crate-trash and friends
             guard audioExts.contains((rel as NSString).pathExtension.lowercased()), !known.contains(folder + "/" + rel) else { continue }
-            out.append(await track(folder + "/" + rel, relative: rel))
+            let a = e.fileAttributes      // from the listing itself, no extra trip to the disk
+            files.append((rel, (a?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0, (a?[.size] as? Int) ?? 0))
         }
-        return out
+        var cache: [String: Scanned] = Store.load("scan-cache.json", [:])
+        var out = [LibTrack?](repeating: nil, count: files.count), todo: [Int] = []
+        for (i, f) in files.enumerated() {
+            if let c = cache[folder + "/" + f.rel], c.modified == f.modified, c.size == f.size { out[i] = c.track } else { todo.append(i) }
+        }
+        let names = files.map(\.rel)
+        await withTaskGroup(of: (Int, LibTrack).self) { g in
+            var next = 0
+            for _ in 0..<min(8, todo.count) {
+                let i = todo[next]; next += 1
+                g.addTask { (i, await track(folder + "/" + names[i], relative: names[i])) }
+            }
+            while let (i, t) = await g.next() {
+                out[i] = t
+                if next < todo.count {
+                    let j = todo[next]; next += 1
+                    g.addTask { (j, await track(folder + "/" + names[j], relative: names[j])) }
+                }
+            }
+        }
+        if !todo.isEmpty {
+            for i in todo { if let t = out[i] { cache[folder + "/" + files[i].rel] = Scanned(modified: files[i].modified, size: files[i].size, track: t) } }
+            Store.save("scan-cache.json", cache)
+        }
+        return out.compactMap { $0 }
     }
 
     /// One file's tags; without tags the Artist/Album/NN Title layout of `relative` fills in.
@@ -160,6 +190,14 @@ enum LibraryLoader {
         for n in ["cover.jpg", "folder.jpg", "cover.png", "folder.png", "front.jpg"] {
             if let d = FileManager.default.contents(atPath: album.folder + "/" + n) { return d }
         }
+        // other names: one with front/cover/folder in it ("… Cover Front.jpg", not a back cover), or the only image
+        let images = ((try? FileManager.default.contentsOfDirectory(atPath: album.folder)) ?? [])
+            .filter { ["jpg", "jpeg", "png"].contains(($0 as NSString).pathExtension.lowercased()) && !$0.hasPrefix(".") }.sorted()
+        let named = images.first { n in
+            let l = n.lowercased()
+            return ["front", "cover", "folder"].contains { l.contains($0) } && !["back", "inlay", "cd.", "disc", "tray"].contains { l.contains($0) }
+        }
+        if let n = named ?? (images.count == 1 ? images[0] : nil), let d = FileManager.default.contents(atPath: album.folder + "/" + n) { return d }
         guard let first = album.tracks.first else { return nil }
         if let pic = FLACMeta.read(first.path)?.picture { return pic }
         let asset = AVURLAsset(url: URL(fileURLWithPath: first.path))
@@ -257,12 +295,14 @@ struct OTPlaylist: Identifiable, Hashable {
     var count: Int
     var spotifyID: String? = nil      // read from Spotify itself (the Spotify plugin) instead of OwnTone
     var artwork = ""
+    var path = ""                     // OwnTone's: the .m3u it reads the playlist from
 }
 
 struct OTTrack: Identifiable, Hashable {
     var id: Int
     var title, artist, album, albumArtist, dataKind, uri, artworkPath: String
     var lengthMs: Int
+    var path = ""                     // OwnTone's file path (or URL)
     var key: String { TrackKey.make(album: album, title: title) }
 }
 
@@ -272,7 +312,8 @@ enum OwnTonePlaylists {
         let items = ((try JSONSerialization.jsonObject(with: d) as? [String: Any])?["items"] as? [[String: Any]]) ?? []
         return items.compactMap { p in
             guard let id = p["id"] as? Int, (p["item_count"] as? Int ?? 0) > 0 else { return nil }
-            return OTPlaylist(id: id, name: p["name"] as? String ?? "", uri: p["uri"] as? String ?? "", count: p["item_count"] as? Int ?? 0)
+            return OTPlaylist(id: id, name: p["name"] as? String ?? "", uri: p["uri"] as? String ?? "", count: p["item_count"] as? Int ?? 0,
+                              path: p["path"] as? String ?? "")
         }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
@@ -283,7 +324,7 @@ enum OwnTonePlaylists {
             let s = { (k: String) in (t[k] as? String) ?? "" }
             return OTTrack(id: t["id"] as? Int ?? 0, title: s("title"), artist: s("artist"), album: s("album"),
                            albumArtist: s("album_artist"), dataKind: s("data_kind"), uri: s("uri"),
-                           artworkPath: s("artwork_url"), lengthMs: t["length_ms"] as? Int ?? 0)
+                           artworkPath: s("artwork_url"), lengthMs: t["length_ms"] as? Int ?? 0, path: s("path"))
         }
     }
 

@@ -256,7 +256,10 @@ struct SpotifyAlbumView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Label("Spotify", systemImage: PluginID.spotify.icon).font(.caption.weight(.semibold)).foregroundStyle(PluginID.spotify.tint)
                         Text(album.name).font(.largeTitle.bold()).lineLimit(2)
-                        Text(album.artist).font(.title2).foregroundStyle(.secondary)
+                        Button { model.path.append(.artist(album.artist)) } label: {
+                            Text(album.artist).font(.title2).foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain).help("Go to artist")
                         let year = album.year > 0 ? album.year : s.year
                         Text([year > 0 ? "\(year)" : "", s.tracks.isEmpty ? "" : "\(s.tracks.count) songs",
                               s.tracks.isEmpty ? "" : totalDuration(s.tracks.map(\.lengthMs).reduce(0, +)),

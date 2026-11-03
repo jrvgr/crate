@@ -26,7 +26,7 @@ enum MusicBrainz {
     }
 
     static func search(album: String, artist: String) async throws -> [MBRelease] {
-        let q = "release:\"\(album)\"" + (artist == "Various Artists" ? "" : " AND artist:\"\(artist)\"")
+        let q = "release:\"\(album)\"" + (artist.isEmpty || artist == "Various Artists" ? "" : " AND artist:\"\(artist)\"")
         var c = URLComponents(string: "https://musicbrainz.org/ws/2/release/")!
         c.queryItems = [.init(name: "query", value: q), .init(name: "fmt", value: "json"), .init(name: "limit", value: "8")]
         let j = try await get(c.url!)
@@ -73,7 +73,7 @@ enum Discogs {
         var c = URLComponents(string: "https://api.discogs.com/database/search")!
         c.queryItems = [.init(name: "release_title", value: album), .init(name: "type", value: "release"),
                         .init(name: "per_page", value: "8")]
-        if artist != "Various Artists" { c.queryItems!.append(.init(name: "artist", value: artist)) }
+        if !artist.isEmpty, artist != "Various Artists" { c.queryItems!.append(.init(name: "artist", value: artist)) }
         var r = URLRequest(url: c.url!)
         r.setValue(MusicBrainz.agent, forHTTPHeaderField: "User-Agent")
         r.setValue("Discogs token=\(token)", forHTTPHeaderField: "Authorization")
@@ -95,7 +95,7 @@ enum Discogs {
 enum ITunesLookup {
     static func search(album: String, artist: String) async throws -> [MBRelease] {
         var c = URLComponents(string: "https://itunes.apple.com/search")!
-        c.queryItems = [.init(name: "term", value: (artist == "Various Artists" ? "" : artist + " ") + album),
+        c.queryItems = [.init(name: "term", value: (artist.isEmpty || artist == "Various Artists" ? "" : artist + " ") + album),
                         .init(name: "entity", value: "album"), .init(name: "limit", value: "8")]
         let (d, _) = try await URLSession.shared.data(from: c.url!)
         let j = (try JSONSerialization.jsonObject(with: d) as? [String: Any]) ?? [:]
@@ -121,26 +121,35 @@ enum MetadataStore {
     static func save(_ m: [String: MBRelease]) { try? JSONEncoder().encode(m).write(to: url) }
 }
 
-struct LookupSheet: View {
+/// Find Metadata, as a panel under the album page's header.
+struct LookupPanel: View {
     @EnvironmentObject var model: Model
-    @Environment(\.dismiss) private var dismiss
     var album: Album
+    var close: () -> Void
     @StateObject private var state = LookupState()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 14) {
-                Cover(image: model.artwork[album.id], seed: album.id).frame(width: 56, height: 56).clipShape(.rect(cornerRadius: 9))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(state.applying == nil ? "Find Metadata" : state.summary == nil ? "Applying…" : "Metadata saved").font(.title2.bold())
-                    Text("\(album.title) · \(album.artist) · \(album.tracks.count) tracks").foregroundStyle(.secondary).lineLimit(1)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label(state.applying == nil ? "Find Metadata" : state.summary == nil ? "Applying…" : "Metadata saved",
+                      systemImage: "sparkle.magnifyingglass").font(.title3.bold())
+                Spacer()
+                Button(action: close) { Image(systemName: "xmark") }.buttonStyle(.borderless).help("Close")
+                    .disabled(state.applying != nil && state.summary == nil)
+            }
+            if state.applying == nil {
+                HStack(spacing: 8) {     // search by hand when the tags don't find it
+                    TextField("Album", text: $state.title).textFieldStyle(.roundedBorder).onSubmit(research)
+                    TextField("Artist", text: $state.artist).textFieldStyle(.roundedBorder).frame(width: 180).onSubmit(research)
+                    Button("Search", action: research).buttonStyle(.glass)
+                        .disabled(state.searching || (state.title + state.artist).trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
             Group {
                 if let r = state.applying { progress(r) }
                 else { results }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .frame(maxWidth: .infinity, alignment: .top)
             HStack {
                 if state.applying == nil {
                     Picker("", selection: $state.source) {
@@ -152,23 +161,24 @@ struct LookupSheet: View {
                 }
                 Spacer()
                 if state.applying == nil {
-                    Button("Cancel") { dismiss() }.buttonStyle(.glass).keyboardShortcut(.cancelAction)
+                    Button("Cancel", action: close).buttonStyle(.glass).keyboardShortcut(.cancelAction)
                 } else {
-                    Button("Done") { dismiss() }.buttonStyle(.glassProminent).keyboardShortcut(.defaultAction)
+                    Button("Done", action: close).buttonStyle(.glassProminent).keyboardShortcut(.defaultAction)
                         .disabled(state.summary == nil)
                 }
             }
         }
-        .padding(22)
-        .frame(width: 600, height: 540)
-        .interactiveDismissDisabled(state.applying != nil && state.summary == nil)
-        .task { await state.search(album) }
+        .padding(18)
+        .glassEffect(.regular.tint(.accentColor.opacity(0.08)), in: .rect(cornerRadius: 18))
+        .task { state.title = album.title; state.artist = album.artist; await state.search(album) }
     }
+
+    func research() { Task { await state.search(album) } }
 
     var results: some View {
         let shown = state.results.filter { state.source.isEmpty || $0.source == state.source }
         return Group {
-            if state.searching { ProgressView("Searching MusicBrainz, iTunes\(Discogs.token.isEmpty ? "" : " and Discogs")…").frame(maxWidth: .infinity, maxHeight: .infinity) }
+            if state.searching { ProgressView("Searching MusicBrainz, iTunes\(Discogs.token.isEmpty ? "" : " and Discogs")…").frame(maxWidth: .infinity, minHeight: 120) }
             else if let e = state.error { Label(e, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red) }
             else if shown.isEmpty { ContentUnavailableView("No matches", systemImage: "magnifyingglass") }
             else {
@@ -208,6 +218,7 @@ struct LookupSheet: View {
                         }
                     }
                 }
+                .frame(maxHeight: 380)
             }
         }
     }
@@ -252,12 +263,16 @@ final class LookupState: ObservableObject {
     @Published var applying: MBRelease?
     @Published var steps: [String] = []
     @Published var summary: String?
+    @Published var title = ""         // what to search for: the album's tags, or typed
+    @Published var artist = ""
 
     func search(_ a: Album) async {
+        searching = true; error = nil
         defer { searching = false }
-        async let mb = (try? MusicBrainz.search(album: a.title, artist: a.artist)) ?? []
-        async let it = (try? ITunesLookup.search(album: a.title, artist: a.artist)) ?? []
-        async let dc = (try? Discogs.search(album: a.title, artist: a.artist)) ?? []
+        let t = title.trimmingCharacters(in: .whitespaces), ar = artist.trimmingCharacters(in: .whitespaces)
+        async let mb = (try? MusicBrainz.search(album: t, artist: ar)) ?? []
+        async let it = (try? ITunesLookup.search(album: t, artist: ar)) ?? []
+        async let dc = (try? Discogs.search(album: t, artist: ar)) ?? []
         let r = await mb + it + dc
         if r.isEmpty { error = "Nothing found (or the metadata services are unreachable)" }
         // same track count first, then MusicBrainz' score

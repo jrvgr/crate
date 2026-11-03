@@ -4,7 +4,21 @@ import Charts
 // What the iPod knows about listening (plays, ratings, last played, merged from its Play Counts
 // on every sync), smart playlists built from that and the library, and a year in review.
 
-struct PodStat: Hashable { var rating = 0, plays = 0; var lastPlayed: Date? }
+struct PodStat: Hashable { var rating = 0, plays = 0, skips = 0; var lastPlayed, lastSkipped: Date? }
+/// Skips recorded by Frogger on the iPod, summed over syncs (the 2.3 iTunesDB has no skip count).
+struct PodSkip: Codable, Hashable { var count = 0; var last: Date? }
+
+extension PodSkips {
+    /// `skips` with the iPod's added: counts summed, the later last skip kept.
+    static func add(_ entries: [(String, Entry)], to skips: [String: PodSkip]) -> [String: PodSkip] {
+        var s = skips
+        for (key, e) in entries {
+            s[key, default: PodSkip()].count += e.count
+            if let t = e.last, t > s[key]?.last ?? .distantPast { s[key]?.last = t }
+        }
+        return s
+    }
+}
 
 extension PodTrack {
     private func u32(_ o: Int) -> Int {
@@ -24,8 +38,8 @@ extension PodTrack {
 struct SmartRule: Codable, Hashable, Identifiable {
     enum Field: String, Codable, CaseIterable {
         case artist = "Artist", album = "Album", genre = "Genre", year = "Year", added = "Added", rating = "Rating"
-        case plays = "Plays", lastPlayed = "Last played", format = "Format", onIPod = "On the iPod"
-        var numeric: Bool { [.year, .rating, .plays].contains(self) }
+        case plays = "Plays", lastPlayed = "Last played", format = "Format", onIPod = "On the iPod", skips = "Skips"
+        var numeric: Bool { [.year, .rating, .plays, .skips].contains(self) }
         var days: Bool { self == .added || self == .lastPlayed }
         var ops: [Op] {
             if numeric { return [.atLeast, .atMost, .is] }
@@ -64,6 +78,7 @@ extension SmartPlaylist {
             SmartPlaylist(name: "Most Played", rules: [r(.plays, .atLeast, "3")], limit: 100, order: .mostPlayed),
             SmartPlaylist(name: "Top Rated", rules: [r(.rating, .atLeast, "4")], order: .rating),
             SmartPlaylist(name: "Forgotten Favourites", rules: [r(.plays, .atLeast, "5"), r(.lastPlayed, .notWithinDays, "180")], limit: 100, order: .random),
+            SmartPlaylist(name: "Skipped a Lot", rules: [r(.skips, .atLeast, "3")], limit: 100, order: .random),
             SmartPlaylist(name: "Not Played Yet", rules: [r(.onIPod, .yes), r(.plays, .atMost, "0")], limit: 100, order: .random),
             SmartPlaylist(name: "Something New for the iPod", rules: [r(.onIPod, .no)], limit: 50, order: .random),
             SmartPlaylist(name: "Lossless", rules: [r(.format, .is, "flac")], order: .artist),
@@ -78,9 +93,12 @@ extension SmartPlaylist {
 extension Model {
     /// The library's most common genres ("Electronic, Idm" counts for both).
     var topGenres: [String] {
+        if let g = genreCache { return g }
         let all = libTracks.flatMap { t in t.genre.split(whereSeparator: { ",;/".contains($0) }).map { $0.trimmingCharacters(in: .whitespaces).capitalized } }
             .filter { !$0.isEmpty }
-        return Dictionary(grouping: all) { $0 }.sorted { $0.value.count > $1.value.count }.map(\.key)
+        let g = Dictionary(grouping: all) { $0 }.sorted { $0.value.count > $1.value.count }.map(\.key)
+        genreCache = g
+        return g
     }
 }
 
@@ -91,7 +109,12 @@ enum SmartStore {
 }
 
 extension Model {
-    func stat(_ t: LibTrack) -> PodStat { podStats[podKey(t.key)] ?? PodStat() }
+    func stat(_ t: LibTrack) -> PodStat {
+        let k = podKey(t.key)
+        var s = podStats[k] ?? PodStat()
+        if let sk = skips[k] { s.skips = sk.count; s.lastSkipped = sk.last }
+        return s
+    }
 
     func matches(_ r: SmartRule, _ t: LibTrack) -> Bool {
         let s = stat(t), v = r.value.trimmingCharacters(in: .whitespaces), n = Int(v) ?? 0
@@ -115,6 +138,7 @@ extension Model {
         case .added: return days(t.added)
         case .rating: return num(rating(t))
         case .plays: return num(s.plays)
+        case .skips: return num(s.skips)
         case .lastPlayed: return days(s.lastPlayed)
         case .format: return text(t.ext)
         case .onIPod: return (podKeys.contains(t.key)) == (r.op == .yes)
@@ -145,13 +169,16 @@ extension Model {
     func smartNeedsSync(_ p: SmartPlaylist) -> Bool {
         guard p.onIPod, db != nil else { return false }
         let ts = evaluate(p), keys = podKeys
-        guard let pod = db?.playlists.first(where: { $0.name == p.name }) else { return !ts.isEmpty }
+        guard let pod = db?.playlists.first(where: { samePlaylist($0.name, p.name) }) else { return !ts.isEmpty }
         let byID = Dictionary((db?.tracks ?? []).map { ($0.id, $0.key) }, uniquingKeysWith: { a, _ in a })
         return ts.contains { !keys.contains($0.key) } || pod.items.compactMap { byID[$0.trackID] } != ts.map(\.key)
     }
 
     func saveSmart() { SmartStore.save(smartPlaylists); refreshSmartPending() }
-    func refreshSmartPending() { smartPending = smartPlaylists.filter(smartNeedsSync).count }
+    func refreshSmartPending() {
+        smartNeedingSync = Set(smartPlaylists.filter(smartNeedsSync).map(\.id))
+        smartPending = smartNeedingSync.count
+    }
 }
 
 struct SmartPlaylistView: View {
@@ -277,7 +304,7 @@ struct SmartEditor: View {
                 .fixedSize()
                 Toggle("Keep on the iPod", isOn: $s.p.onIPod)
             }
-            Text("Rating, Plays and Last played come from the iPod (what you played and rated on it, saved on every sync).")
+            Text("Rating, Plays, Skips and Last played come from the iPod (what you played and rated on it, saved on every sync).")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Text("\(count) songs match").foregroundStyle(.secondary)

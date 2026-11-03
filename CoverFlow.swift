@@ -56,34 +56,35 @@ final class FlowState: ObservableObject {
     private func wake() { if settled { last = nil; settled = false } }
 }
 
-struct CoverFlow: View {
-    @EnvironmentObject var model: Model
-    var albums: [Album]
+/// The carousel itself, for any covers: library albums, Spotify albums.
+struct CoverFlow<Art: View>: View {
+    var count: Int
     @ObservedObject var flow: FlowState
-    var onOpen: (Album) -> Void
+    var art: (Int) -> Art
+    var onOpen: (Int) -> Void
 
     var body: some View {
         GeometryReader { g in
             let size = min(g.size.height * 0.68, g.size.width * 0.26)
             let mid = g.size.height * 0.46
             TimelineView(.animation(paused: flow.settled)) { tl in
-                let pos = flow.settled ? flow.target : flow.advance(tl.date, count: albums.count)
-                let lo = max(0, Int(pos) - 5), hi = min(albums.count - 1, Int(pos) + 6)
+                let pos = flow.settled ? flow.target : flow.advance(tl.date, count: count)
+                let lo = max(0, Int(pos) - 5), hi = min(count - 1, Int(pos) + 6)
                 ZStack {
                     if lo <= hi {
                         ForEach(lo...hi, id: \.self) { i in
-                            cover(albums[i], d: Double(i) - pos, size: size)
+                            cover(i, d: Double(i) - pos, size: size)
                                 .position(x: g.size.width / 2 + x(Double(i) - pos, size), y: mid)
                                 .zIndex(-abs(Double(i) - pos))
                                 .onTapGesture {
-                                    if i == Int(flow.target.rounded()) { onOpen(albums[i]) } else { flow.go(to: i, count: albums.count) }
+                                    if i == Int(flow.target.rounded()) { onOpen(i) } else { flow.go(to: i, count: count) }
                                 }
                         }
                     }
                 }
                 .frame(width: g.size.width, height: g.size.height)
             }
-            .overlay { ScrollCatcher { delta, ended in flow.scroll(by: delta / Double(size * 0.2), count: albums.count, ended: ended) } }
+            .overlay { ScrollCatcher { delta, ended in flow.scroll(by: delta / Double(size * 0.2), count: count, ended: ended) } }
         }
         .clipped()
     }
@@ -94,9 +95,9 @@ struct CoverFlow: View {
         return a < 1 ? d * size * 0.9 : s * (size * 0.9 + (a - 1) * size * 0.46)
     }
 
-    func cover(_ a: Album, d: Double, size: Double) -> some View {
+    func cover(_ i: Int, d: Double, size: Double) -> some View {
         let t = min(abs(d), 1), s: Double = d < 0 ? -1 : 1, far = abs(d)
-        let art = Cover(image: model.artwork[a.id], seed: a.id).frame(width: size, height: size).clipShape(.rect(cornerRadius: 14))
+        let art = self.art(i).frame(width: size, height: size).clipShape(.rect(cornerRadius: 14))
         return VStack(spacing: 6) {
             art
                 .overlay {   // a glassy edge and a soft specular sheen, strongest on the cover in the middle
@@ -168,7 +169,9 @@ struct CoverFlowAlbums: View {
         let current = albums.indices.contains(i) ? albums[i] : nil
         GeometryReader { g in
             VStack(spacing: 10) {
-                CoverFlow(albums: albums, flow: flow) { model.path.append(.album($0)) }
+                CoverFlow(count: albums.count, flow: flow, art: { Cover(image: model.artwork[albums[$0].id], seed: albums[$0].id) }) {
+                    model.path.append(.album(albums[$0]))
+                }
                     .frame(height: max(280, g.size.height * 0.52))
                     .background { FlowGlow(image: current.flatMap { model.artwork[$0.id] }, seed: current?.id ?? "") }
                 if let a = current {
@@ -286,5 +289,60 @@ struct CoverFlowTracks: View {
                 .padding(.bottom, 12)
             }
         }
+    }
+}
+
+/// Cover Flow for saved Spotify albums: the carousel, the album in the middle and its buttons.
+struct SpotifyCoverFlow: View {
+    @EnvironmentObject var model: Model
+    var albums: [SpotifyAlbum]
+    @StateObject private var flow = FlowState()
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let i = min(flow.index, max(albums.count - 1, 0))
+        let current = albums.indices.contains(i) ? albums[i] : nil
+        GeometryReader { g in
+            VStack(spacing: 10) {
+                CoverFlow(count: albums.count, flow: flow, art: { CachedImage(url: model.artURL(albums[$0].artworkPath), seed: albums[$0].uri) }) {
+                    model.path.append(.spotifyAlbum(albums[$0]))
+                }
+                .frame(height: max(280, g.size.height * 0.6))
+                .background {
+                    if let a = current {
+                        CachedImage(url: model.artURL(a.artworkPath), seed: a.uri)
+                            .frame(width: 420, height: 260).blur(radius: 110).opacity(0.32)
+                            .id(a.uri).transition(.opacity).animation(.easeInOut(duration: 0.5), value: a.uri)
+                            .allowsHitTesting(false)
+                    }
+                }
+                if let a = current {
+                    VStack(spacing: 3) {
+                        Text(a.name).font(.title3.bold()).lineLimit(1)
+                        Text(a.artist + (a.year > 0 ? " · \(a.year)" : "") + " · \(a.trackCount) saved").foregroundStyle(.secondary).lineLimit(1)
+                        Scrubber(count: albums.count, index: i) { flow.go(to: $0, count: albums.count) }
+                            .frame(width: 260).padding(.top, 6)
+                        HStack(spacing: 10) {
+                            Button("Open", systemImage: "chevron.right") { model.path.append(.spotifyAlbum(a)) }
+                            Button(model.on(.ownTone) ? "Play on OwnTone" : "Open in Spotify", systemImage: "play.fill") { Task { await model.playURIs([a.uri]) } }
+                            if model.on(.soulseek), !model.hasFiles(a) {
+                                Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(a.artist, a.name) }
+                            }
+                        }
+                        .buttonStyle(.glass).padding(.top, 10)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .focusable()
+        .focused($focused)
+        .focusEffectDisabled()
+        .onAppear { focused = true }
+        .onKeyPress(.leftArrow) { flow.step(-1, count: albums.count); return .handled }
+        .onKeyPress(.rightArrow) { flow.step(1, count: albums.count); return .handled }
+        .onKeyPress(.return) { if let a = current { model.path.append(.spotifyAlbum(a)) }; return .handled }
+        .onChange(of: albums.map(\.id)) { flow.go(to: min(flow.index, max(albums.count - 1, 0)), count: albums.count) }
     }
 }

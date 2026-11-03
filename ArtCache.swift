@@ -18,9 +18,16 @@ enum ArtCache {
         return dir.appendingPathComponent(h + ".jpg")
     }
 
+    /// Already in memory (safe to call while drawing).
+    static func cached(_ key: String) -> NSImage? { memory.object(forKey: key as NSString) }
+
+    /// From memory or disk, decoded right away so drawing doesn't have to. Reads the disk: keep it
+    /// off the main thread.
     static func image(_ key: String) -> NSImage? {
         if let m = memory.object(forKey: key as NSString) { return m }
-        guard let img = NSImage(contentsOf: file(key)) else { return nil }
+        guard let src = CGImageSourceCreateWithURL(file(key) as CFURL, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) else { return nil }
+        let img = NSImage(cgImage: cg, size: .zero)
         memory.setObject(img, forKey: key as NSString)
         return img
     }
@@ -67,8 +74,8 @@ final class RemoteImage: ObservableObject {
         guard u != url else { return }
         url = u; image = nil
         guard let u else { return }
-        if let i = ArtCache.image(u.absoluteString) { image = i; return }
-        image = await ArtCache.fetch(u)
+        if let i = ArtCache.cached(u.absoluteString) { image = i; return }
+        image = await ArtCache.fetch(u)          // disk or network, off the main thread
     }
 }
 

@@ -146,14 +146,29 @@ enum ID3Tags {
         var version: UInt8 = 3, frames: [(id: String, body: Data, flags: Data)] = [], oldLength = 0
         if h.count == 10, h[0...2].elementsEqual("ID3".utf8) {
             version = h[3]
-            guard version == 3 || version == 4, h[5] & 0xC0 == 0 else {     // no unsynchronisation or extended header
+            guard version >= 2 && version <= 4, h[5] & 0xC0 == 0 else {     // no unsynchronisation, extended header/compression
                 try? fh.close(); throw TagError.malformed(name)
             }
             let size = Int(h[6]) << 21 | Int(h[7]) << 14 | Int(h[8]) << 7 | Int(h[9])
             oldLength = 10 + size + (h[5] & 0x10 != 0 ? 10 : 0)
             let b = [UInt8](fh.readData(ofLength: size))
             var o = 0
-            while o + 10 <= b.count, b[o] != 0 {
+            if version == 2 {       // ID3v2.2 (3-letter ids, 3-byte sizes): the frames v2.3 has a name for, written back as v2.3
+                while o + 6 <= b.count, b[o] != 0 {
+                    let id = String(bytes: b[o..<o + 3], encoding: .ascii) ?? ""
+                    let n = Int(b[o+3]) << 16 | Int(b[o+4]) << 8 | Int(b[o+5])
+                    guard o + 6 + n <= b.count else { try? fh.close(); throw TagError.malformed(name) }
+                    var body = Data(b[o + 6..<o + 6 + n])
+                    if id == "PIC", body.count > 5 {        // encoding, 3-letter image format → MIME type, then the same
+                        let mime = String(bytes: body[body.startIndex + 1..<body.startIndex + 4], encoding: .ascii)?.uppercased() == "PNG" ? "image/png" : "image/jpeg"
+                        body = Data([body[body.startIndex]]) + Data(mime.utf8) + Data([0]) + body.dropFirst(4)
+                    }
+                    if let id3 = Self.v22[id] { frames.append((id3, body, Data([0, 0]))) }
+                    o += 6 + n
+                }
+                version = 3
+            }
+            while h[3] != 2, o + 10 <= b.count, b[o] != 0 {
                 let id = String(bytes: b[o..<o + 4], encoding: .ascii) ?? ""
                 let n = version == 4 ? Int(b[o+4]) << 21 | Int(b[o+5]) << 14 | Int(b[o+6]) << 7 | Int(b[o+7])
                                      : Int(b[o+4]) << 24 | Int(b[o+5]) << 16 | Int(b[o+6]) << 8 | Int(b[o+7])
@@ -187,6 +202,14 @@ enum ID3Tags {
             changed = true
         }
         let yearID = version == 4 ? "TDRC" : "TYER"
+        // A file whose title, album… are only in the old ID3v1 tag at its end: carry them into the v2 tag, or
+        // players (which read v2 first) would see a tag without them once it has the edited fields.
+        if let v1 = id1(path) {
+            for (id, value) in [("TIT2", v1.title), ("TPE1", v1.artist), ("TALB", v1.album), (yearID, v1.year), ("TRCK", v1.track)]
+            where !value.isEmpty && current(id) == nil {
+                frames.append((id, text(value), Data([0, 0]))); changed = true
+            }
+        }
         if let year = e.year, year > 0, current(yearID).map({ Int($0.prefix(4)) }) != year { set(yearID, "\(year)") }
         set("TCON", e.genre ?? "")
         set("TIT2", e.title ?? ""); set("TPE1", e.artist ?? ""); set("TPE2", e.albumArtist ?? ""); set("TALB", e.album ?? "")
@@ -208,6 +231,30 @@ enum ID3Tags {
                     UInt8(total >> 21 & 0x7F), UInt8(total >> 14 & 0x7F), UInt8(total >> 7 & 0x7F), UInt8(total & 0x7F)]) + body
         try TagWriter.replaceHead(path, oldLength: oldLength, with: head)
         return true
+    }
+}
+
+extension ID3Tags {
+    /// ID3v2.2 frame ids and their v2.3 names (the ones Crate or a player cares about).
+    static let v22: [String: String] = ["TT2": "TIT2", "TP1": "TPE1", "TP2": "TPE2", "TAL": "TALB", "TYE": "TYER",
+        "TRK": "TRCK", "TPA": "TPOS", "TCO": "TCON", "TCM": "TCOM", "TEN": "TENC", "TBP": "TBPM", "TT1": "TIT1",
+        "TT3": "TIT3", "TP3": "TPE3", "COM": "COMM", "ULT": "USLT", "PIC": "APIC"]
+
+    /// The ID3v1 tag in a file's last 128 bytes ("TAG", then 30-byte title, artist, album, a 4-byte year, a
+    /// 30-byte comment whose last byte is the track number when the one before it is 0, and a genre byte).
+    static func id1(_ path: String) -> (title: String, artist: String, album: String, year: String, track: String)? {
+        guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? fh.close() }
+        guard let end = try? fh.seekToEnd(), end >= 128 else { return nil }
+        try? fh.seek(toOffset: end - 128)
+        let b = [UInt8](fh.readData(ofLength: 128))
+        guard b.count == 128, b[0...2].elementsEqual("TAG".utf8) else { return nil }
+        func field(_ o: Int, _ n: Int) -> String {
+            let bytes = b[o..<o + n].prefix { $0 != 0 }
+            return (String(bytes: bytes, encoding: .isoLatin1) ?? "").trimmingCharacters(in: .whitespaces)
+        }
+        let track = b[125] == 0 && b[126] != 0 ? "\(b[126])" : ""
+        return (field(3, 30), field(33, 30), field(63, 30), field(93, 4), track)
     }
 }
 
@@ -249,6 +296,8 @@ enum M4ATags {
         try? FileManager.default.removeItem(at: tmp)
         guard let ex = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else { throw TagError.unsupported(url.lastPathComponent) }
         ex.outputURL = tmp; ex.outputFileType = .m4a
+        // moov before mdat: without it the export puts moov last, and the 3rd gen iPod skips such files
+        ex.shouldOptimizeForNetworkUse = true
         ex.metadata = kept + set.map { item($0.0, $0.1) }
         var failure: Error?
         let finished = DispatchSemaphore(value: 0)

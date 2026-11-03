@@ -18,6 +18,8 @@ struct PodSettings: Codable, Equatable {
         soundCheck = v(.soundCheck, d.soundCheck); calendars = v(.calendars, d.calendars); calendarIDs = v(.calendarIDs, d.calendarIDs)
         calendarPastDays = v(.calendarPastDays, d.calendarPastDays); calendarFutureDays = v(.calendarFutureDays, d.calendarFutureDays)
         reminders = v(.reminders, d.reminders); reminderIDs = v(.reminderIDs, d.reminderIDs)
+        hiddenPlaylists = v(.hiddenPlaylists, d.hiddenPlaylists); hideMarkAtEnd = v(.hideMarkAtEnd, d.hideMarkAtEnd)
+        frogger = v(.frogger, d.frogger); mainArtistOnly = v(.mainArtistOnly, d.mainArtistOnly)
     }
     var aacKbps = 256                 // for FLAC/WAV/AIFF and converted MP3s
     var convertHighMP3 = false        // re-encode MP3s above `mp3Limit` to save space
@@ -32,9 +34,16 @@ struct PodSettings: Codable, Equatable {
     var calendarPastDays = 30, calendarFutureDays = 180
     var reminders = false             // open reminders → To Do
     var reminderIDs: [String] = []
+    var hiddenPlaylists: [String: Bool] = [:]  // name without the mark → marked by you (true) or unmarked (false); others go by their name
+    var hideMarkAtEnd = false           // "Name ~" instead of "~Name"
+    var mainArtistOnly = true           // "Ski Aggu, SEZA" files under Ski Aggu on the iPod (ArtistCredit)
+    enum FroggerState: String, Codable { case unknown, installed, removed }
+    var frogger = FroggerState.unknown  // what the firmware partition held when Crate last read it (Frogger.swift)
 
     func needsConversion(_ t: LibTrack) -> Bool {
         if t.needsConversion { return true }
+        if t.ext == "m4a", t.lengthMs > 0,            // Apple Lossless (ALAC): far above any AAC bit rate
+           let size = (try? FileManager.default.attributesOfItem(atPath: t.path))?[.size] as? Int, size * 8 / t.lengthMs > 400 { return true }
         guard convertHighMP3, t.ext == "mp3", t.lengthMs > 0,
               let size = (try? FileManager.default.attributesOfItem(atPath: t.path))?[.size] as? Int else { return false }
         return size * 8 / t.lengthMs > mp3Limit + 16       // kbps, with some room for tags and artwork
@@ -194,12 +203,16 @@ enum Syncer {
         }
         else {
             let src = t.path
-            try await Task.detached { try FileManager.default.copyItem(atPath: src, toPath: dst.path) }.value
+            try await Task.detached {
+                if ["m4a", "mp4", "aac"].contains(t.ext), !MP4Layout.iPodReady(src) { try MP4Layout.remux(src, to: dst) }   // MP4Layout.swift
+                else { try FileManager.default.copyItem(atPath: src, toPath: dst.path) }
+            }.value
         }
         let info = await audioInfo(dst)
         let size = (try? FileManager.default.attributesOfItem(atPath: dst.path)[.size] as? Int) ?? 0
         let location = ":iPod_Control:Music:\(folder):\(name)"
         let nt = NewTrack(title: t.title, artist: t.trackArtist.isEmpty ? t.artist : t.trackArtist, album: t.album, genre: t.genre,
+                          albumArtist: t.artist,
                           trackNumber: t.trackNumber, trackCount: albumCount, discNumber: t.discNumber, year: t.year,
                           lengthMs: info.ms > 0 ? info.ms : t.lengthMs, bitrateKbps: info.kbps, sampleRate: info.rate,
                           size: size, location: location, isAAC: aac)
@@ -232,6 +245,7 @@ enum Syncer {
     static func write(_ db: ITunesDB, to ipod: IPodInfo) throws {
         let fm = FileManager.default
         let url = ipod.dbURL, tmp = url.appendingPathExtension("new"), bak = url.appendingPathExtension("crate-backup")
+        FroggerArt.invalidate(ipod)         // its track positions are for the old database (FroggerArt.swift)
         try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try db.serialize().write(to: tmp)
         if fm.fileExists(atPath: url.path) {
@@ -246,23 +260,56 @@ enum Syncer {
     }
 }
 
-/// On-The-Go playlists made on the iPod itself. The firmware keeps them outside the iTunesDB in
-/// iTunes/OTGPlaylistInfo (later ones in OTGPlaylistInfo_1, _2...) as positions in the track list;
-/// iTunes turns them into "On-The-Go N" playlists on sync and deletes the files.
+/// Playlist edits made on the iPod itself, which the firmware keeps outside the iTunesDB in iTunes/:
+/// On-The-Go in OTGPlaylistInfo, playlists saved on the iPod ("New Playlist N") in OTGPlaylistInfo_N, and
+/// (with Frogger's Add to Playlist) a synced playlist as edited there in FroggerPlaylist_I, I counting the
+/// iTunesDB's playlists from 1. Each song is its index in the library in the iPod's own order
+/// (`ITunesDB.libraryOrder`). A file is stamped with the iTunesDB's file time, and the iPod ignores it
+/// once a sync writes a new database, so Crate reads them on Sync (only ones that match) and deletes them.
 struct OnTheGo: Hashable {
+    enum Kind: Hashable { case onTheGo, saved(Int), synced(Int) }
     var url: URL
+    var kind: Kind
     var trackIDs: [UInt32]
 
     static func load(_ ipod: IPodInfo, db: ITunesDB) -> [OnTheGo] {
-        let dir = ipod.dbURL.deletingLastPathComponent()
-        let names = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
-            .filter { $0 == "OTGPlaylistInfo" || $0.hasPrefix("OTGPlaylistInfo_") }.sorted()
-        return names.compactMap { n in
-            let url = dir.appendingPathComponent(n)
-            guard let d = try? Data(contentsOf: url), let positions = parse(d) else { return nil }
-            let ids = positions.compactMap { $0 < db.tracks.count ? db.tracks[$0].id : nil }
-            return ids.isEmpty ? nil : OnTheGo(url: url, trackIDs: ids)
+        guard let time = (try? FileManager.default.attributesOfItem(atPath: ipod.dbURL.path))?[.modificationDate] as? Date else { return [] }
+        return load(dir: ipod.dbURL.deletingLastPathComponent(), db: db, dbTime: time)
+    }
+
+    static func load(dir: URL, db: ITunesDB, dbTime: Date) -> [OnTheGo] {
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).sorted {
+            $0.localizedStandardCompare($1) == .orderedAscending
         }
+        let order = db.libraryOrder
+        return names.compactMap { n in
+            guard let kind = kind(n), let d = try? Data(contentsOf: dir.appendingPathComponent(n)),
+                  let s = stamp(d), matches(s, dbTime), let refs = parse(d) else { return nil }
+            let ids = refs.compactMap { $0 < order.count ? order[$0] : nil }
+            return ids.isEmpty ? nil : OnTheGo(url: dir.appendingPathComponent(n), kind: kind, trackIDs: ids)
+        }
+    }
+
+    static func kind(_ name: String) -> Kind? {
+        if name == "OTGPlaylistInfo" { return .onTheGo }
+        for (prefix, make) in [("OTGPlaylistInfo_", Kind.saved), ("FroggerPlaylist_", Kind.synced)] where name.hasPrefix(prefix) {
+            return Int(name.dropFirst(prefix.count)).map(make)
+        }
+        return nil
+    }
+
+    /// Whether a file's stamp is this iTunesDB's: the firmware reads the file time off FAT, which holds
+    /// local time, as if it were UTC. Within FAT's 2 seconds, and UTC itself too in case it doesn't.
+    static func matches(_ stamp: Int, _ dbTime: Date) -> Bool {
+        let t = Int(dbTime.timeIntervalSince1970)
+        let offsets = Set([TimeZone.current.secondsFromGMT(for: dbTime), TimeZone.current.secondsFromGMT(), 0])
+        return offsets.contains { abs(stamp - (t + $0)) <= 2 }
+    }
+
+    static func stamp(_ data: Data) -> Int? {
+        let d = [UInt8](data)
+        guard d.count >= 0x14, d[0..<4].elementsEqual("mhpo".utf8) else { return nil }
+        return Int(d[0x10]) | Int(d[0x11]) << 8 | Int(d[0x12]) << 16 | Int(d[0x13]) << 24
     }
 
     /// "mhpo" header (header length, entry length, entry count), then one 32-bit position per entry.
@@ -274,17 +321,18 @@ struct OnTheGo: Hashable {
         return (0..<n).compactMap { i in hl + i * el + 4 <= d.count ? u32(hl + i * el) : nil }
     }
 
-    static func make(_ positions: [Int]) -> Data {
+    static func make(_ positions: [Int], stamp: Int = 0) -> Data {
         let le = { (v: Int) in (0..<4).map { UInt8(truncatingIfNeeded: v >> ($0 * 8)) } }
-        return Data(Array("mhpo".utf8) + le(0x14) + le(4) + le(positions.count) + le(0) + positions.flatMap(le))
+        return Data(Array("mhpo".utf8) + le(0x14) + le(4) + le(positions.count) + le(stamp) + positions.flatMap(le))
     }
 }
 
 /// What the iPod recorded itself since the last sync: iTunes/Play Counts holds one entry per track
-/// (in track list order) with plays, last played and rating. iTunes adds them to the database
-/// and deletes the file; Crate does the same so plays and ratings made on the iPod are kept.
+/// (in track list order) with plays, last played, bookmark and rating. iTunes adds them to the database
+/// and deletes the file; Crate does the same so plays, ratings and Frogger's Resume Mixes positions
+/// made on the iPod are kept.
 enum PlayCounts {
-    struct Entry { var plays, lastPlayed, rating: Int }
+    struct Entry { var plays, lastPlayed, rating: Int; var bookmark = 0 }
 
     static func url(_ ipod: IPodInfo) -> URL { ipod.dbURL.deletingLastPathComponent().appendingPathComponent("Play Counts") }
 
@@ -296,8 +344,94 @@ enum PlayCounts {
         guard el >= 12, hl + n * el <= d.count else { return nil }
         return (0..<n).map { i in
             let o = hl + i * el
-            return Entry(plays: u32(o), lastPlayed: u32(o + 4), rating: el >= 16 ? u32(o + 12) : 0)
+            return Entry(plays: u32(o), lastPlayed: u32(o + 4), rating: el >= 16 ? u32(o + 12) : 0, bookmark: u32(o + 8))
         }
+    }
+}
+
+/// Songs hidden on the iPod with Frogger's hold menu (Hide), or shown again there (Show), in iTunes/FroggerHidden:
+/// a 20-byte header ("FRGH", version 2, entry size 12, the iTunesDB's stamp, count), then per song its index in
+/// the iTunesDB's track list, its track id and flags (bit 0: shown, else hidden). Version 1 (entry size 8, no
+/// flags) had only hidden songs. Stamped like the On-The-Go files, so Crate reads it on Sync (only when it
+/// matches this database) and deletes it; the songs then keep a hide choice of Crate's own (shown: false, which
+/// wins over a hidden playlist's rule).
+enum PodHides {
+    struct Entry: Equatable { var index: Int; var shown: Bool }
+
+    static func url(_ ipod: IPodInfo) -> URL { ipod.dbURL.deletingLastPathComponent().appendingPathComponent("FroggerHidden") }
+
+    static func load(_ ipod: IPodInfo, db: ITunesDB) -> [Entry] {
+        guard let time = (try? FileManager.default.attributesOfItem(atPath: ipod.dbURL.path))?[.modificationDate] as? Date,
+              let d = try? Data(contentsOf: url(ipod)) else { return [] }
+        return parse(d, db: db, dbTime: time) ?? []
+    }
+
+    /// The songs hidden or shown, by index in `db.tracks`; nil when the file is broken or stale. An entry whose
+    /// track id isn't at its index any more is skipped.
+    static func parse(_ data: Data, db: ITunesDB, dbTime: Date) -> [Entry]? {
+        let d = [UInt8](data)
+        func u16(_ o: Int) -> Int { Int(d[o]) | Int(d[o+1]) << 8 }
+        func u32(_ o: Int) -> Int { u16(o) | u16(o + 2) << 16 }
+        guard d.count >= 20, d[0..<4].elementsEqual("FRGH".utf8) else { return nil }
+        let size = u16(6)
+        guard (u16(4) == 1 && size == 8) || (u16(4) == 2 && size == 12),
+              OnTheGo.matches(u32(8), dbTime), 20 + u32(12) * size <= d.count else { return nil }
+        return (0..<u32(12)).compactMap { k in
+            let o = 20 + k * size, pos = u32(o), id = u32(o + 4)
+            guard pos < db.tracks.count && db.tracks[pos].id == UInt32(id) else { return nil }
+            return Entry(index: pos, shown: size >= 12 && u32(o + 8) & 1 != 0)
+        }
+    }
+
+    /// The hide choices they make, by iPod key: hidden true, shown false.
+    static func choices(_ entries: [Entry], db: ITunesDB) -> [String: Bool] {
+        Dictionary(entries.map { (db.tracks[$0.index].key, !$0.shown) }, uniquingKeysWith: { $1 })
+    }
+
+    static func make(_ entries: [(pos: Int, id: UInt32, shown: Bool)], stamp: Int, version: Int = 2) -> Data {
+        let le = { (v: Int) in (0..<4).map { UInt8(truncatingIfNeeded: v >> ($0 * 8)) } }
+        return Data(Array("FRGH".utf8) + [UInt8(version), 0, version == 1 ? 8 : 12, 0] + le(stamp) + le(entries.count) + le(0)
+                    + entries.flatMap { le($0.pos) + le(Int($0.id)) + (version == 1 ? [] : le($0.shown ? 1 : 0)) })
+    }
+}
+
+/// Songs skipped on the iPod (Frogger: left with Next or for another song after 2 s and before 20 s), in
+/// iTunes/FroggerSkips: a 20-byte header ("FRGS", version 1, entry size 16, the iTunesDB's stamp, count),
+/// then per song its index in the iTunesDB's track list, its track id, its skips since the last sync and
+/// the time of the last one (seconds since 1904, local, like Play Counts' last played). Read on Sync like
+/// FroggerHidden (only when the stamp matches this database) and deleted; the 2.3 iTunesDB has no skip
+/// fields, so the counts add up in Crate's own `skips`.
+enum PodSkips {
+    struct Entry: Equatable { var index, count: Int; var last: Date? }
+
+    static func url(_ ipod: IPodInfo) -> URL { ipod.dbURL.deletingLastPathComponent().appendingPathComponent("FroggerSkips") }
+
+    static func load(_ ipod: IPodInfo, db: ITunesDB) -> [Entry] {
+        guard let time = (try? FileManager.default.attributesOfItem(atPath: ipod.dbURL.path))?[.modificationDate] as? Date,
+              let d = try? Data(contentsOf: url(ipod)) else { return [] }
+        return parse(d, db: db, dbTime: time) ?? []
+    }
+
+    /// The skipped songs by index in `db.tracks`; nil when the file is broken or stale. An entry whose
+    /// track id isn't at its index any more is skipped.
+    static func parse(_ data: Data, db: ITunesDB, dbTime: Date) -> [Entry]? {
+        let d = [UInt8](data)
+        func u16(_ o: Int) -> Int { Int(d[o]) | Int(d[o+1]) << 8 }
+        func u32(_ o: Int) -> Int { u16(o) | u16(o + 2) << 16 }
+        guard d.count >= 20, d[0..<4].elementsEqual("FRGS".utf8), u16(4) == 1, u16(6) >= 16,
+              OnTheGo.matches(u32(8), dbTime), 20 + u32(12) * u16(6) <= d.count else { return nil }
+        let size = u16(6)
+        return (0..<u32(12)).compactMap { k in
+            let o = 20 + k * size, pos = u32(o), id = u32(o + 4), n = u32(o + 8), t = u32(o + 12)
+            guard pos < db.tracks.count, db.tracks[pos].id == UInt32(id), n > 0 else { return nil }
+            return Entry(index: pos, count: n, last: t > 0 ? Date(timeIntervalSince1970: Double(t - 2_082_844_800)) : nil)
+        }
+    }
+
+    static func make(_ entries: [(pos: Int, id: UInt32, count: Int, last: Int)], stamp: Int) -> Data {
+        let le = { (v: Int) in (0..<4).map { UInt8(truncatingIfNeeded: v >> ($0 * 8)) } }
+        return Data(Array("FRGS".utf8) + [1, 0, 16, 0] + le(stamp) + le(entries.count) + le(0)
+                    + entries.flatMap { le($0.pos) + le(Int($0.id)) + le($0.count) + le($0.last) })
     }
 }
 
@@ -309,8 +443,12 @@ extension ITunesDB {
         func get(_ b: [UInt8], _ o: Int) -> Int { Int(b[o]) | Int(b[o+1]) << 8 | Int(b[o+2]) << 16 | Int(b[o+3]) << 24 }
         func put(_ b: inout [UInt8], _ o: Int, _ v: Int) { for k in 0..<4 { b[o + k] = UInt8(truncatingIfNeeded: v >> (k * 8)) } }
         var changed = 0
-        for (i, e) in entries.enumerated() where e.plays > 0 || e.rating > 0 {
+        for (i, e) in entries.enumerated() {
             guard var b = tracks[i].raw.map({ [UInt8]($0) }), b.count >= 0x5C else { continue }
+            // the bookmark (ms) is the whole value, not a delta: mhit +0x6c, which 2.3 resumes from
+            let bookmark = b.count >= 0x70 && get(b, 4) >= 0x70 && get(b, 0x6C) != e.bookmark
+            guard e.plays > 0 || e.rating > 0 || bookmark else { continue }
+            if bookmark { put(&b, 0x6C, e.bookmark) }
             if e.plays > 0 {
                 put(&b, 0x50, get(b, 0x50) + e.plays)          // play count
                 put(&b, 0x54, get(b, 0x54) + e.plays)          // play count since last sync
@@ -323,13 +461,28 @@ extension ITunesDB {
         return changed
     }
 
-    /// Turns On-The-Go lists into regular playlists, like iTunes does; their files go after the write.
-    mutating func importOnTheGo(_ lists: [OnTheGo]) {
+    /// Applies what the iPod saved (`OnTheGo.load` on this same database, before anything else changes its
+    /// playlists): On-The-Go becomes an "On-The-Go N" playlist, like iTunes does, and a synced playlist
+    /// takes the songs it has on the iPod. Playlists saved on the iPod are returned (number, songs) for
+    /// Crate to keep as its own. Their files go after the write.
+    mutating func applyFromPod(_ lists: [OnTheGo]) -> (saved: [(Int, [UInt32])], synced: [UInt64]) {
+        let before = playlists.map(\.id)
+        var saved: [(Int, [UInt32])] = [], synced: [UInt64] = []
         for l in lists {
-            var n = 1
-            while playlists.contains(where: { $0.name == "On-The-Go \(n)" }) { n += 1 }
-            playlists.append(PodPlaylist(name: "On-The-Go \(n)", items: l.trackIDs.map { .init(trackID: $0) }))
+            switch l.kind {
+            case .onTheGo:
+                var n = 1
+                while playlists.contains(where: { $0.name == "On-The-Go \(n)" }) { n += 1 }
+                playlists.append(PodPlaylist(name: "On-The-Go \(n)", items: l.trackIDs.map { .init(trackID: $0) }))
+            case .saved(let n):
+                saved.append((n, l.trackIDs))
+            case .synced(let i):
+                guard before.indices.contains(i - 1), let j = playlists.firstIndex(where: { $0.id == before[i - 1] }) else { continue }
+                playlists[j].items = l.trackIDs.map { .init(trackID: $0) }     // new items, so positions are written afresh
+                synced.append(before[i - 1])
+            }
         }
+        return (saved, synced)
     }
 }
 

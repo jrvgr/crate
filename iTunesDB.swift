@@ -7,16 +7,55 @@ import Foundation
 struct PodTrack: Identifiable, Hashable {
     var id: UInt32
     var title = "", artist = "", album = "", genre = "", location = ""
+    var albumArtist = ""            // mhod 22: Frogger lists the track under it (payload/artist.c)
+    var kind = ""                   // mhod 6: "AAC audio file", "Apple Lossless audio file", …
+    var isLossless: Bool { kind.localizedCaseInsensitiveContains("lossless") }
     var trackNumber = 0, size = 0, lengthMs = 0
     var raw: Data? = nil          // original mhit record (header + mhods)
 
     var key: String { TrackKey.make(album: album, title: title) }
     var relativePath: String { location.split(separator: ":").joined(separator: "/") }
+    /// Hidden from Artists/Albums by Frogger's firmware patch (it still plays from playlists).
+    var hidden: Bool {
+        guard let raw, raw.count >= ITunesDB.hideOffset + 4 else { return false }
+        let o = raw.startIndex + ITunesDB.hideOffset
+        return raw[o..<o + 4].elementsEqual(ITunesDB.hideMagic)
+    }
+}
+
+/// A new title/album/artist for a song on the iPod, written at the next sync (after a merge or tag edit).
+struct PodRetag: Codable, Hashable {
+    var title, album, artist: String
+    var albumArtist: String? = nil            // nil leaves the track's album artist as it is
+    var key: String { TrackKey.make(album: album, title: title) }
 }
 
 enum TrackKey {
     static func make(album: String, title: String) -> String {
         [album, title].map { $0.lowercased().trimmingCharacters(in: .whitespaces) }.joined(separator: "\u{1}")
+    }
+}
+
+/// Collaborations on the iPod: "Ski Aggu, SEZA" and "UNKLE feat. Thom Yorke" file under their first artist, so
+/// Artists doesn't get an entry per guest.
+enum ArtistCredit {
+    private static let featuring = try! NSRegularExpression(pattern: #"\s+\(?(?:feat\.?|ft\.?|featuring)\s"#, options: .caseInsensitive)
+    private static let joiners = [", ", " & ", " x ", " X ", " with "]
+
+    /// The artist a credit files under. A "feat."/"ft." guest always goes; for ", ", " & ", " x " and " with " only
+    /// when the first name is an artist on its own in `solo` (lowercased), so "Roni Size & Reprazent" and
+    /// "Tyler, The Creator" stay as they are.
+    static func main(_ credit: String, solo: Set<String>) -> String {
+        var a = credit
+        if let m = featuring.firstMatch(in: a, range: NSRange(a.startIndex..., in: a)), let r = Range(m.range, in: a) {
+            a = String(a[..<r.lowerBound])
+        }
+        if let cut = joiners.compactMap({ a.range(of: $0)?.lowerBound }).min() {
+            let first = String(a[..<cut]).trimmingCharacters(in: .whitespaces)
+            if solo.contains(first.lowercased()) { a = first }
+        }
+        a = a.trimmingCharacters(in: .whitespaces)
+        return a.isEmpty ? credit : a
     }
 }
 
@@ -29,10 +68,26 @@ struct PodPlaylist: Identifiable, Hashable {
     var name: String
     var items: [Item]
     var raw: Data? = nil          // original mhyp header + mhods (without the items)
+
+    /// Renames the playlist; a playlist read from the iPod gets a new name mhod and keeps the rest.
+    mutating func rename(_ new: String) {
+        name = new
+        guard let r = raw else { return }
+        let b = [UInt8](r)
+        func u32(_ o: Int) -> Int { Int(b[o]) | Int(b[o + 1]) << 8 | Int(b[o + 2]) << 16 | Int(b[o + 3]) << 24 }
+        var out = Array(b[0..<u32(4)]), o = u32(4)
+        while o + 16 <= b.count, b[o..<o + 4].elementsEqual(Array("mhod".utf8)) {
+            let len = u32(o + 8)
+            out += u32(o + 12) == 1 ? ITunesDB.nameMhod(new) : Array(b[o..<o + len])
+            o += len
+        }
+        raw = Data(out + b[o...])
+    }
 }
 
 struct NewTrack {
     var title, artist, album, genre: String
+    var albumArtist = ""
     var trackNumber, trackCount, discNumber, year: Int
     var lengthMs, bitrateKbps, sampleRate, size: Int
     var location: String          // ":iPod_Control:Music:F00:ABCD.m4a"
@@ -49,6 +104,15 @@ struct ITunesDB {
     var tracks: [PodTrack]
     var name: String              // master playlist name = iPod name
     var playlists: [PodPlaylist] = []
+    var master: [UInt32] = []     // the master playlist's track ids as read (written afresh from `tracks`)
+
+    /// The library in the iPod's own order (2.3's sort order 0x26), which song references in the playlist
+    /// files it writes count in: the master playlist's order, without ids it has no track for.
+    var libraryOrder: [UInt32] {
+        let have = Set(tracks.map(\.id))
+        let order = master.filter(have.contains)
+        return order.isEmpty ? tracks.map(\.id) : order
+    }
 
     // MARK: reading
 
@@ -80,7 +144,8 @@ struct ITunesDB {
                     for _ in 0..<u32(p + 12) {
                         let s = str(q)
                         switch s.type { case 1: t.title = s.text; case 2: t.location = s.text
-                        case 3: t.album = s.text; case 4: t.artist = s.text; case 5: t.genre = s.text; default: break }
+                        case 3: t.album = s.text; case 4: t.artist = s.text; case 5: t.genre = s.text
+                        case 6: t.kind = s.text; case 22: t.albumArtist = s.text; default: break }
                         q += u32(q + 8)
                     }
                     t.raw = Data(d[p..<p + tl])
@@ -99,6 +164,9 @@ struct ITunesDB {
                     }
                     if master {
                         if !name.isEmpty { db.name = name }
+                        for _ in 0..<u32(pl + 16) where q + 28 <= d.count && tag(q) == "mhip" {
+                            db.master.append(UInt32(u32(q + 24))); q += u32(q + 8)
+                        }
                     } else {
                         var p = PodPlaylist(name: name, items: [], raw: Data(d[pl..<q]))
                         if hl >= 36 { p.id = UInt64(u32(pl + 28)) | UInt64(u32(pl + 32)) << 32 }
@@ -135,6 +203,8 @@ struct ITunesDB {
         return h + children
     }
 
+    static func nameMhod(_ name: String) -> [UInt8] { mhodString(1, name) }
+
     private static func mhodString(_ type: Int, _ text: String) -> [UInt8] {
         let s = Array(text.utf16).flatMap { [UInt8($0 & 0xFF), UInt8($0 >> 8)] }
         return block("mhod", 0x18, le32(type) + le32(0) + le32(0), le32(1) + le32(s.count) + le32(0) + le32(0) + s)
@@ -146,6 +216,7 @@ struct ITunesDB {
         if !t.album.isEmpty { mhods.append(mhodString(3, t.album)) }
         if !t.artist.isEmpty { mhods.append(mhodString(4, t.artist)) }
         if !t.genre.isEmpty { mhods.append(mhodString(5, t.genre)) }
+        if !t.albumArtist.isEmpty { mhods.append(mhodString(22, t.albumArtist)) }
         var f = le32(mhods.count) + le32(Int(id)) + le32(1)
         f += t.isAAC ? Array(" A4M".utf8) + [0, 0, 0, 0] : Array(" 3PM".utf8) + [0, 1, 0, 0]
         for v in [now, t.size, t.lengthMs, t.trackNumber, t.trackCount, t.year, t.bitrateKbps, t.sampleRate << 16, 0,
@@ -196,5 +267,77 @@ struct ITunesDB {
 
     var nextID: UInt32 { (tracks.map(\.id).max() ?? 0) + 1 }
 
+    /// Frogger's hide flag: "HIDE" in an mhit header word the stock firmware reads but never uses.
+    static let hideOffset = 0x98
+    static let hideMagic = Array("HIDE".utf8)
+
+    /// Sets or clears the hide flag in a track's own record; the rest of the record is kept.
+    mutating func setHidden(_ i: Int, _ on: Bool) {
+        guard var b = tracks[i].raw.map({ [UInt8]($0) }), b.count >= 8 else { return }
+        let headerLength = Int(b[4]) | Int(b[5]) << 8 | Int(b[6]) << 16 | Int(b[7]) << 24
+        guard headerLength >= Self.hideOffset + 4 else { return }
+        b.replaceSubrange(Self.hideOffset..<Self.hideOffset + 4, with: on ? Self.hideMagic : [0, 0, 0, 0])
+        tracks[i].raw = Data(b)
+    }
+
+    /// A track's file was replaced by an AAC copy at the same location (Model.replaceLossless): new size and
+    /// bit rate in the header, a new file type mhod; play counts, rating and the rest of the record are kept.
+    mutating func replaceFile(_ i: Int, size: Int, kbps: Int, ms: Int) {
+        guard let raw = tracks[i].raw else { return }
+        var b = [UInt8](raw)
+        func u32(_ o: Int) -> Int { Int(b[o]) | Int(b[o + 1]) << 8 | Int(b[o + 2]) << 16 | Int(b[o + 3]) << 24 }
+        b.replaceSubrange(0x24..<0x28, with: Self.le32(size))
+        if ms > 0 { b.replaceSubrange(0x28..<0x2c, with: Self.le32(ms)) }
+        b.replaceSubrange(0x38..<0x3c, with: Self.le32(kbps))
+        var mhods: [[UInt8]] = [], o = u32(4)
+        for _ in 0..<u32(12) {
+            guard o + 16 <= b.count else { return }
+            let len = u32(o + 8)
+            if u32(o + 12) != 6 { mhods.append(Array(b[o..<o + len])) }
+            o += len
+        }
+        mhods.append(Self.mhodString(6, "AAC audio file"))
+        var h = Array(b[0..<u32(4)])
+        let body = mhods.flatMap { $0 }
+        h.replaceSubrange(8..<12, with: Self.le32(h.count + body.count))
+        h.replaceSubrange(12..<16, with: Self.le32(mhods.count))
+        tracks[i].raw = Data(h + body)
+        tracks[i].size = size; tracks[i].kind = "AAC audio file"
+        if ms > 0 { tracks[i].lengthMs = ms }
+    }
+
+    /// Renames a track in place: its title/album/artist mhods (and album artist, when the retag has one) are
+    /// replaced, everything else in the record is kept.
+    mutating func retag(_ i: Int, _ r: PodRetag) {
+        guard let raw = tracks[i].raw else { return }
+        let b = [UInt8](raw)
+        func u32(_ o: Int) -> Int { Int(b[o]) | Int(b[o + 1]) << 8 | Int(b[o + 2]) << 16 | Int(b[o + 3]) << 24 }
+        var wanted = [1: r.title, 3: r.album, 4: r.artist]
+        if let aa = r.albumArtist { wanted[22] = aa }
+        var mhods: [[UInt8]] = [], o = u32(4)
+        for _ in 0..<u32(12) {
+            guard o + 16 <= b.count else { return }
+            let len = u32(o + 8), type = u32(o + 12)
+            if wanted[type] == nil { mhods.append(Array(b[o..<o + len])) }
+            o += len
+        }
+        for (type, text) in wanted.sorted(by: { $0.key < $1.key }) where !text.isEmpty { mhods.append(Self.mhodString(type, text)) }
+        var h = Array(b[0..<u32(4)])
+        let body = mhods.flatMap { $0 }
+        h.replaceSubrange(8..<12, with: Self.le32(h.count + body.count))
+        h.replaceSubrange(12..<16, with: Self.le32(mhods.count))
+        tracks[i].raw = Data(h + body)
+        tracks[i].title = r.title; tracks[i].album = r.album; tracks[i].artist = r.artist
+        if let aa = r.albumArtist { tracks[i].albumArtist = aa }
+    }
+
     static func empty(name: String) -> ITunesDB { ITunesDB(header: Data(), tracks: [], name: name) }
+}
+
+/// "Hide 3 songs, show 1 song" for the sync plan.
+func hideTitle(_ p: SyncPlan) -> String {
+    func n(_ c: Int) -> String { "\(c) song\(c == 1 ? "" : "s")" }
+    let parts = (p.hide > 0 ? ["Hide " + n(p.hide)] : []) + (p.unhide > 0 ? ["show " + n(p.unhide)] : [])
+    let t = parts.joined(separator: ", ")
+    return t.prefix(1).uppercased() + t.dropFirst() + " in the iPod library"
 }

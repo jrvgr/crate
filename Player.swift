@@ -2,7 +2,7 @@ import SwiftUI
 import AVFoundation
 
 // Playback on this Mac (AVFoundation plays FLAC, MP3 and AAC), or on OwnTone's speakers when
-// that's picked as the output. The mini player sits in the middle of the toolbar.
+// that's picked as the output. The iPod drawn in the sidebar card is the player: its buttons and wheel are the controls.
 
 @MainActor
 final class Player: ObservableObject {
@@ -12,6 +12,7 @@ final class Player: ObservableObject {
     @Published var playing = false
     @Published var time = 0.0
     @Published var length = 0.0
+    @Published var volume = 1.0 { didSet { player.volume = Float(volume) } }
     var current: LibTrack? { queue.indices.contains(index) ? queue[index] : nil }
 
     private let player = AVPlayer()
@@ -22,7 +23,8 @@ final class Player: ObservableObject {
         observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] t in
             Task { @MainActor in
                 guard let self else { return }
-                self.time = t.seconds.isFinite ? t.seconds : 0
+                // while a seek is under way the player still reports the old spot; keep the target
+                if self.seeks == 0 { self.time = t.seconds.isFinite ? t.seconds : 0 }
                 if let d = self.player.currentItem?.duration.seconds, d.isFinite { self.length = d }
                 self.playing = self.player.rate > 0
             }
@@ -55,7 +57,14 @@ final class Player: ObservableObject {
     func previous() {
         if time > 3 || index == 0 { player.seek(to: .zero) } else { index -= 1; load() }
     }
-    func seek(_ seconds: Double) { player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600)) }
+    private var seeks = 0                               // seeks still in flight
+    func seek(_ seconds: Double) {
+        time = seconds
+        seeks += 1
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            Task { @MainActor in self?.seeks -= 1 }
+        }
+    }
     func stop() { player.pause(); player.replaceCurrentItem(with: nil); playing = false; queue = []; index = 0; time = 0 }
 
     // OwnTone's player, for when its speakers are the output
@@ -66,41 +75,3 @@ final class Player: ObservableObject {
 }
 
 extension Array { subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil } }
-
-/// The toolbar's mini player: cover, song, position and the transport buttons.
-struct MiniPlayer: View {
-    @EnvironmentObject var model: Model
-    @EnvironmentObject var player: Player
-
-    var body: some View {
-        let t = player.current
-        HStack(spacing: 10) {
-            Button { player.previous() } label: { Image(systemName: "backward.fill") }.disabled(t == nil)
-            Button { player.toggle() } label: { Image(systemName: player.playing ? "pause.fill" : "play.fill").frame(width: 16) }
-                .disabled(t == nil)
-            Button { player.next() } label: { Image(systemName: "forward.fill") }.disabled(t == nil || player.index + 1 >= player.queue.count)
-            Group {
-                if let t {
-                    let album = model.albums.first { $0.id == t.album.lowercased() }
-                    Cover(image: album.flatMap { model.artwork[$0.id] }, seed: t.album)
-                        .frame(width: 28, height: 28).clipShape(.rect(cornerRadius: 5))
-                        .onTapGesture { if let album { model.search = ""; model.path = [.album(album)] } }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(t.title).font(.caption.weight(.semibold)).lineLimit(1)
-                        Text(t.trackArtist.isEmpty ? t.artist : t.trackArtist).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                            .help("\(duration(Int(player.time * 1000))) / \(duration(Int(player.length * 1000)))")
-                        ProgressView(value: min(player.time, max(player.length, 0.01)), total: max(player.length, 0.01))
-                            .progressViewStyle(.linear).controlSize(.mini)
-                            .overlay { GeometryReader { g in Color.clear.contentShape(.rect).onTapGesture { p in player.seek(p.x / g.size.width * player.length) } } }
-                    }
-                    .frame(width: 150)
-                } else {
-                    Image(systemName: "music.note").foregroundStyle(.tertiary).frame(width: 22, height: 22)
-                    Text("Not playing").font(.caption).foregroundStyle(.secondary).frame(width: 80, alignment: .leading)
-                }
-            }
-        }
-        .buttonStyle(.borderless)
-        .padding(.horizontal, 10)
-    }
-}

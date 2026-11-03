@@ -27,7 +27,7 @@ struct MenuBarView: View {
                 CapacityBar(height: 6).opacity(model.connected ? 1 : 0.5)
                 if model.syncing {
                     VStack(alignment: .leading, spacing: 4) {
-                        ProgressView(value: Double(model.syncDone), total: Double(max(model.syncTotal, 1)))
+                        SyncBar()
                         Text(model.syncCurrent.isEmpty ? model.syncPhase : model.syncCurrent).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                 } else if model.pendingCount > 0 {

@@ -16,6 +16,7 @@ struct DownloadEntry: Identifiable {
     var date: Date?
     var files: [File] = []
     var cancel: (() -> Void)?
+    var ytJob: UUID?                 // YouTube jobs have a details sheet
     var remove: (() -> Void)?
     var reimport: (() -> Void)?
 }
@@ -48,14 +49,15 @@ extension Model {
         }
         if on(.youtube) {
             for j in yt.jobs {
-                let failed = j.items.filter(\.failed).count, done = j.items.filter(\.done).count
+                let failed = j.items.filter { $0.failed && !$0.cancelled }.count, done = j.items.filter(\.done).count
                 out.append(DownloadEntry(
                     id: "yt:" + j.id.uuidString, source: .youtube, title: j.title,
                     subtitle: [j.subtitle, "\(done) of \(j.items.count) songs"].filter { !$0.isEmpty }.joined(separator: " · "),
-                    state: j.finished ? (failed == 0 ? "Done" : "\(failed) not found") : (j.items.first { !$0.done && !$0.failed }?.state ?? ""),
-                    progress: j.progress, finished: j.finished, failed: j.finished && done == 0, imported: j.finished && done > 0,
+                    state: j.finished ? (failed > 0 ? "\(failed) not found" : j.cancelled ? (done > 0 ? "Cancelled, \(done) kept" : "Cancelled") : "Done") : (j.items.first { !$0.done && !$0.failed }?.state ?? ""),
+                    progress: j.progress, finished: j.finished, failed: j.finished && done == 0 && failed > 0, imported: j.finished && done > 0,
                     artURL: URL(string: j.art), date: j.started,
                     files: j.items.map { .init(name: "\($0.artist) – \($0.title)", state: $0.done ? "Done" : $0.failed ? $0.state : $0.progress > 0 ? "\(Int($0.progress * 100))%" : $0.state, ok: $0.done, failed: $0.failed) },
+                    cancel: j.finished ? nil : { [weak self] in self?.yt.cancel(j.id) }, ytJob: j.id,
                     remove: j.finished ? { [weak self] in self?.yt.remove(j.id) } : nil))
             }
         }
@@ -84,6 +86,7 @@ final class DownloadsUI: ObservableObject {
     @Published var filter = DownloadFilter.all
     @Published var source: PluginID?
     @Published var expanded: Set<String> = []
+    @Published var ytDetail: UUID?
 }
 
 struct DownloadsView: View {
@@ -133,6 +136,9 @@ struct DownloadsView: View {
             .padding(24).padding(.bottom, 50)
         }
         .navigationTitle("Downloads")
+        .sheet(isPresented: Binding(get: { ui.ytDetail != nil }, set: { if !$0 { ui.ytDetail = nil } })) {
+            if let id = ui.ytDetail { YTJobDetail(id: id) }
+        }
         .toolbar {
             ToolbarItem {
                 Menu {
@@ -227,6 +233,9 @@ struct DownloadCard: View {
                 if let r = entry.reimport {
                     Button(entry.imported ? "Import Again" : "Import", systemImage: "square.and.arrow.down", action: r).buttonStyle(.glass)
                 }
+                if let id = entry.ytJob {
+                    Button { ui.ytDetail = id } label: { Image(systemName: "info") }.buttonStyle(.glass).help("Details")
+                }
                 if let c = entry.cancel {
                     Button(action: c) { Image(systemName: "xmark") }.buttonStyle(.glass).help("Cancel")
                 }
@@ -243,6 +252,8 @@ struct DownloadCard: View {
                 }
             }
             .padding(12)
+            .contentShape(.rect)
+            .onTapGesture(count: 2) { if let id = entry.ytJob { ui.ytDetail = id } }
             if open {
                 Divider().padding(.horizontal, 12)
                 VStack(spacing: 0) {
@@ -261,5 +272,129 @@ struct DownloadCard: View {
             }
         }
         .glassEffect(.regular, in: .rect(cornerRadius: 14))
+    }
+}
+
+@MainActor
+final class YTDetailUI: ObservableObject {
+    @Published var open: Set<UUID> = []
+}
+
+/// Everything about one YouTube download: per song what was searched for, which video yt-dlp
+/// picked, the tags it gets, the full error and yt-dlp's output. Songs can be skipped one by one.
+struct YTJobDetail: View {
+    var id: UUID
+    @EnvironmentObject var yt: YouTube
+    @Environment(\.dismiss) var dismiss
+    @StateObject private var ui = YTDetailUI()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let job = yt.jobs.first(where: { $0.id == id }) {
+                header(job)
+                Divider()
+                ScrollView {
+                    LazyVStack(spacing: 8) { ForEach(job.items) { row(job, $0) } }.padding(16)
+                }
+            } else {
+                ContentUnavailableView("Removed", systemImage: "tray", description: Text("This download is no longer in the list."))
+            }
+        }
+        .frame(minWidth: 640, idealWidth: 720, minHeight: 460, idealHeight: 620)
+    }
+
+    func header(_ job: YTJob) -> some View {
+        let done = job.items.filter(\.done).count
+        return HStack(spacing: 14) {
+            CachedImage(url: URL(string: job.art), seed: "Downloads.swift:10")
+                .frame(width: 72, height: 72).clipShape(.rect(cornerRadius: 10))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(job.title).font(.title3.bold()).lineLimit(1)
+                Text([job.subtitle, "\(done) of \(job.items.count) songs", "started " + job.started.formatted(date: .omitted, time: .shortened)]
+                    .filter { !$0.isEmpty }.joined(separator: " · ")).foregroundStyle(.secondary).lineLimit(1)
+                if !job.finished { ProgressView(value: job.progress).frame(width: 220) }
+            }
+            Spacer()
+            if !job.finished {
+                Button("Cancel Download", systemImage: "xmark", role: .destructive) { yt.cancel(id) }.buttonStyle(.glass)
+            } else {
+                Button("Remove", systemImage: "trash") { yt.remove(id); dismiss() }.buttonStyle(.glass)
+            }
+            Button("Done") { dismiss() }.buttonStyle(.glassProminent).keyboardShortcut(.defaultAction)
+        }
+        .padding(16)
+    }
+
+    func row(_ job: YTJob, _ item: YTItem) -> some View {
+        let open = ui.open.contains(item.id), active = !item.done && !item.failed
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: item.done ? "checkmark.circle.fill" : item.cancelled ? "minus.circle.fill" : item.failed ? "xmark.circle.fill"
+                      : item.state == "Waiting" ? "clock" : "arrow.down.circle")
+                    .foregroundStyle(item.done ? .green : item.cancelled ? .secondary : item.failed ? .red : .accentColor)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text((item.track > 0 ? "\(item.track). " : "") + item.title).lineLimit(1)
+                    Text(item.artist + (item.album.isEmpty ? "" : " · " + item.album)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer()
+                if active, item.progress > 0 {
+                    ProgressView(value: item.progress).frame(width: 90)
+                    Text("\(Int(item.progress * 100))%").monospacedDigit().foregroundStyle(.secondary).frame(width: 36, alignment: .trailing)
+                } else {
+                    Text(item.failed && !item.cancelled ? "Failed" : item.state).foregroundStyle(item.failed && !item.cancelled ? .red : .secondary).lineLimit(1)
+                }
+                if active {
+                    Button { yt.cancel(id, item: item.id) } label: { Image(systemName: "xmark") }.buttonStyle(.borderless).help("Skip this song")
+                }
+                Image(systemName: "chevron.down").rotationEffect(.degrees(open ? 180 : 0)).foregroundStyle(.secondary)
+            }
+            .font(.callout)
+            .padding(10)
+            .contentShape(.rect)
+            .onTapGesture { withAnimation(.snappy) { if open { ui.open.remove(item.id) } else { ui.open.insert(item.id) } } }
+            if open {
+                Divider().padding(.horizontal, 10)
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 5) {
+                    field("Searched for", item.source.hasPrefix("ytsearch") ? String(item.source.drop { $0 != ":" }.dropFirst()) : item.source)
+                    if !item.video.isEmpty {
+                        GridRow {
+                            Text("Video").foregroundStyle(.secondary)
+                            HStack(spacing: 6) {
+                                Text(item.videoTitle + (item.channel.isEmpty ? "" : " · " + item.channel)).textSelection(.enabled).lineLimit(1)
+                                if let u = URL(string: item.video) { Link(destination: u) { Image(systemName: "arrow.up.right.square") }.help(item.video) }
+                            }
+                        }
+                    }
+                    field("Saved as", "“\(item.title)” by \(item.artist)" + (item.albumArtist != item.artist && !item.albumArtist.isEmpty ? " (album artist \(item.albumArtist))" : ""))
+                    field("Album", item.album + (item.track > 0 ? " · track \(item.track)" + (item.trackCount > 0 ? " of \(item.trackCount)" : "") : "")
+                               + (item.year > 0 ? " · \(item.year)" : ""))
+                    if !item.error.isEmpty {
+                        GridRow {
+                            Text("Error").foregroundStyle(.secondary)
+                            Text(item.error).foregroundStyle(.red).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .font(.callout).padding(.horizontal, 38).padding(.vertical, 8)
+                if !item.log.isEmpty {
+                    ScrollView {
+                        Text(item.log.joined(separator: "\n")).font(.caption.monospaced()).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                    }
+                    .frame(maxHeight: 140)
+                    .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 8))
+                    .padding(.horizontal, 38).padding(.bottom, 10)
+                }
+            }
+        }
+        .glassEffect(.regular, in: .rect(cornerRadius: 12))
+    }
+
+    @ViewBuilder func field(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(.secondary)
+            Text(value).textSelection(.enabled).lineLimit(2)
+        }
     }
 }

@@ -74,6 +74,7 @@ struct IPodView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     header(i, db)
+                    DiskRepairCard()
                     capacity(i)
                     storageHistory
                     if model.pendingCount > 0 { pending }
@@ -110,16 +111,25 @@ struct IPodView: View {
                 Text("These files are in iPod_Control/Music but not in the song list, so the iPod can't play them.")
             }
         } else {
-            ContentUnavailableView("No iPod connected", systemImage: "ipod", description: Text("Connect it over USB; it shows up here when it's mounted."))
+            if model.brokenPod != nil || model.podRepairMessage != nil {
+                DiskRepairCard().padding(28).frame(maxHeight: .infinity, alignment: .top)
+            } else {
+                ContentUnavailableView("No iPod connected", systemImage: "ipod", description: Text("Connect it over USB; it shows up here when it's mounted."))
+            }
         }
     }
 
     func header(_ i: IPodInfo, _ db: ITunesDB) -> some View {
         HStack(spacing: 22) {
-            IPodArt(mode: model.podArtMode, name: model.podName, height: 220)
+            LiveIPod(height: 220)
             VStack(alignment: .leading, spacing: 6) {
                 Text(i.modelName).font(.caption.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
                 Text(model.podName).font(.largeTitle.bold())
+                if let e = model.podReadError {
+                    Label("Crate can't read this iPod's song database (\(e)). It shows the last copy it read and won't sync until that's fixed: unplug and replug it, and if that doesn't help, run First Aid on it in Disk Utility.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                }
                 if !model.connected {
                     Label("Not connected · last seen \((model.lastSeen ?? Date()).formatted(.relative(presentation: .named))). Changes you queue sync \(model.podSettings.syncOnConnect ? "by themselves when it's plugged in" : "when you press Sync").",
                           systemImage: "powerplug").font(.callout).foregroundStyle(.orange)
@@ -131,7 +141,7 @@ struct IPodView: View {
                     .foregroundStyle(.secondary).textSelection(.enabled)
                 HStack(spacing: 10) {
                     Button("Sync", systemImage: "arrow.triangle.2.circlepath") { model.reviewSync() }
-                        .buttonStyle(.glassProminent).disabled(model.pendingCount == 0 || model.syncing)
+                        .buttonStyle(.glassProminent).disabled(model.pendingCount == 0 || model.syncing || model.podRepairBusy || model.brokenPod != nil)
                     if model.connected {
                         Button("Eject", systemImage: "eject") { model.eject() }.buttonStyle(.glass).disabled(model.syncing)
                         Button { NSWorkspace.shared.activateFileViewerSelecting([i.mount]) } label: { Image(systemName: "folder") }
@@ -182,12 +192,15 @@ struct IPodView: View {
             .padding(14)
             if p.addSongs > 0 { PlanRow(icon: "plus.circle.fill", tint: .accentColor, title: "\(p.addSongs) songs to add", detail: p.addAlbums.map(\.title).joined(separator: ", ")) }
             if p.removeSongs > 0 { PlanRow(icon: "minus.circle.fill", tint: .red, title: "\(p.removeSongs) songs to remove", detail: p.removeAlbums.map(\.title).joined(separator: ", ")) }
-            if !(p.playlistsAdd + p.playlistsRemove).isEmpty {
-                PlanRow(icon: "music.note.list", tint: .accentColor, title: "\(p.playlistsAdd.count + p.playlistsRemove.count) playlist changes",
-                        detail: (p.playlistsAdd.map { "+ " + $0 } + p.playlistsRemove.map { "− " + $0 }).joined(separator: ", "))
+            if !(p.playlistsAdd + p.playlistsRemove + p.playlistsEdit).isEmpty {
+                PlanRow(icon: "music.note.list", tint: .accentColor, title: "\(p.playlistsAdd.count + p.playlistsRemove.count + p.playlistsEdit.count) playlist changes",
+                        detail: (p.playlistsAdd.map { "+ " + $0 } + p.playlistsRemove.map { "− " + $0 } + p.playlistsEdit.map { "~ " + $0 }).joined(separator: ", "))
             }
-            if p.onTheGo > 0 { PlanRow(icon: "music.note.list", tint: .green, title: "\(p.onTheGo) On-The-Go list\(p.onTheGo == 1 ? "" : "s") to save", detail: "") }
+            if p.onTheGo > 0 { PlanRow(icon: "music.note.list", tint: .green, title: "\(p.onTheGo) playlist\(p.onTheGo == 1 ? "" : "s") from the iPod to save", detail: "") }
             if let n = p.rename { PlanRow(icon: "pencil.circle.fill", tint: .purple, title: "Rename to “\(n)”", detail: "") }
+            if p.retag > 0 { PlanRow(icon: "pencil.circle.fill", tint: .purple, title: "Update the tags of \(p.retag) song\(p.retag == 1 ? "" : "s")", detail: "") }
+            if !p.markPlaylists.isEmpty { PlanRow(icon: "eye.slash", tint: .secondary, title: "Rename \(p.markPlaylists.count) playlist\(p.markPlaylists.count == 1 ? "" : "s")", detail: "") }
+            if p.hide + p.unhide > 0 { PlanRow(icon: "eye.slash", tint: .secondary, title: hideTitle(p), detail: "") }
         }
         .padding(.bottom, 6)
         .glassEffect(.regular, in: .rect(cornerRadius: 18))
@@ -222,8 +235,22 @@ struct IPodView: View {
                 }
             }
             SettingsCard {
-                SettingRow(icon: "music.note.list", title: "Save On-The-Go lists", detail: "Lists made on the iPod become “On-The-Go N” playlists") {
+                SettingRow(icon: "music.note.list", title: "Save On-The-Go lists", detail: "On-The-Go becomes an “On-The-Go N” playlist (playlists saved or changed on the iPod are always kept)") {
                     Toggle("", isOn: $model.podSettings.importOnTheGo).toggleStyle(.switch).labelsHidden()
+                }
+                Divider().padding(.leading, 50)
+                SettingRow(icon: "eye.slash", title: "Hidden playlists",
+                           detail: "Right-click a playlist › Hide Its Songs from iPod Library. Songs only in those playlists stay out of Artists and Albums (needs Frogger on the iPod)") {
+                    Picker("", selection: $model.podSettings.hideMarkAtEnd) {
+                        Text("~Name").tag(false)
+                        Text("Name ~").tag(true)
+                    }
+                    .labelsHidden().fixedSize()
+                }
+                Divider().padding(.leading, 50)
+                SettingRow(icon: "person.2", title: "File collaborations under the main artist",
+                           detail: "“Ski Aggu, SEZA” and “UNKLE feat. Thom Yorke” show up under Ski Aggu and UNKLE in Artists. Duos like “Roni Size & Reprazent” stay") {
+                    Toggle("", isOn: $model.podSettings.mainArtistOnly).toggleStyle(.switch).labelsHidden()
                 }
                 Divider().padding(.leading, 50)
                 SettingRow(icon: "sparkle.magnifyingglass", title: "Fill in year and genre", detail: "From Find Metadata, when a file has none") {
@@ -242,6 +269,7 @@ struct IPodView: View {
                     Toggle("", isOn: $model.podSettings.ejectAfterSync).toggleStyle(.switch).labelsHidden()
                 }
             }
+            FroggerSettings()
             CalendarSettings()
         }
     }
@@ -392,9 +420,12 @@ struct SongsView: View {
             TableColumn("Artist", value: \.artist) { (t: LibTrack) in Text(t.trackArtist.isEmpty ? t.artist : t.trackArtist) }
             TableColumn("Album", value: \.album)
             TableColumn("Genre", value: \.genre).width(min: 60, ideal: 90)
-            TableColumn("Year", value: \.year) { (t: LibTrack) in Text(t.year > 0 ? "\(t.year)" : "").monospacedDigit() }.width(44)
+            TableColumn("Year", value: \.year) { (t: LibTrack) in Text(t.year > 0 ? String(t.year) : "").monospacedDigit() }.width(44)
             TableColumn("Time", value: \.lengthMs) { (t: LibTrack) in Text(t.lengthMs > 0 ? duration(t.lengthMs) : "").monospacedDigit() }.width(48)
-            TableColumn("Plays") { (t: LibTrack) in Text(model.stat(t).plays > 0 ? "\(model.stat(t).plays)" : "").monospacedDigit().foregroundStyle(.secondary) }.width(40)
+            Group {     // (a Table takes 10 columns per block)
+                TableColumn("Plays") { (t: LibTrack) in Text(model.stat(t).plays > 0 ? "\(model.stat(t).plays)" : "").monospacedDigit().foregroundStyle(.secondary) }.width(40)
+                TableColumn("Skips") { (t: LibTrack) in Text(model.stat(t).skips > 0 ? "\(model.stat(t).skips)" : "").monospacedDigit().foregroundStyle(.secondary) }.width(40)
+            }
             TableColumn("Rating") { (t: LibTrack) in StarPicker(value: model.rating(t)) { model.rate(t, $0) } }.width(64)
             TableColumn("Kind", value: \.ext) { (t: LibTrack) in Text(t.ext.uppercased()).foregroundStyle(.secondary) }.width(44)
         }
@@ -403,6 +434,13 @@ struct SongsView: View {
             let off = picked.filter { model.songMark($0) == .none }, on = picked.filter { model.songMark($0) == .onIPod }
             if !off.isEmpty { Button("Add \(off.count) Song\(off.count == 1 ? "" : "s") to iPod", systemImage: "plus.circle") { off.forEach(model.toggleSong) } }
             if !on.isEmpty { Button("Remove \(on.count) Song\(on.count == 1 ? "" : "s") from iPod", systemImage: "minus.circle") { on.forEach(model.toggleSong) } }
+            if !on.isEmpty {
+                let hidden = on.allSatisfy(model.isHidden)
+                Button(hidden ? "Show in iPod Library" : "Hide from iPod Library", systemImage: hidden ? "eye" : "eye.slash") {
+                    model.setHidden(on, !hidden)
+                }
+            }
+            if !picked.isEmpty { AddToPlaylistMenu(tracks: picked) }
             Divider()
             if ids.count == 1, let a = album(ids.first) {
                 Button("Go to Album", systemImage: "square.stack") { model.path.append(.album(a)) }

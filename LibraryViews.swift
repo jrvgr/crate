@@ -26,6 +26,36 @@ struct AlbumsView: View {
         })
     }
 
+    /// One section per artist, in artist order; each keeps the chosen sort.
+    func byArtist(_ list: [Album]) -> [(String, [Album])] {
+        Dictionary(grouping: list) { $0.artist.lowercased() }.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
+    }
+
+    /// Where each letter of the index starts: an artist's section, or the first album under that letter
+    /// (none when the grid isn't in letter order).
+    func anchors(_ list: [Album]) -> [(letter: String, id: String)] {
+        let keyed: [(String, String)]
+        if model.albumsByArtist { keyed = byArtist(list).map { ($0.1[0].artist, "artist-" + $0.0) } }
+        else if model.albumSort == .artist { keyed = list.map { ($0.artist, $0.id) } }
+        else if model.albumSort == .title { keyed = list.map { ($0.title, $0.id) } }
+        else { return [] }
+        var seen = Set<String>()
+        return keyed.compactMap { s, id in
+            let l = LetterIndex.letter(s)
+            return seen.insert(l).inserted ? (l, id) : nil
+        }
+    }
+
+    func tiles(_ albums: [Album]) -> some View {
+        LazyVGrid(columns: columns, spacing: 26) {
+            ForEach(albums) { a in
+                NavigationLink(value: Route.album(a)) { AlbumTile(album: a) }
+                    .buttonStyle(.plain)
+                    .contextMenu { AlbumMenu(album: a) }
+            }
+        }
+    }
+
     var body: some View {
         let list = shown
         Group {
@@ -34,21 +64,53 @@ struct AlbumsView: View {
             } else if model.albumView == "list" && !list.isEmpty {
                 AlbumList(albums: list)
             } else {
+                let marks = anchors(list)
+                ScrollViewReader { proxy in
                 ScrollView {
                     if model.albums.isEmpty && model.db == nil {
                         ContentUnavailableView(model.loading ? "Loading library…" : "No music found", systemImage: "music.note",
                                                description: Text("Add your music folders in Settings › Library (or turn on OwnTone), then press Refresh."))
                             .padding(.top, 120)
                     }
-                    LazyVGrid(columns: columns, spacing: 26) {
-                        ForEach(list) { a in
-                            NavigationLink(value: Route.album(a)) { AlbumTile(album: a) }
-                                .buttonStyle(.plain)
-                                .contextMenu { AlbumMenu(album: a) }
+                    if model.albumsByArtist {
+                        LazyVStack(alignment: .leading, spacing: 26, pinnedViews: [.sectionHeaders]) {
+                            ForEach(byArtist(list), id: \.0) { key, group in
+                                Section {
+                                    tiles(group)
+                                } header: {
+                                    NavigationLink(value: Route.artist(group[0].artist)) {
+                                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                            Text(group[0].artist).font(.title2.bold())
+                                            Text("\(group.count)").foregroundStyle(.secondary)
+                                        }
+                                        .padding(.vertical, 6).padding(.horizontal, 10)
+                                        .glassEffect(.regular, in: .capsule)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Open \(group[0].artist)")
+                                }
+                                .id("artist-" + key)
+                            }
+                        }
+                        .padding(24).padding(.trailing, marks.count > 3 ? 18 : 0)
+                        .padding(.bottom, 50)
+                    } else {
+                        tiles(list)
+                            .padding(24).padding(.trailing, marks.count > 3 ? 18 : 0)
+                            .padding(.bottom, 50)
+                    }
+                }
+                .overlay(alignment: .trailing) {
+                    if marks.count > 3 {
+                        LetterIndex(letters: LetterIndex.all) { l in
+                            // a letter with no albums goes to the next one that has some, as on the iPod touch
+                            let i = LetterIndex.all.firstIndex(of: l) ?? 0
+                            if let m = marks.first(where: { (LetterIndex.all.firstIndex(of: $0.letter) ?? LetterIndex.all.count) >= i }) ?? marks.last {
+                                proxy.scrollTo(m.id, anchor: .top)
+                            }
                         }
                     }
-                    .padding(24)
-                    .padding(.bottom, 50)
+                }
                 }
             }
         }
@@ -65,6 +127,8 @@ struct AlbumsView: View {
                         ForEach(AlbumSort.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.inline)
+                    Toggle("Group by Artist", isOn: model.$albumsByArtist)
+                        .disabled(model.albumView != "grid")
                 } label: {
                     Label(model.albumFilter == .all ? "Show and Sort" : model.albumFilter.rawValue,
                           systemImage: model.albumFilter == .all ? "line.3.horizontal.decrease" : "line.3.horizontal.decrease.circle.fill")
@@ -126,11 +190,12 @@ struct AlbumList: View {
                 HStack(spacing: 8) {
                     Cover(image: model.artwork[r.id], seed: r.id).frame(width: 28, height: 28).clipShape(.rect(cornerRadius: 4))
                     Text(r.title).lineLimit(1)
+                    HiddenMark(album: r.album, compact: true)
                 }
             }
             .width(min: 180, ideal: 280)
             TableColumn("Artist", value: \.artist)
-            TableColumn("Year", value: \.yearSort) { (r: AlbumRow) in Text(r.year > 0 ? "\(r.year)" : "").monospacedDigit() }.width(46)
+            TableColumn("Year", value: \.yearSort) { (r: AlbumRow) in Text(r.year > 0 ? String(r.year) : "").monospacedDigit() }.width(46)
             TableColumn("Genre", value: \.genre).width(min: 70, ideal: 110)
             TableColumn("Songs", value: \.songs) { (r: AlbumRow) in Text("\(r.songs)").monospacedDigit() }.width(46)
             TableColumn("Time", value: \.length) { (r: AlbumRow) in Text(totalDuration(r.length)).monospacedDigit().foregroundStyle(.secondary) }.width(70)
@@ -180,10 +245,15 @@ struct AlbumMenu: View {
         }
         if m == .onIPod || m == .partial || m == .removing {
             Button(m == .removing ? "Keep on iPod" : "Remove from iPod", systemImage: "minus.circle") { model.toggleRemove(album) }
+            let hidden = album.tracks.allSatisfy(model.isHidden)
+            Button(hidden ? "Show in iPod Library" : "Hide from iPod Library", systemImage: hidden ? "eye" : "eye.slash") {
+                model.setHidden(album.tracks, !hidden)
+            }
         }
         if !model.isPodOnly(album) {
             Divider()
             Button("Play", systemImage: "play.fill") { Task { await model.play(album) } }
+            AddToPlaylistMenu(tracks: album.tracks)
             Button("Find Metadata…", systemImage: "sparkle.magnifyingglass") { model.lookupAlbum = album }
             Button("Edit Tags…", systemImage: "pencil") { model.editAlbum = album }
             Button("Organise Files…", systemImage: "folder.badge.gearshape") { model.organize = [album] }
@@ -221,6 +291,7 @@ struct AlbumTile: View {
                     if m == .adding || m == .removing { RoundedRectangle(cornerRadius: 14).strokeBorder(m.tint, lineWidth: 3) }
                 }
                 .opacity(m == .removing ? 0.55 : 1)
+                .overlay(alignment: .bottomLeading) { HiddenMark(album: album).padding(8) }
                 .overlay(alignment: .topTrailing) {
                     Button { model.cycle(album) } label: {
                         if m == .none { Image(systemName: "plus").font(.system(size: 12, weight: .bold)).frame(width: 26, height: 26)
@@ -253,6 +324,7 @@ func totalDuration(_ ms: Int) -> String {
 struct AlbumDetail: View {
     @EnvironmentObject var model: Model
     var album: Album
+    @StateObject private var studio = CoverStudioUI()
 
     var body: some View {
         let m = model.mark(album), keys = model.podKeys, podOnly = model.isPodOnly(album)
@@ -260,10 +332,14 @@ struct AlbumDetail: View {
         let year = album.year > 0 ? album.year : (mb?.year ?? 0)
         let genre = album.tracks.first { !$0.genre.isEmpty }?.genre ?? mb?.genre ?? ""
         let formats = Set(album.tracks.map { $0.ext.uppercased() }).sorted().joined(separator: "/")
+        let editing = model.editAlbum?.id == album.id, finding = model.lookupAlbum?.id == album.id
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
+                if editing {
+                    TagEditor(album: album) { model.editAlbum = nil }
+                } else {
                 HStack(alignment: .bottom, spacing: 24) {
-                    Cover(image: model.artwork[album.id], seed: album.id)
+                    IPodCover(image: model.artwork[album.id], seed: album.id)
                         .frame(width: 220, height: 220).clipShape(.rect(cornerRadius: 16))
                         .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
                         .onTapGesture { model.quickLookCover(album) }
@@ -291,6 +367,12 @@ struct AlbumDetail: View {
                               podOnly ? "" : "≈ " + ByteCountFormatter.string(fromByteCount: model.podSize(album), countStyle: .file) + " on the iPod"]
                                 .filter { !$0.isEmpty }.joined(separator: " · "))
                             .foregroundStyle(.secondary)
+                        let hidden = model.hiddenCount(album)
+                        if hidden.hidden > 0 {
+                            Label(hidden.hidden == hidden.onIPod ? "Hidden from Artists and Albums on the iPod (still in its playlists)"
+                                  : "\(hidden.hidden) of \(hidden.onIPod) songs hidden from Artists and Albums on the iPod", systemImage: "eye.slash")
+                                .font(.callout).foregroundStyle(.secondary)
+                        }
                         HStack(spacing: 10) {
                             if !podOnly, m != .onIPod, m != .removing {
                                 Button(m == .adding ? "Don't Add" : m == .partial ? "Add Missing Songs" : "Add to iPod",
@@ -314,12 +396,17 @@ struct AlbumDetail: View {
                                     .buttonStyle(.glass).help("Edit Tags…")
                                 Button { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: album.folder) } label: { Image(systemName: "folder") }
                                     .buttonStyle(.glass).help("Show in Finder")
+                                Button {
+                                    Task { studio.open = true; await studio.select(album, model: model) }
+                                } label: { Image(systemName: "camera.filters") }
+                                    .buttonStyle(.glass).help("Cover Studio… (how this cover looks on Frogger's Now Playing page)")
                             }
                         }
                         .padding(.top, 8)
                     }
                     Spacer(minLength: 0)
                 }
+                if finding { LookupPanel(album: album) { model.lookupAlbum = nil } }
                 VStack(spacing: 0) {
                     ForEach(Array(album.tracks.enumerated()), id: \.element.id) { i, t in
                         HStack(spacing: 12) {
@@ -352,6 +439,7 @@ struct AlbumDetail: View {
                                 let sm = model.songMark(t)
                                 Button(sm == .none ? "Add Song to iPod" : sm == .onIPod ? "Remove Song from iPod" : "Don't Sync This Song",
                                        systemImage: sm == .none ? "plus.circle" : "minus.circle") { model.toggleSong(t) }
+                                AddToPlaylistMenu(tracks: [t])
                                 Button("Show in Finder", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: t.path)]) }
                                 Divider()
                                 Button("Delete Song…", systemImage: "trash", role: .destructive) { model.confirmTrash = [t] }
@@ -361,12 +449,18 @@ struct AlbumDetail: View {
                 }
                 .clipShape(.rect(cornerRadius: 14))
                 .glassEffect(.regular, in: .rect(cornerRadius: 14))
+                }
             }
             .padding(28)
             .padding(.bottom, 50)
         }
+        .onDisappear {
+            if model.editAlbum?.id == album.id { model.editAlbum = nil }
+            if model.lookupAlbum?.id == album.id { model.lookupAlbum = nil }
+        }
         .background { Backdrop(image: model.artwork[album.id]) }
         .navigationTitle(album.title)
+        .sheet(isPresented: $studio.open) { CoverStudio(ui: studio).environmentObject(model) }
     }
 }
 
@@ -383,6 +477,15 @@ struct PlaylistView: View {
         let onPod = avail.filter { $0 == .onIPod }.count, files = avail.filter { $0 == .file }.count
         let m = model.mark(playlist), pod = model.podPlaylist(for: playlist)
         let shown = Array(all.enumerated())
+        // the iPod copies of this playlist's songs, and which of them are hidden (the rule worked out once)
+        let rule = model.ruleHidden(model.db?.playlists ?? [])
+        let lib = zip(all, avail).map { t, a in a == .onIPod ? model.libraryTrack(for: t)?.track : nil }
+        let hidden = lib.map { l in l.map { model.wantsHidden(model.podKey($0.key), rule) } ?? false }
+        let onPodLib = lib.compactMap { $0 }
+        let allHidden = !onPodLib.isEmpty && hidden.filter { $0 }.count == onPodLib.count
+        let editable = model.ownToneEditable(playlist)
+        let move = { (a: Int, b: Int) in Task { await model.editOwnTone(playlist) { $0.moveItem(a, to: b) } } }
+        let remove = { (n: Int) in Task { await model.editOwnTone(playlist) { $0.remove(at: n) } } }
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 HStack(alignment: .bottom, spacing: 24) {
@@ -405,10 +508,23 @@ struct PlaylistView: View {
                                        systemImage: m == .removing ? "arrow.uturn.backward" : "minus") { model.toggleRemove(pod) }
                                     .buttonStyle(.glass)
                             }
+                            if !onPodLib.isEmpty {
+                                Button(allHidden ? "Show in iPod Library" : "Hide from iPod Library", systemImage: allHidden ? "eye" : "eye.slash") {
+                                    model.setHidden(onPodLib, !allHidden)
+                                }
+                                .buttonStyle(.glass)
+                                .help("Keeps this playlist's songs out of the iPod's Artists and Albums (with Frogger). They still play from playlists")
+                            }
                             if model.on(.ownTone) || playlist.spotifyID != nil {
                                 Button(model.on(.ownTone) ? "Play" : "Open in Spotify", systemImage: "play.fill") {
                                     Task { await model.playURIs([playlist.uri]) }
                                 }.buttonStyle(.glass)
+                            }
+                            if editable {
+                                Button { model.startRename(.ownTone(playlist.id)) } label: { Image(systemName: "pencil") }
+                                    .buttonStyle(.glass).help("Rename… (renames its .m3u file)")
+                                Button { model.confirmDeletePlaylist = .ownTone(playlist.id) } label: { Image(systemName: "trash") }
+                                    .buttonStyle(.glass).help("Delete Playlist…")
                             }
                         }
                         .padding(.top, 8)
@@ -432,7 +548,13 @@ struct PlaylistView: View {
                 if tracks == nil { ProgressView().frame(maxWidth: .infinity, minHeight: 120) }
                 LazyVStack(spacing: 0) {
                     ForEach(shown, id: \.offset) { i, t in
-                        TrackRow(track: t, index: i, availability: avail[i])
+                        if editable {
+                            TrackRow(track: t, index: i, availability: avail[i], podTrack: lib[i], hidden: hidden[i],
+                                     edit: PlaylistRowActions(index: i, count: all.count, move: { _ = move($0, $1) }, remove: { _ = remove($0) }))
+                                .reorderable(i) { _ = move($0, $1) }
+                        } else {
+                            TrackRow(track: t, index: i, availability: avail[i], podTrack: lib[i], hidden: hidden[i])
+                        }
                     }
                 }
                 .clipShape(.rect(cornerRadius: 14))
@@ -451,6 +573,9 @@ struct TrackRow: View {
     var track: OTTrack
     var index: Int
     var availability: Model.Availability
+    var podTrack: LibTrack? = nil        // the library song whose copy is on the iPod
+    var hidden = false                   // that copy is hidden from the iPod's Artists/Albums
+    var edit: PlaylistRowActions? = nil  // move and remove, in a playlist Crate can change
 
     var body: some View {
         HStack(spacing: 12) {
@@ -462,6 +587,11 @@ struct TrackRow: View {
             }
             .opacity(availability == .streamOnly ? 0.6 : 1)
             Spacer()
+            if hidden, let podTrack {
+                Button { model.setHidden([podTrack], false) } label: { Image(systemName: "eye.slash") }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .help("Hidden from the iPod's Artists and Albums. Click to show it again")
+            }
             switch availability {
             case .onIPod: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).help("On the iPod")
             case .file: Image(systemName: "music.note").foregroundStyle(.tint).help("You have the file; goes to the iPod with the playlist")
@@ -479,6 +609,11 @@ struct TrackRow: View {
         .contextMenu {
             if let m = model.libraryTrack(for: track) {
                 Button("Go to Album", systemImage: "square.stack") { model.path.append(.album(m.album)) }
+                if let podTrack {
+                    Button(hidden ? "Show in iPod Library" : "Hide from iPod Library", systemImage: hidden ? "eye" : "eye.slash") {
+                        model.setHidden([podTrack], !hidden)
+                    }
+                }
             } else {
                 if model.on(.soulseek) {
                     Button("Find “\(track.album)” on Soulseek", systemImage: "arrow.down.circle") {
@@ -489,6 +624,7 @@ struct TrackRow: View {
             if model.on(.ownTone) || track.uri.hasPrefix("spotify:") {
                 Button(model.on(.ownTone) ? "Play on OwnTone" : "Open in Spotify", systemImage: "play.fill") { Task { await model.playURIs([track.uri]) } }
             }
+            if let edit { Divider(); edit }
         }
     }
 }
@@ -522,8 +658,14 @@ struct PodPlaylistView: View {
 
     var body: some View {
         let byID = Dictionary((model.db?.tracks ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        let tracks = playlist.items.compactMap { byID[$0.trackID] }
+        let tracks = model.podItems(playlist).compactMap { byID[$0] }
         let removing = model.playlistsToRemove.contains(playlist.id)
+        let edited = model.podEdits[playlist.id] != nil
+        // edits work on the songs shown (ids of songs no longer on the iPod drop out)
+        let move = { (a: Int, b: Int) in model.editPod(playlist) { list in
+            var shown = list.filter { byID[$0] != nil }; shown.moveItem(a, to: b); list = shown } }
+        let remove = { (n: Int) in model.editPod(playlist) { list in
+            var shown = list.filter { byID[$0] != nil }; shown.remove(at: n); list = shown } }
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 HStack(alignment: .bottom, spacing: 24) {
@@ -531,37 +673,44 @@ struct PodPlaylistView: View {
                         .frame(width: 200, height: 200).glassEffect(.regular.tint(.accentColor), in: .rect(cornerRadius: 16))
                     VStack(alignment: .leading, spacing: 6) {
                         Text("On the iPod").font(.caption.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
-                        Text(playlist.name).font(.largeTitle.bold())
+                        Text(model.podDisplayName(playlist)).font(.largeTitle.bold())
+                            .onTapGesture(count: 2) { model.startRename(.pod(playlist.id)) }
+                            .help("Double-click to rename")
                         Text("\(tracks.count) songs · \(totalDuration(tracks.map(\.lengthMs).reduce(0, +)))").foregroundStyle(.secondary)
-                        Button(removing ? "Keep on iPod" : "Remove from iPod", systemImage: removing ? "arrow.uturn.backward" : "minus") {
-                            model.toggleRemove(playlist)
+                        HStack(spacing: 10) {
+                            Button(removing ? "Keep on iPod" : "Remove from iPod", systemImage: removing ? "arrow.uturn.backward" : "minus") {
+                                model.toggleRemove(playlist)
+                            }
+                            .buttonStyle(.glass)
+                            Button { model.startRename(.pod(playlist.id)) } label: { Image(systemName: "pencil") }
+                                .buttonStyle(.glass).help("Rename…")
                         }
-                        .buttonStyle(.glass).padding(.top, 8)
+                        .padding(.top, 8)
+                        if edited {
+                            HStack(spacing: 8) {
+                                Label("Changed in Crate; the iPod gets it on the next Sync", systemImage: "clock.arrow.circlepath")
+                                    .font(.callout).foregroundStyle(.secondary)
+                                Button("Revert") { model.podEdits[playlist.id] = nil }.buttonStyle(.link)
+                            }
+                        }
                     }
                     Spacer(minLength: 0)
                 }
                 VStack(spacing: 0) {
                     ForEach(Array(tracks.enumerated()), id: \.offset) { i, t in
-                        HStack(spacing: 12) {
-                            Text("\(i + 1)").monospacedDigit().foregroundStyle(.secondary).frame(width: 26, alignment: .trailing)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(t.title).lineLimit(1)
-                                Text("\(t.artist) — \(t.album)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            }
-                            Spacer()
-                            Text(duration(t.lengthMs)).monospacedDigit().foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 14).padding(.vertical, 8)
-                        .background(i % 2 == 1 ? Color.primary.opacity(0.04) : .clear)
+                        PlaylistSongRow(number: i + 1, title: t.title, detail: "\(t.artist) — \(t.album)", lengthMs: t.lengthMs)
+                            .reorderable(i, move: move)
+                            .contextMenu { PlaylistRowActions(index: i, count: tracks.count, move: move, remove: remove) }
                     }
                 }
                 .clipShape(.rect(cornerRadius: 14))
                 .glassEffect(.regular, in: .rect(cornerRadius: 14))
+                if !tracks.isEmpty { Text("Drag songs to change the order.").font(.caption).foregroundStyle(.secondary) }
             }
             .padding(28)
             .opacity(removing ? 0.6 : 1)
         }
-        .navigationTitle(playlist.name)
+        .navigationTitle(model.podDisplayName(playlist))
     }
 }
 
@@ -605,21 +754,25 @@ struct SpotifyGrid: View {
 
     var body: some View {
         let list = shown
+        let albums = model.spotifyTab == "artists" ? list.filter { $0.artist.lowercased() == model.spotifyArtist?.lowercased() } : list
         let lists = model.playlists.filter { model.source(of: $0) == "Spotify" || (!spot.direct && $0.spotifyID == nil) }
-        ScrollView {
-            HStack(spacing: 14) {
-                Picker("", selection: $model.spotifyTab) {
-                    Text("Albums").tag("albums")
-                    Text("Playlists").tag("playlists")
+        // albums (all, or one artist's) can be a grid, a list or Cover Flow, like the library
+        let showsAlbums = model.spotifyTab == "albums" || (model.spotifyTab == "artists" && model.spotifyArtist != nil)
+        let altView = showsAlbums && model.albumView != "grid" && !albums.isEmpty && !(spot.direct && !spot.connected)
+        Group {
+        if altView {
+            VStack(spacing: 0) {
+                header
+                if model.spotifyTab == "artists", let name = model.spotifyArtist {
+                    SourceArtistHeader(name: name, albums: albums.count) { model.spotifyArtist = nil }
                 }
-                .pickerStyle(.segmented).labelsHidden().fixedSize()
-                if model.spotifyTab == "albums" {
-                    Toggle("Only albums without files", isOn: $model.onlyMissing).toggleStyle(.switch)
-                }
-                Spacer()
-                Text("Spotify streams can't be copied to the iPod").font(.callout).foregroundStyle(.secondary)
+                if model.albumView == "flow" { SpotifyCoverFlow(albums: Array(albums.prefix(600))) }
+                else { SpotifyAlbumList(albums: albums).padding(.top, 10) }
             }
-            .padding(.horizontal, 24).padding(.top, 16)
+        } else {
+        ScrollViewReader { proxy in
+        ScrollView {
+            header
             if model.spotifyTab == "playlists" {
                 if lists.isEmpty {
                     ContentUnavailableView("No playlists", systemImage: "music.note.list").padding(.top, 60)
@@ -643,7 +796,14 @@ struct SpotifyGrid: View {
                     }
                 }
                 .padding(24).padding(.bottom, 50)
+            } else if model.spotifyTab == "artists" && model.spotifyArtist == nil && !list.isEmpty {
+                SourceArtistGrid(entries: SourceArtistGrid.entries(list, artist: \.artist, art: { model.artURL($0.artworkPath) }, seed: \.uri)) {
+                    model.path.append(.artist($0))
+                }
             } else {
+            if model.spotifyTab == "artists", let name = model.spotifyArtist {
+                SourceArtistHeader(name: name, albums: albums.count) { model.spotifyArtist = nil }
+            }
             if spot.direct && !spot.connected {
                 PluginSetupNotice(plugin: .spotify, text: "Connect your Spotify account to see your saved albums and playlists.")
             } else if let e = spot.error, spot.direct {
@@ -653,7 +813,7 @@ struct SpotifyGrid: View {
                                        systemImage: PluginID.spotify.icon).padding(.top, 60)
             }
             LazyVGrid(columns: columns, spacing: 24) {
-                ForEach(list.prefix(600)) { a in
+                ForEach(albums.prefix(600)) { a in
                     NavigationLink(value: Route.spotifyAlbum(a)) {
                     VStack(alignment: .leading, spacing: 6) {
                         Color.clear.aspectRatio(1, contentMode: .fit)
@@ -692,7 +852,33 @@ struct SpotifyGrid: View {
             .padding(24).padding(.bottom, 50)
             }
         }
+        .overlay(alignment: .trailing) {
+            if model.spotifyTab == "artists" && model.spotifyArtist == nil {
+                ArtistLetters.index(ArtistLetters.of(SourceArtistGrid.entries(list, artist: \.artist, art: { _ in nil }, seed: \.uri).map(\.name)).letters, proxy: proxy)
+            }
+        }
+        }
+        }
+        }
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Picker("Show", selection: $model.spotifyTab) {
+                    Text("Albums").tag("albums")
+                    Text("Artists").tag("artists")
+                    Text("Playlists").tag("playlists")
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
+            }
+            if showsAlbums {
+                ToolbarItem(placement: .navigation) {
+                    Picker("View", selection: model.$albumView) {
+                        Image(systemName: "square.grid.2x2").tag("grid").help("Grid")
+                        Image(systemName: "list.bullet").tag("list").help("List")
+                        Image(systemName: "rectangle.stack").tag("flow").help("Cover Flow")
+                    }
+                    .pickerStyle(.segmented).labelsHidden().fixedSize()
+                }
+            }
             if model.on(.soulseek) {
                 ToolbarItem(placement: .navigation) {
                     Button { model.showMissing = true } label: { Label("Get Missing Albums…", systemImage: "arrow.down.circle") }
@@ -702,7 +888,66 @@ struct SpotifyGrid: View {
             }
         }
         .navigationTitle("Spotify")
-        .navigationSubtitle("\(list.count) albums" + (list.count > 600 ? " (first 600 shown, search finds the rest)" : ""))
+        .navigationSubtitle(model.spotifyTab == "artists" && model.spotifyArtist == nil ? "\(Set(list.map { $0.artist.lowercased() }).count) artists"
+                            : "\(albums.count) album\(albums.count == 1 ? "" : "s")" + (albums.count > 600 ? " (first 600 shown, search finds the rest)" : ""))
+    }
+}
+
+extension SpotifyGrid {
+    var header: some View {
+        HStack(spacing: 14) {
+            if model.spotifyTab != "playlists" {
+                Toggle("Only albums without files", isOn: $model.onlyMissing).toggleStyle(.switch)
+            }
+            Spacer()
+            Text("Spotify streams can't be copied to the iPod").font(.callout).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 24).padding(.top, 16)
+    }
+}
+
+@MainActor
+final class SpotifyListUI: ObservableObject {
+    @Published var selection: Set<SpotifyAlbum.ID> = []
+    @Published var sort = [KeyPathComparator(\SpotifyAlbum.artist), KeyPathComparator(\SpotifyAlbum.year), KeyPathComparator(\SpotifyAlbum.name)]
+}
+
+/// Saved Spotify albums as a table, like the library's album list; double-click opens one.
+struct SpotifyAlbumList: View {
+    @EnvironmentObject var model: Model
+    var albums: [SpotifyAlbum]
+    @StateObject private var ui = SpotifyListUI()
+
+    var body: some View {
+        Table(albums.sorted(using: ui.sort), selection: $ui.selection, sortOrder: $ui.sort) {
+            TableColumn("") { (a: SpotifyAlbum) in
+                Image(systemName: model.hasFiles(a) ? "checkmark.circle.fill" : "dot.radiowaves.left.and.right")
+                    .foregroundStyle(model.hasFiles(a) ? AnyShapeStyle(.green) : AnyShapeStyle(.tertiary))
+                    .help(model.hasFiles(a) ? "You have files for this album" : "Spotify only")
+            }
+            .width(22)
+            TableColumn("Album", value: \.name) { (a: SpotifyAlbum) in
+                HStack(spacing: 8) {
+                    CachedImage(url: model.artURL(a.artworkPath), seed: a.uri).frame(width: 28, height: 28).clipShape(.rect(cornerRadius: 4))
+                    Text(a.name).lineLimit(1)
+                }
+            }
+            .width(min: 180, ideal: 300)
+            TableColumn("Artist", value: \.artist)
+            TableColumn("Year", value: \.year) { (a: SpotifyAlbum) in Text(a.year > 0 ? String(a.year) : "").monospacedDigit() }.width(46)
+            TableColumn("Saved", value: \.trackCount) { (a: SpotifyAlbum) in Text("\(a.trackCount)").monospacedDigit() }.width(50)
+        }
+        .contextMenu(forSelectionType: SpotifyAlbum.ID.self) { ids in
+            if ids.count == 1, let a = albums.first(where: { ids.contains($0.id) }) {
+                Button("Open", systemImage: "chevron.right") { model.path.append(.spotifyAlbum(a)) }
+                Button(model.on(.ownTone) ? "Play on OwnTone" : "Open in Spotify", systemImage: "play.fill") { Task { await model.playURIs([a.uri]) } }
+                if model.on(.soulseek) {
+                    Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(a.artist, a.name) }
+                }
+            }
+        } primaryAction: { ids in
+            if let a = albums.first(where: { ids.contains($0.id) }) { model.path.append(.spotifyAlbum(a)) }
+        }
     }
 }
 
@@ -726,9 +971,11 @@ struct ArtistsView: View {
 
     var body: some View {
         let list = model.artists
+        let marks = ArtistLetters.of(list.map(\.name), letter: LetterIndex.letter)
+        ScrollViewReader { proxy in
         ScrollView {
             LazyVGrid(columns: columns, spacing: 28) {
-                ForEach(list) { a in
+                ForEach(Array(list.enumerated()), id: \.element.id) { n, a in
                     NavigationLink(value: Route.artist(a.name)) {
                         VStack(spacing: 8) {
                             Color.clear.aspectRatio(1, contentMode: .fit)
@@ -742,78 +989,24 @@ struct ArtistsView: View {
                         .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
+                    .id(marks.first.contains(n) ? ArtistLetters.id(marks.letterOf[n]) : "artist-" + a.id)
                     .contextMenu {
+                        let tracks = a.albums.flatMap(\.tracks)
+                        Button("Play", systemImage: "play.fill") { Task { await model.play(tracks) } }
+                        Button("Shuffle", systemImage: "shuffle") { Task { await model.play(tracks.shuffled()) } }
+                        AddToPlaylistMenu(tracks: tracks)
+                        Divider()
                         Button("Add All to iPod", systemImage: "plus.circle") { model.addAll(a) }
                         Button("Remove All from iPod", systemImage: "minus.circle") { model.removeAll(a) }
                     }
                 }
             }
-            .padding(24).padding(.bottom, 50)
+            .padding(24).padding(.trailing, marks.letters.count > 3 ? 18 : 0).padding(.bottom, 50)
+        }
+        .overlay(alignment: .trailing) { ArtistLetters.index(marks.letters, proxy: proxy) }
         }
         .navigationTitle("Artists")
         .navigationSubtitle("\(list.count) artists")
-    }
-}
-
-struct ArtistDetail: View {
-    @EnvironmentObject var model: Model
-    var name: String
-    private let columns = [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 22)]
-
-    var body: some View {
-        if let a = model.artists.first(where: { $0.name == name }) {
-            let m = model.artistMark(a)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 26) {
-                    HStack(alignment: .center, spacing: 26) {
-                        ArtistImage(artist: a).frame(width: 180, height: 180).clipShape(.circle)
-                            .shadow(color: .black.opacity(0.35), radius: 16, y: 6)
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Artist").font(.caption.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
-                            Text(a.name).font(.system(size: 40, weight: .bold)).lineLimit(2)
-                            Text("\(a.albums.count) album\(a.albums.count == 1 ? "" : "s") · \(a.trackCount) songs · "
-                                 + totalDuration(a.albums.flatMap(\.tracks).map(\.lengthMs).reduce(0, +)))
-                                .foregroundStyle(.secondary)
-                            HStack(spacing: 10) {
-                                if m != .onIPod {
-                                    Button("Add All to iPod", systemImage: "plus") { model.addAll(a) }
-                                        .buttonStyle(.glassProminent).disabled(model.ipod == nil)
-                                }
-                                if m != .none {
-                                    Button("Remove All", systemImage: "minus") { model.removeAll(a) }.buttonStyle(.glass)
-                                }
-                                Toggle(isOn: Binding(get: { model.keptArtists.contains(a.id) }, set: { _ in model.toggleKeep(a) })) {
-                                    Label("Keep on iPod", systemImage: "pin")
-                                }
-                                .toggleStyle(.button).buttonStyle(.glass)
-                                .help("Every album by \(a.name) goes to the iPod, also ones you add later")
-                                if model.on(.ownTone) {
-                                    Button("Play", systemImage: "play.fill") {
-                                        Task { await OwnTonePlaylists.play(a.albums.flatMap(\.tracks).map(\.uri).filter { !$0.isEmpty }, base: model.ownToneURL) }
-                                    }.buttonStyle(.glass)
-                                }
-                            }
-                            .padding(.top, 8)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    Text("In Your Library").font(.title2.bold())
-                    LazyVGrid(columns: columns, spacing: 26) {
-                        ForEach(a.albums) { al in
-                            NavigationLink(value: Route.album(al)) { AlbumTile(album: al) }
-                                .buttonStyle(.plain)
-                                .contextMenu { AlbumMenu(album: al) }
-                        }
-                    }
-                    ArtistExtras(artist: a)
-                }
-                .padding(28).padding(.bottom, 50)
-            }
-            .background { Backdrop(image: model.artistArt[a.id] ?? a.albums.lazy.compactMap { model.artwork[$0.id] }.first) }
-            .navigationTitle(a.name)
-        } else {
-            ContentUnavailableView("Artist not found", systemImage: "music.microphone")
-        }
     }
 }
 
@@ -843,6 +1036,8 @@ final class AMUI: ObservableObject {
     @Published var sort = Sort.artist
     @Published var group = Group.letter
     @Published var place = Where.all
+    @Published var byArtist = CommandLine.arguments.contains("--am-artists")    // for testing
+    @Published var artist: String?
 }
 
 struct AppleMusicView: View {
@@ -851,9 +1046,7 @@ struct AppleMusicView: View {
     private let columns = [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 22)]
 
     static func letter(_ s: String) -> String {
-        let t = s.hasPrefix("The ") ? String(s.dropFirst(4)) : s
-        guard let c = t.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil).uppercased().first else { return "#" }
-        return c.isLetter ? String(c) : "#"
+        LetterIndex.letter(s.hasPrefix("The ") ? String(s.dropFirst(4)) : s)
     }
 
     var shown: [AMAlbum] {
@@ -862,6 +1055,7 @@ struct AppleMusicView: View {
             (!model.amHideImported || !model.amHidden.contains(a.id))
                 && (ui.place == .all || (ui.place == .mac ? a.downloaded == a.tracks.count : a.downloaded < a.tracks.count))
                 && words.allSatisfy { (a.title + " " + a.artist + " " + (a.tracks.first?.genre ?? "")).localizedStandardContains($0) }
+                && (!ui.byArtist || ui.artist == nil || a.artist.lowercased() == ui.artist?.lowercased())
         }
         .sorted { x, y in
             switch ui.sort {
@@ -889,7 +1083,9 @@ struct AppleMusicView: View {
         for a in list { let k = key(a); if groups[k] == nil { order.append(k) }; groups[k, default: []].append(a) }
         if ui.group == .letter || ui.group == .artist || ui.group == .genre { order.sort { ($0 == "#" || $0 == "Unknown" ? 1 : 0, $0) < ($1 == "#" || $1 == "Unknown" ? 1 : 0, $1) } }
         if ui.group == .year { order.sort(by: >) }
-        let letters = ui.group == .letter ? order : []
+        let artistGrid = ui.byArtist && ui.artist == nil
+        let letters = ui.group == .letter && !artistGrid ? order : []
+        let artistLetters = artistGrid ? ArtistLetters.of(SourceArtistGrid.entries(list, artist: \.artist, art: { _ in nil }, seed: \.id).map(\.name)).letters : []
         return ScrollViewReader { proxy in
             ScrollView {
                 HStack(spacing: 12) {
@@ -901,6 +1097,8 @@ struct AppleMusicView: View {
                     .padding(.horizontal, 12).padding(.vertical, 7)
                     .glassEffect(.regular, in: .capsule)
                     .frame(maxWidth: 280)
+                    Picker("", selection: $ui.byArtist) { Text("Albums").tag(false); Text("Artists").tag(true) }
+                        .pickerStyle(.segmented).labelsHidden().fixedSize()
                     Picker("", selection: $ui.place) { ForEach(AMUI.Where.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
                         .pickerStyle(.segmented).labelsHidden().fixedSize()
                     Spacer()
@@ -915,6 +1113,17 @@ struct AppleMusicView: View {
                     ProgressView("Reading your Apple Music library…").padding(.top, 120)
                 } else if list.isEmpty {
                     ContentUnavailableView(ui.query.isEmpty ? "No albums" : "No albums match “\(ui.query)”", systemImage: "icloud").padding(.top, 80)
+                }
+                if artistGrid {
+                    SourceArtistGrid(entries: SourceArtistGrid.entries(list, artist: \.artist, art: { model.amArt[$0.id] }, seed: \.id),
+                                     load: { name in
+                                         guard let a = list.first(where: { $0.artist.lowercased() == name.lowercased() }), model.amArt[a.id] == nil,
+                                               let u = await AppleMusic.artworkURL(a) else { return }
+                                         model.amArt[a.id] = u
+                                     }) { model.path.append(.artist($0)) }
+                } else {
+                if ui.byArtist, let name = ui.artist {
+                    SourceArtistHeader(name: name, albums: list.count) { ui.artist = nil }
                 }
                 LazyVStack(alignment: .leading, spacing: 26, pinnedViews: ui.group == .none ? [] : [.sectionHeaders]) {
                     ForEach(order, id: \.self) { k in
@@ -938,24 +1147,17 @@ struct AppleMusicView: View {
                     }
                 }
                 .padding(24).padding(.trailing, letters.isEmpty ? 0 : 18).padding(.bottom, 80)
+                }
             }
             .overlay(alignment: .trailing) {
                 if letters.count > 3 {
-                    VStack(spacing: 1) {
-                        ForEach(letters, id: \.self) { l in
-                            Button(l) { withAnimation(.snappy) { proxy.scrollTo("am-" + l, anchor: .top) } }
-                                .buttonStyle(.plain).font(.caption2.bold()).foregroundStyle(.tint)
-                                .frame(width: 18, height: 15).contentShape(.rect)
-                        }
-                    }
-                    .padding(.vertical, 8).padding(.horizontal, 2)
-                    .glassEffect(.regular, in: .capsule)
-                    .padding(.trailing, 6)
+                    LetterIndex(letters: letters) { proxy.scrollTo("am-" + $0, anchor: .top) }
                 }
+                ArtistLetters.index(artistLetters, proxy: proxy)
             }
         }
         .navigationTitle("Apple Music")
-        .navigationSubtitle("\(list.count) albums")
+        .navigationSubtitle(ui.byArtist && ui.artist == nil ? "\(Set(list.map { $0.artist.lowercased() }).count) artists" : "\(list.count) albums")
         .task { if model.amAlbums.isEmpty { await model.loadAppleMusic() } }
         .onChange(of: model.amHideImported) { model.amHidden = Set(model.amAlbums.filter(model.inLibrary).map(\.id)) }
         .onDisappear { model.amHidden = Set(model.amAlbums.filter(model.inLibrary).map(\.id)) }
@@ -1031,6 +1233,158 @@ struct AMTile: View {
         }
         .task(id: album.id) {
             if model.amArt[album.id] == nil, let u = await AppleMusic.artworkURL(album) { model.amArt[album.id] = u }
+        }
+    }
+}
+
+// MARK: letter index
+
+final class LetterIndexUI: ObservableObject {
+    @Published var current: String?
+}
+
+/// The A–Z strip down the right of a long grid, like the iPod touch's: tap a letter, or drag along
+/// the strip to run through them, and `jump` scrolls there.
+struct LetterIndex: View {
+    var letters: [String]
+    var jump: (String) -> Void
+    @StateObject private var ui = LetterIndexUI()
+    private let row: CGFloat = 15, inset: CGFloat = 8
+
+    static let all = ["#"] + (UnicodeScalar("A").value...UnicodeScalar("Z").value).map { String(UnicodeScalar($0)!) }
+
+    /// A title's index letter: its first letter without accents, "#" for digits and symbols.
+    static func letter(_ s: String) -> String {
+        guard let c = s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil).uppercased().first else { return "#" }
+        return c.isLetter ? String(c) : "#"
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(letters, id: \.self) { l in
+                Text(l).font(.caption2.bold())
+                    .foregroundStyle(ui.current == l ? AnyShapeStyle(.primary) : AnyShapeStyle(.tint))
+                    .scaleEffect(ui.current == l ? 1.35 : 1)
+                    .frame(width: 18, height: row)
+            }
+        }
+        .padding(.vertical, inset).padding(.horizontal, 2)
+        .contentShape(.rect)
+        .gesture(DragGesture(minimumDistance: 0)
+            .onChanged { g in
+                let i = Int(((g.location.y - inset) / row).rounded(.down))
+                let l = letters[max(0, min(letters.count - 1, i))]
+                if l != ui.current { ui.current = l; jump(l) }
+            }
+            .onEnded { _ in ui.current = nil })
+        .animation(.snappy(duration: 0.15), value: ui.current)
+        .glassEffect(.regular, in: .capsule)
+        .padding(.trailing, 6)
+        .help("Jump to a letter (drag to scrub)")
+    }
+}
+
+// MARK: source artists
+
+/// Artists-first view of a source's albums: one circle per artist (their first album's cover);
+/// picking one narrows the album grid to that artist.
+struct SourceArtistGrid: View {
+    @EnvironmentObject var model: Model
+    struct Entry: Identifiable { var id: String { name.lowercased() }; var name: String; var albums: Int; var art: URL?; var seed: String }
+    var entries: [Entry]
+    var load: ((String) async -> Void)? = nil
+    var pick: (String) -> Void
+    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 180), spacing: 26)]
+
+    static func entries<A>(_ albums: [A], artist: (A) -> String, art: (A) -> URL?, seed: (A) -> String) -> [Entry] {
+        var order: [String] = [], groups: [String: [A]] = [:]
+        for a in albums { let k = artist(a).lowercased(); if groups[k] == nil { order.append(k) }; groups[k, default: []].append(a) }
+        let bare = { (s: String) in s.hasPrefix("The ") ? String(s.dropFirst(4)) : s }
+        return order.map { k in
+            let g = groups[k]!
+            return Entry(name: artist(g[0]), albums: g.count, art: g.lazy.compactMap(art).first, seed: seed(g[0]))
+        }
+        .sorted { bare($0.name).localizedStandardCompare(bare($1.name)) == .orderedAscending }
+    }
+
+    var body: some View {
+        let marks = ArtistLetters.of(entries.map(\.name))
+        LazyVGrid(columns: columns, spacing: 28) {
+            ForEach(Array(entries.enumerated()), id: \.element.id) { n, e in
+                let lib = model.libraryArtist(e.name)
+                Button { pick(e.name) } label: {
+                    VStack(spacing: 8) {
+                        Color.clear.aspectRatio(1, contentMode: .fit)
+                            .overlay { ArtistPortrait(name: e.name, fallback: e.art) }
+                            .clipShape(.circle)
+                            .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
+                            .overlay(alignment: .bottomTrailing) { if let lib { MarkBadge(mark: model.artistMark(lib)).padding(4) } }
+                        Text(e.name).font(.headline).lineLimit(1)
+                        Text("\(e.albums) album\(e.albums == 1 ? "" : "s")").font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .id(marks.first.contains(n) ? ArtistLetters.id(marks.letterOf[n]) : "artist-" + e.id)
+                .contextMenu {
+                    if let lib {
+                        let tracks = lib.albums.flatMap(\.tracks)
+                        Button("Play", systemImage: "play.fill") { Task { await model.play(tracks) } }
+                        AddToPlaylistMenu(tracks: tracks)
+                        Divider()
+                        Button("Add All to iPod", systemImage: "plus.circle") { model.addAll(lib) }
+                    }
+                    Button("Open Artist", systemImage: "music.microphone") { pick(e.name) }
+                }
+                .task(id: e.id) { if e.art == nil { await load?(e.name) } }
+            }
+        }
+        .padding(24).padding(.bottom, 50)
+    }
+}
+
+/// Back-to-all-artists bar above one artist's albums in a source.
+struct SourceArtistHeader: View {
+    var name: String
+    var albums: Int
+    var back: () -> Void
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Button(action: back) { Label("All Artists", systemImage: "chevron.left") }
+                .buttonStyle(.glass)
+            Text(name).font(.title.bold()).lineLimit(1)
+            Text("\(albums) album\(albums == 1 ? "" : "s")").foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 24).padding(.top, 12)
+    }
+}
+
+/// Albums Frogger hides from the iPod's Artists and Albums (Hide from iPod Library, or a hidden playlist):
+/// an eye on the cover, with how many of its songs when only some are.
+struct HiddenMark: View {
+    @EnvironmentObject var model: Model
+    var album: Album
+    var compact = false
+
+    var body: some View {
+        let h = model.hiddenCount(album)
+        if h.hidden > 0 {
+            let all = h.hidden == h.onIPod
+            let help = all ? "Hidden from Artists and Albums on the iPod; it still plays from its playlists"
+                           : "\(h.hidden) of \(h.onIPod) songs hidden from Artists and Albums on the iPod"
+            if compact {
+                Image(systemName: "eye.slash").foregroundStyle(.secondary).help(help)
+            } else {
+                HStack(spacing: 4) {
+                    Image(systemName: "eye.slash")
+                    if !all { Text("\(h.hidden)/\(h.onIPod)").monospacedDigit() }
+                }
+                .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+                .padding(.horizontal, all ? 0 : 8).frame(minWidth: 26, minHeight: 26)
+                .glassEffect(.regular.tint(.black.opacity(0.35)), in: .capsule)
+                .help(help)
+            }
         }
     }
 }

@@ -56,18 +56,20 @@ final class TagEditorState: ObservableObject {
     }
 }
 
+/// Edit Tags: the album page turned into a form.
 struct TagEditor: View {
     @EnvironmentObject var model: Model
-    @Environment(\.dismiss) private var dismiss
     var album: Album
+    var close: () -> Void
     @StateObject private var s = TagEditorState()
 
     var body: some View {
         let unwritable = album.tracks.filter { !TagWriter.canWrite($0.path) }.count
         VStack(alignment: .leading, spacing: 16) {
+            Label("Editing Tags", systemImage: "pencil").font(.caption.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
             HStack(alignment: .top, spacing: 18) {
                 VStack(spacing: 8) {
-                    Cover(image: s.cover, seed: album.id).frame(width: 132, height: 132).clipShape(.rect(cornerRadius: 12))
+                    Cover(image: s.cover, seed: album.id).frame(width: 220, height: 220).clipShape(.rect(cornerRadius: 16))
                         .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
                         .dropDestination(for: URL.self) { urls, _ in setCover(urls.first); return true }
                     Button("Choose Image…") {
@@ -91,8 +93,7 @@ struct TagEditor: View {
                 Spacer()
                 Button("Number 1, 2, 3…") { s.renumber() }.controlSize(.small)
             }
-            ScrollView {
-                VStack(spacing: 0) {
+            VStack(spacing: 0) {
                     ForEach($s.rows) { $r in
                         HStack(spacing: 8) {
                             TextField("#", value: $r.disc, format: .number).frame(width: 30).help("Disc")
@@ -103,9 +104,7 @@ struct TagEditor: View {
                         .textFieldStyle(.roundedBorder)
                         .padding(.vertical, 3)
                     }
-                }
             }
-            .frame(maxHeight: .infinity)
             HStack {
                 if s.saving {
                     ProgressView(value: Double(s.done), total: Double(max(s.edits().count, 1))).frame(width: 160)
@@ -116,14 +115,11 @@ struct TagEditor: View {
                     Label("\(unwritable) files (WAV/AIFF) can't hold tags", systemImage: "info.circle").font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).buttonStyle(.glass).disabled(s.saving)
+                Button("Cancel", action: close).keyboardShortcut(.cancelAction).buttonStyle(.glass).disabled(s.saving)
                 Button("Save") { Task { await save() } }.keyboardShortcut(.defaultAction).buttonStyle(.glassProminent)
                     .disabled(s.saving || s.changes == 0)
             }
         }
-        .padding(22)
-        .frame(width: 640, height: 600)
-        .interactiveDismissDisabled(s.saving)
         .onAppear { s.load(album, artwork: model.artwork[album.id]) }
     }
 
@@ -154,6 +150,6 @@ struct TagEditor: View {
         }
         await model.refreshFiles(album.tracks.map(\.path), cover: s.coverData, oldID: album.id)
         s.saving = false
-        if failed.isEmpty { dismiss() } else { s.error = "\(failed.count) failed: \(failed[0])" }
+        if failed.isEmpty { close() } else { s.error = "\(failed.count) failed: \(failed[0])" }
     }
 }

@@ -7,11 +7,14 @@ set -e
 cd "$(dirname "$0")"
 rm -rf build/Crate.app
 mkdir -p build/Crate.app/Contents/MacOS
-swiftc -O -j$(sysctl -n hw.ncpu) -parse-as-library -swift-version 5 -target arm64-apple-macos26 \
+# `./build.sh dev` skips optimisation: much quicker to build, slower at heavy work (cover dithering, scans)
+opt=-O; [ "$1" = dev ] && opt=-Onone
+swiftc $opt -j$(sysctl -n hw.ncpu) -parse-as-library -swift-version 5 -target arm64-apple-macos26 \
     *.swift \
     -o build/Crate.app/Contents/MacOS/Crate
 cp Info.plist build/Crate.app/Contents/
 mkdir -p build/Crate.app/Contents/Resources && cp Icon/Crate.icns build/Crate.app/Contents/Resources/   # drawn by Icon/make-icon.swift
+cp Fonts/ChicagoFLF.ttf build/Crate.app/Contents/Resources/   # public-domain Chicago revival for the iPod LCD
 id=$(security find-identity -p codesigning | awk '/"Crate Local Signing"/ {print $2; exit}')
 codesign --force --sign "${id:--}" --identifier nl.jaccogroen.crate build/Crate.app
 echo built build/Crate.app
