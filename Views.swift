@@ -76,6 +76,10 @@ struct ContentView: View {
             }
             if let n = arg("--open-artist") { model.path = [.artist(n)] }
             if args.contains("--open-sync") { model.reviewSync() }
+            if args.contains("--demo-sync") {     // screenshots: the sync sheet mid-sync, without syncing anything
+                model.plan = model.makePlan(); model.syncing = true; model.syncPhase = "Adding songs"
+                model.syncTotal = 40; model.syncDone = 17; model.syncCurrent = "Converting Aphex Twin – Xtal"; model.showSync = true
+            }
         }
         .sheet(item: $model.lookupAlbum) { LookupSheet(album: $0).environmentObject(model) }
         .sheet(item: $model.editAlbum) { TagEditor(album: $0).environmentObject(model) }
@@ -551,10 +555,14 @@ struct SyncSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        HStack(alignment: .top, spacing: 26) {
+        // the iPod itself, big enough to watch: its screen shows the sync, the wheel spins
+        IPodArt(mode: model.podArtMode, name: model.podName, height: model.syncing ? 260 : 230)
+            .animation(.spring(response: 0.55, dampingFraction: 0.55), value: model.syncing)
+            .frame(width: 160, height: 260)
+            .padding(.top, 6)
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 14) {
-                IPodArt(mode: model.podArtMode, name: model.podName, height: 96)
-                    .animation(.spring(response: 0.5, dampingFraction: 0.55), value: model.syncing)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(model.syncing ? "Syncing \(model.podName)" : model.report != nil ? "Sync finished" : "Sync \(model.podName)")
                         .font(.title2.bold())
@@ -591,8 +599,9 @@ struct SyncSheet: View {
                 }
             }
         }
+        }
         .padding(24)
-        .frame(width: 560, height: 470)
+        .frame(width: 760, height: 480)
         .interactiveDismissDisabled(model.syncing)
     }
 

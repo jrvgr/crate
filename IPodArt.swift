@@ -178,7 +178,7 @@ struct SidebarIPod: View {
     @StateObject private var hover = HoverState()
     var body: some View {
         let big = hover.on || model.syncing || model.dropTarget == .ipod
-        IPodArt(mode: model.podArtMode, name: model.podName, height: big ? 120 : 44)
+        IPodArt(mode: model.podArtMode, name: model.podName, height: big ? 180 : 44)
             .scaleEffect(model.dropTarget == .ipod ? 1.06 : 1)
             .animation(.spring(response: 0.45, dampingFraction: 0.62), value: big)
             .animation(.spring(response: 0.3, dampingFraction: 0.5), value: model.dropTarget == .ipod)

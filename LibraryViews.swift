@@ -56,19 +56,20 @@ struct AlbumsView: View {
         .navigationSubtitle("\(list.count) albums")
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                Picker("Show", selection: $model.albumFilter) {
-                    ForEach(AlbumFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented).labelsHidden().fixedSize()
-            }
-            ToolbarItem(placement: .navigation) {
                 Menu {
+                    Picker("Show", selection: $model.albumFilter) {
+                        ForEach(AlbumFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.inline)
                     Picker("Sort By", selection: $model.albumSort) {
                         ForEach(AlbumSort.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.inline)
-                } label: { Label("Sort", systemImage: "arrow.up.arrow.down") }
-                .help("Sort albums")
+                } label: {
+                    Label(model.albumFilter == .all ? "Show and Sort" : model.albumFilter.rawValue,
+                          systemImage: model.albumFilter == .all ? "line.3.horizontal.decrease" : "line.3.horizontal.decrease.circle.fill")
+                }
+                .help("Show all albums or only those on / not on the iPod, and sort them")
             }
             ToolbarItem(placement: .navigation) {
                 Picker("View", selection: model.$albumView) {

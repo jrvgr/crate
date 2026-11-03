@@ -102,7 +102,7 @@ struct IPodView: View {
 
     func header(_ i: IPodInfo, _ db: ITunesDB) -> some View {
         HStack(spacing: 22) {
-            IPodArt(mode: model.podArtMode, name: model.podName, height: 150)
+            IPodArt(mode: model.podArtMode, name: model.podName, height: 220)
             VStack(alignment: .leading, spacing: 6) {
                 Text(i.modelName).font(.caption.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
                 Text(model.podName).font(.largeTitle.bold())
