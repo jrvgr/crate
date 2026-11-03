@@ -84,6 +84,18 @@ struct ContentView: View {
         .sheet(item: $model.lookupAlbum) { LookupSheet(album: $0).environmentObject(model) }
         .sheet(item: $model.editAlbum) { TagEditor(album: $0).environmentObject(model) }
         .sheet(item: $model.editSmart) { SmartEditor(playlist: $0).environmentObject(model) }
+        .sheet(isPresented: Binding(get: { model.merge != nil }, set: { if !$0 { model.merge = nil } })) {
+            MergeSheet(albums: model.merge ?? []).environmentObject(model)
+        }
+        .confirmationDialog(trashTitle, isPresented: Binding(get: { model.confirmTrash != nil }, set: { if !$0 { model.confirmTrash = nil } })) {
+            Button("Move to Trash", role: .destructive) {
+                let ts = model.confirmTrash ?? []
+                model.confirmTrash = nil
+                Task { await model.trash(ts) }
+            }
+        } message: {
+            Text("The files go to the Trash, so you can put them back. Copies already on the iPod stay there until you remove them.")
+        }
         .sheet(isPresented: Binding(get: { model.organize != nil }, set: { if !$0 { model.organize = nil } })) {
             OrganizerSheet(albums: model.organize ?? []).environmentObject(model)
         }
@@ -94,6 +106,15 @@ struct ContentView: View {
             BatchMetadataSheet(albums: model.batchAlbums ?? []).environmentObject(model)
         }
         .sheet(isPresented: $model.showSync) { SyncSheet().environmentObject(model) }
+    }
+}
+
+extension ContentView {
+    var trashTitle: String {
+        let ts = model.confirmTrash ?? []
+        let albums = Set(ts.map { $0.album.lowercased() })
+        return ts.count == 1 ? "Delete “\(ts[0].title)”?" : albums.count == 1 ? "Delete “\(ts.first?.album ?? "")” (\(ts.count) songs)?"
+            : "Delete \(albums.count) albums (\(ts.count) songs)?"
     }
 }
 

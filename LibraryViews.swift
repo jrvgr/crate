@@ -147,6 +147,11 @@ struct AlbumList: View {
                 Button("Remove \(ids.count) Albums from iPod", systemImage: "minus.circle") { picked.forEach { if model.state($0) != .none { model.toRemove.insert($0.id) } } }
                 Button("Find Metadata for \(ids.count) Albums…", systemImage: "sparkle.magnifyingglass") { model.batchAlbums = picked.filter { !model.isPodOnly($0) } }
                 Button("Organise Files…", systemImage: "folder.badge.gearshape") { model.organize = picked }
+                Button("Merge \(ids.count) Albums…", systemImage: "arrow.triangle.merge") { model.merge = picked.filter { !model.isPodOnly($0) } }
+                Divider()
+                Button("Delete \(ids.count) Albums from Library…", systemImage: "trash", role: .destructive) {
+                    model.confirmTrash = picked.filter { !model.isPodOnly($0) }.flatMap(\.tracks)
+                }
             }
         } primaryAction: { ids in
             if let a = albums.first(where: { ids.contains($0.id) }) { model.path.append(.album(a)) }
@@ -177,7 +182,14 @@ struct AlbumMenu: View {
             Button("Find Metadata…", systemImage: "sparkle.magnifyingglass") { model.lookupAlbum = album }
             Button("Edit Tags…", systemImage: "pencil") { model.editAlbum = album }
             Button("Organise Files…", systemImage: "folder.badge.gearshape") { model.organize = [album] }
+            Divider()
+            Button("Delete from Library…", systemImage: "trash", role: .destructive) { model.confirmTrash = album.tracks }
             Button("Quick Look Cover", systemImage: "eye") { model.quickLookCover(album) }
+            Menu("Merge With", systemImage: "arrow.triangle.merge") {
+                let same = model.albums.filter { $0.id != album.id && ($0.artist == album.artist || Model.looseMatch($0.title, album.title)) }
+                ForEach(same.prefix(20)) { other in Button(other.title + " – " + other.artist) { model.merge = [album, other] } }
+                if same.isEmpty { Text("Select albums in the list view to merge any") }
+            }
             if model.on(.soulseek) {
                 Button(model.expectedSongs(album) != nil ? "Complete Album on Soulseek" : "Find on Soulseek", systemImage: "arrow.down.circle") {
                     model.findOnSoulseek(album.artist, album.title, songs: model.expectedSongs(album) ?? album.tracks.count)
@@ -325,6 +337,14 @@ struct AlbumDetail: View {
                         .background(model.player.current?.id == t.id ? Color.accentColor.opacity(0.15) : i % 2 == 1 ? Color.primary.opacity(0.04) : .clear)
                         .contentShape(.rect)
                         .onTapGesture(count: 2) { Task { await model.play(album, from: i) } }
+                        .contextMenu {
+                            Button("Play", systemImage: "play.fill") { Task { await model.play(album, from: i) } }
+                            if !podOnly {
+                                Button("Show in Finder", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: t.path)]) }
+                                Divider()
+                                Button("Delete Song…", systemImage: "trash", role: .destructive) { model.confirmTrash = [t] }
+                            }
+                        }
                     }
                 }
                 .clipShape(.rect(cornerRadius: 14))

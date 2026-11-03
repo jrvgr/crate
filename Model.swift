@@ -129,6 +129,8 @@ final class Model: ObservableObject {
     @Published var batchAlbums: [Album]?
     @Published var showMissing = false
     @Published var organize: [Album]?
+    @Published var merge: [Album]?
+    @Published var confirmTrash: [LibTrack]?
     @Published var artistInfo: [String: ArtistInfo] = ArtistLookup.load()
     @Published var artistLoading: Set<String> = []
     @Published var quickLook: URL?
@@ -265,7 +267,7 @@ final class Model: ObservableObject {
 
     private static func loose(_ s: String) -> String { s.lowercased().filter { $0.isLetter || $0.isNumber } }
 
-    private func rebuild() {
+    func rebuild() {
         var seen = Set<String>()
         libTracks = libTracks.filter { seen.insert($0.path).inserted }
         albums = LibraryLoader.albums(libTracks)
