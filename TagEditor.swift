@@ -94,10 +94,18 @@ struct TagEditor: View {
                 Button("Number 1, 2, 3…") { s.renumber() }.controlSize(.small)
             }
             VStack(spacing: 0) {
+                    HStack(spacing: 8) {
+                        Text("Disc").frame(width: 34, alignment: .leading)
+                        Text("Track").frame(width: 38, alignment: .leading)
+                        Text("Title").frame(maxWidth: .infinity, alignment: .leading)
+                        Text("Artist").frame(width: 170, alignment: .leading)
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                    .padding(.bottom, 2)
                     ForEach($s.rows) { $r in
                         HStack(spacing: 8) {
-                            TextField("#", value: $r.disc, format: .number).frame(width: 30).help("Disc")
-                            TextField("#", value: $r.track, format: .number).frame(width: 38).help("Track")
+                            TextField("1", value: $r.disc, format: .number).frame(width: 34).help("Disc number")
+                            TextField("#", value: $r.track, format: .number).frame(width: 38).help("Track number")
                             TextField("Title", text: $r.title)
                             TextField("Artist", text: $r.artist).frame(width: 170)
                         }

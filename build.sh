@@ -16,5 +16,5 @@ cp Info.plist build/Crate.app/Contents/
 mkdir -p build/Crate.app/Contents/Resources && cp Icon/Crate.icns build/Crate.app/Contents/Resources/   # drawn by Icon/make-icon.swift
 cp Fonts/ChicagoFLF.ttf build/Crate.app/Contents/Resources/   # public-domain Chicago revival for the iPod LCD
 id=$(security find-identity -p codesigning | awk '/"Crate Local Signing"/ {print $2; exit}')
-codesign --force --sign "${id:--}" --identifier nl.jaccogroen.crate build/Crate.app
+codesign --force --sign "${id:--}" --identifier nl.jrvgr.crate build/Crate.app
 echo built build/Crate.app

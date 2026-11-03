@@ -110,7 +110,9 @@ struct IPodInfo: Codable {
     }
 
     static func find() -> IPodInfo? {
-        let vols = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: [.skipHiddenVolumes]) ?? []
+        // network shares are skipped: an iPod is a local disk, and a sleeping share can take seconds to answer
+        let vols = (FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeIsLocalKey], options: [.skipHiddenVolumes]) ?? [])
+            .filter { (try? $0.resourceValues(forKeys: [.volumeIsLocalKey]).volumeIsLocal) != false }
         for v in vols where FileManager.default.fileExists(atPath: v.appendingPathComponent("iPod_Control/Device/SysInfo").path) {
             var info = IPodInfo(mount: v)
             let sys = (try? String(contentsOf: info.control.appendingPathComponent("Device/SysInfo"), encoding: .utf8)) ?? ""
@@ -253,6 +255,11 @@ enum Syncer {
             try fm.copyItem(at: url, to: bak)
         }
         _ = try fm.replaceItemAt(url, withItemAt: tmp)
+    }
+
+    /// write, off the main thread (the iPod's disk is slow; the window froze at every write during a sync).
+    static func save(_ db: ITunesDB, to ipod: IPodInfo) async throws {
+        try await Task.detached { try write(db, to: ipod) }.value
     }
 
     static func eject(_ ipod: IPodInfo) throws {

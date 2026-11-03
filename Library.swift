@@ -1,7 +1,7 @@
 import Foundation
 import AVFoundation
 
-// The music on the shares: OwnTone's local files plus extra folders scanned directly.
+// The music on the shares: OwnTone's or a Subsonic server's files plus extra folders scanned directly.
 
 struct LibTrack: Identifiable, Hashable, Codable {
     var id: String { path }
@@ -287,13 +287,14 @@ enum SpotifyLibrary {
     }
 }
 
-/// A playlist in OwnTone's library (mostly Spotify playlists). Its tracks go to the iPod
+/// A playlist in OwnTone's library (mostly Spotify playlists), Spotify's or a Subsonic server's. Its tracks go to the iPod
 /// as far as there are files for them.
 struct OTPlaylist: Identifiable, Hashable {
     var id: Int
     var name, uri: String
     var count: Int
     var spotifyID: String? = nil      // read from Spotify itself (the Spotify plugin) instead of OwnTone
+    var subsonicID: String? = nil     // a Subsonic server's (the Subsonic plugin)
     var artwork = ""
     var path = ""                     // OwnTone's: the .m3u it reads the playlist from
 }
@@ -370,12 +371,17 @@ enum Importer {
     /// Returns the copied tracks (at their new paths) and how many files were already there.
     /// `rename` names files "01 Title.ext" from their tags (for the iPod's own "ABCD.mp3" names) and
     /// skips copying covers from the source folder.
-    static func run(_ urls: [URL], into root: String, rename: Bool = false) async throws -> (tracks: [LibTrack], skipped: Int) {
+    /// `move`: the files are Crate's to take (finished downloads): on the same volume they're moved, an instant
+    /// rename on the server instead of a second transfer over the network.
+    static func run(_ urls: [URL], into root: String, rename: Bool = false, move: Bool = false) async throws -> (tracks: [LibTrack], skipped: Int) {
         let fm = FileManager.default
         guard fm.fileExists(atPath: root) || (try? fm.createDirectory(atPath: root, withIntermediateDirectories: true)) != nil else {
             throw SyncError.missingSource(root)
         }
         var out: [LibTrack] = [], skipped = 0, coversDone = Set<String>()
+        let volume = { (p: String) in try? URL(fileURLWithPath: p).resourceValues(forKeys: [.volumeIdentifierKey]).volumeIdentifier as? NSObject }
+        let rootVolume = volume(root)
+        var emptied = Set<String>()
         for f in audioFiles(urls) {
             let t = await LibraryLoader.track(f.path, relative: f.relative)
             let dir = root + "/" + safe(t.artist) + "/" + safe(t.album)
@@ -384,15 +390,27 @@ enum Importer {
             let dst = dir + "/" + (rename ? (t.trackNumber > 0 ? String(format: "%02d ", t.trackNumber) : "") + safe(t.title) + "." + ext
                                           : (f.path as NSString).lastPathComponent)
             if fm.fileExists(atPath: dst) { skipped += 1; continue }
-            try await Task.detached { try fm.copyItem(atPath: f.path, toPath: dst) }.value
+            let src = f.path
+            let moving = move && rootVolume != nil && volume(src) == rootVolume
+            try await Task.detached { moving ? try fm.moveItem(atPath: src, toPath: dst) : try fm.copyItem(atPath: src, toPath: dst) }.value
             var copied = t; copied.path = dst
             out.append(copied)
             let srcDir = (f.path as NSString).deletingLastPathComponent
+            if moving { emptied.insert(srcDir) }
             if !rename, coversDone.insert(srcDir).inserted {
                 for n in (try? fm.contentsOfDirectory(atPath: srcDir)) ?? []
                 where images.contains((n as NSString).pathExtension.lowercased()) && !fm.fileExists(atPath: dir + "/" + n) {
-                    try? fm.copyItem(atPath: srcDir + "/" + n, toPath: dir + "/" + n)
+                    if moving { try? fm.moveItem(atPath: srcDir + "/" + n, toPath: dir + "/" + n) }
+                    else { try? fm.copyItem(atPath: srcDir + "/" + n, toPath: dir + "/" + n) }
                 }
+            }
+        }
+        // download folders left with nothing but leftovers (.nfo, playlists, hidden files) go too
+        for d in emptied {
+            let rest = (try? fm.contentsOfDirectory(atPath: d)) ?? []
+            if !rest.contains(where: { LibraryLoader.audioExts.contains(($0 as NSString).pathExtension.lowercased()) || images.contains(($0 as NSString).pathExtension.lowercased()) }),
+               !rest.contains(where: { var dir: ObjCBool = false; return fm.fileExists(atPath: d + "/" + $0, isDirectory: &dir) && dir.boolValue }) {
+                try? fm.removeItem(atPath: d)
             }
         }
         return (out, skipped)

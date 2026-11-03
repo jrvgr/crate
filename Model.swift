@@ -10,7 +10,7 @@ enum Pane: Hashable {
 }
 
 /// Pages pushed on top of a pane.
-enum Route: Hashable { case album(Album), artist(String), spotifyAlbum(SpotifyAlbum) }
+enum Route: Hashable { case album(Album), artist(String), spotifyAlbum(SpotifyAlbum), amAlbum(AMAlbum) }
 
 /// An album artist with their albums (compilations under "Various Artists").
 struct Artist: Identifiable, Hashable {
@@ -20,7 +20,7 @@ struct Artist: Identifiable, Hashable {
     var trackCount: Int { albums.map(\.tracks.count).reduce(0, +) }
 }
 
-enum AlbumFilter: String, CaseIterable { case all = "All", onIPod = "On iPod", notOnIPod = "Not on iPod" }
+enum AlbumFilter: String, CaseIterable { case all = "All", onIPod = "On iPod", notOnIPod = "Not on iPod", podOnly = "Only on iPod" }
 enum AlbumSort: String, CaseIterable { case artist = "Artist", title = "Title", year = "Year", added = "Recently Added" }
 
 /// Something Crate is busy with, shown in the activity bar and the Activity popover.
@@ -70,17 +70,23 @@ final class Model: ObservableObject {
     // core settings
     @AppStorage("ownToneURL") var ownToneURL = "http://host:3689"
     @AppStorage("discogsToken") var discogsToken = ""
-    @AppStorage("extraFolders") var foldersText = "/path/to/music"
-    @AppStorage("importFolder") var importFolder = "/path/to/music/Added"
+    @AppStorage("extraFolders") var foldersText = ""
+    @AppStorage("importFolder") var importFolder = ""          // "": the music folder (importRoot)
 
     @Published var plugins: Set<PluginID> = PluginStore.load() { didSet { PluginStore.save(plugins) } }
     let slsk = Slskd()
     let spotifyAPI = SpotifyAPI()
     let player = Player()
     let yt = YouTube()
+    let subsonic = Subsonic()
+    let ma = MusicAssistant()
 
     // library
-    @Published var libTracks: [LibTrack] = [] { didSet { genreCache = nil } }
+    @Published var libTracks: [LibTrack] = [] { didSet { genreCache = nil; libraryVersion += 1 } }
+    /// Goes up whenever the songs change, and `syncVersion` whenever what's on (or queued for) the iPod does:
+    /// views that filter the whole library keep their result until one of them moves.
+    private(set) var libraryVersion = 0
+    private(set) var syncVersion = 0
     var genreCache: [String]?                                   // topGenres, until the songs change
     /// Library key → iPod key, the reverse of `aliases`, for podKey (smart playlist rules call it per song).
     var podKeyByLib: [String: String] = [:]
@@ -113,14 +119,14 @@ final class Model: ObservableObject {
         Dictionary((db?.tracks ?? []).map { ($0.key, $0.stat) }, uniquingKeysWith: { a, b in a.plays >= b.plays ? a : b })
     }
     @Published var smartPlaylists: [SmartPlaylist] = SmartStore.load()
-    @Published var cratePlaylists: [CratePlaylist] = Store.load("playlists.json", []) { didSet { Store.save("playlists.json", cratePlaylists) } }
-    @Published var podEdits: [UInt64: PodPlaylistEdit] = Store.load("pod-playlist-edits.json", [:]) { didSet { Store.save("pod-playlist-edits.json", podEdits) } }
+    @Published var cratePlaylists: [CratePlaylist] = Store.load("playlists.json", []) { didSet { Store.save("playlists.json", cratePlaylists); invalidateSyncCache() } }
+    @Published var podEdits: [UInt64: PodPlaylistEdit] = Store.load("pod-playlist-edits.json", [:]) { didSet { Store.save("pod-playlist-edits.json", podEdits); invalidateSyncCache() } }
     @Published var renaming: PlaylistRef?
     @Published var renameText = ""
     @Published var confirmDeletePlaylist: PlaylistRef?
-    @Published var smartPending = 0
+    @Published var smartPending = 0 { didSet { invalidateSyncCache() } }
     @Published var editSmart: SmartPlaylist?
-    @Published var podSettings = PodSettings() { didSet { hiddenCache = nil; if let i = ipod, podSettings != oldValue { PodSettings.save(podSettings, serial: i.key) } } }
+    @Published var podSettings = PodSettings() { didSet { hiddenCache = nil; invalidateSyncCache(); if let i = ipod, podSettings != oldValue { PodSettings.save(podSettings, serial: i.key) } } }
     @Published var connected = false
     /// Set when the iPod's database is there but can't be read (a disk or filesystem error). Crate
     /// then shows the last copy it read and won't sync: writing would replace the real database.
@@ -130,7 +136,7 @@ final class Model: ObservableObject {
     @Published var toRemove: Set<Album.ID> = [] { didSet { savePending() } }
     @Published var songsToAdd: Set<String> = [] { didSet { savePending() } }       // library file paths
     @Published var songsToRemove: Set<String> = [] { didSet { savePending() } }    // track keys on the iPod
-    @Published var fileSizes: [String: Int64] = [:]
+    @Published var fileSizes: [String: Int64] = [:] { didSet { invalidateSyncCache() } }
     @Published var aliases: [String: String] = Store.load("matches.json", [:]) { didSet { refreshPod() } }     // iPod key → library key
     @Published var retags: [String: PodRetag] = Store.load("retags.json", [:]) { didSet { Store.save("retags.json", retags); refreshPod() } }     // iPod key → new tags
     @Published var hides: [String: Bool] = Store.load("hides.json", [:]) { didSet { Store.save("hides.json", hides); hiddenCache = nil } }     // iPod key → your hide/show choice, over the hidden-playlist rule
@@ -153,12 +159,14 @@ final class Model: ObservableObject {
     @Published var brokenFiles: [String: String] = [:]
     @Published var checkingFiles = false
     @Published var showMatch = false
+    @Published var links: [String: String] = Store.load("links.json", [:]) { didSet { Store.save("links.json", links) } }     // streamed song (uri and key) → library file path
+    @Published var linking: OTTrack?           // the streamed song the Link to Local Song sheet is open for
     @Published var coverDrop: Album.ID?        // the cover an image is being dragged over
     @Published var playlistsToAdd: Set<OTPlaylist.ID> = [] { didSet { savePending() } }
     @Published var playlistsToRemove: Set<PodPlaylist.ID> = [] { didSet { savePending() } }
     @Published var pendingName: String? { didSet { savePending() } }
     private var restoring = false
-    @Published var onTheGo: [OnTheGo] = []
+    @Published var onTheGo: [OnTheGo] = [] { didSet { invalidateSyncCache() } }
     @Published var orphans: [URL]?
     @Published var podCheck: PodCheck?
     @Published var history: [PodSample] = []
@@ -179,6 +187,7 @@ final class Model: ObservableObject {
     @Published var search = ""
     @Published var albumFilter = AlbumFilter.all
     @Published var albumSort = AlbumSort.artist
+    @AppStorage("artistView") var artistView = "grid"        // "grid" or "list"
     @AppStorage("albumView") var albumView = "grid"          // "grid", "flow" or "list"
     @AppStorage("albumsByArtist") var albumsByArtist = false  // the library grid in a section per artist
     @Published var lookupAlbum: Album?
@@ -222,6 +231,7 @@ final class Model: ObservableObject {
 
     private var observers: [NSObjectProtocol] = []
     private var index: [String: (album: Album, track: LibTrack)] = [:]
+    private var pathIndex: [String: (album: Album, track: LibTrack)] = [:]
 
     static weak var shared: Model?
 
@@ -236,6 +246,14 @@ final class Model: ObservableObject {
         // also the disks that never mount, like an iPod whose volume has errors
         diskWatch = DiskWatch { [weak self] in Task { @MainActor in self?.diskChanged() } }
         slsk.onFinished = { [weak self] job, folder in Task { await self?.importDownloaded(job, folder: folder) } }
+        player.stream = { [weak self] t in self.flatMap { $0.on(.subsonic) ? $0.subsonic.streamURL(forPath: t.path) : nil } }
+        player.remote = { [weak self] in
+            guard let self, self.on(.musicAssistant), self.player.output.hasPrefix("ma:") else { return nil }
+            return (self.ma, String(self.player.output.dropFirst(3)))
+        }
+        player.remoteURI = { [weak self] t in MusicAssistant.uri(subsonicID: self?.subsonic.song(for: t)?.id, uri: t.uri) }
+        player.onRemoteError = { [weak self] in self?.notify($0) }
+        if on(.musicAssistant) { Task { try? await ma.loadPlayers() } }
         yt.onFiles = { [weak self] files, id in
             guard let self, let j = self.yt.jobs.first(where: { $0.id == id }) else { return }
             await self.importFiles(files, toIPod: false, title: "Importing \(j.title)")
@@ -250,8 +268,29 @@ final class Model: ObservableObject {
         if enabled { plugins.insert(p); if let r = p.requires { plugins.insert(r) } }
         else { plugins.remove(p) }
 
-        if case .playlist = pane, !on(.ownTone) { pane = .albums }
+        if case .playlist = pane, !on(.ownTone), !on(.subsonic) { pane = .albums }
         Task { await reload() }
+    }
+
+    /// Where imports go: the folder picked in Settings, else the Subsonic server's music folder, else the first music
+    /// folder, else ~/Music/Crate, so Crate works on its own with no server or share set up.
+    var importRoot: String {
+        if !importFolder.isEmpty { return importFolder }
+        if on(.subsonic), !subsonic.musicFolder.isEmpty { return subsonic.musicFolder }
+        return folders.first ?? Self.localMusic
+    }
+    nonisolated static var localMusic: String {
+        FileManager.default.urls(for: .musicDirectory, in: .userDomainMask)[0].appendingPathComponent("Crate").path
+    }
+
+    /// The folders library files live in (for the organiser, the trash and telling dropped library files apart).
+    /// With OwnTone the import folder sat inside its music folder, so that counts too.
+    var libraryRoots: [String] {
+        var r = folders + [importRoot]
+        if on(.subsonic) { r.append(subsonic.musicFolder) }
+        if on(.ownTone) { r.append((importRoot as NSString).deletingLastPathComponent) }
+        var seen = Set<String>()
+        return r.filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
     var folders: [String] {
@@ -294,9 +333,13 @@ final class Model: ObservableObject {
     // for these per tile, which made every click slow).
     private(set) var podKeys: Set<String> = []
     private(set) var podAlbums: [Album] = []
+    private(set) var podKeyByID: [UInt32: String] = [:]      // the database's track id → key
     private(set) var allAlbums: [Album] = []
     private(set) var artists: [Artist] = []
     private var libraryIDs: Set<Album.ID> = []
+    private(set) var albumByID: [Album.ID: Album] = [:]
+    /// The library album a song is on.
+    func album(of t: LibTrack) -> Album? { albumByID[t.album.lowercased()] }
 
     private func refreshPod() {
         hiddenCache = nil
@@ -306,6 +349,7 @@ final class Model: ObservableObject {
             return t
         }
         podKeys = Set(tracks.map { aliases[$0.key] ?? $0.key })
+        podKeyByID = Dictionary((db?.tracks ?? []).map { ($0.id, $0.key) }, uniquingKeysWith: { a, _ in a })
         podKeyByLib = Dictionary(aliases.map { ($0.value, $0.key) }, uniquingKeysWith: { a, _ in a })
         podAlbums = LibraryLoader.albums(tracks.map {
             LibTrack(title: $0.title, artist: $0.artist, album: $0.album, genre: $0.genre, trackNumber: $0.trackNumber,
@@ -317,6 +361,7 @@ final class Model: ObservableObject {
     private func refreshDerived() {
         hiddenCache = nil
         libraryIDs = Set(albums.map(\.id))
+        albumByID = Dictionary(albums.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         /// Library albums plus albums that are only on the iPod (so they can be opened and removed).
         allAlbums = (albums + podAlbums.filter { !libraryIDs.contains($0.id) })
             .sorted { ($0.artist.lowercased(), $0.title.lowercased()) < ($1.artist.lowercased(), $1.title.lowercased()) }
@@ -345,20 +390,23 @@ final class Model: ObservableObject {
         var seen = Set<String>()
         libTracks = libTracks.filter { seen.insert($0.path).inserted }
         albums = LibraryLoader.albums(libTracks)
-        index = [:]
+        index = [:]; pathIndex = [:]
         for a in albums { for t in a.tracks {
-            index[t.key] = (a, t)
+            index[t.key] = (a, t); pathIndex[t.path] = (a, t)
             let k = "~" + Self.loose(t.album) + "|" + Self.loose(t.title)
             if index[k] == nil { index[k] = (a, t) }
         } }
     }
 
-    /// The file for a playlist track: same album and title, or the same once punctuation is ignored.
+    /// The file for a playlist track: the one you linked it to, same album and title, or the same once punctuation is ignored.
     func libraryTrack(key k: String) -> (album: Album, track: LibTrack)? { index[k] }
 
     func libraryTrack(for t: OTTrack) -> (album: Album, track: LibTrack)? {
-        index[t.key] ?? index["~" + Self.loose(t.album) + "|" + Self.loose(t.title)]
+        if let p = linkedPath(t), let m = pathIndex[p] { return m }
+        return index[t.key] ?? index["~" + Self.loose(t.album) + "|" + Self.loose(t.title)]
     }
+
+    func libraryTrack(path p: String) -> (album: Album, track: LibTrack)? { pathIndex[p] }
 
     enum Availability { case onIPod, file, streamOnly }
     func availability(_ t: OTTrack) -> Availability {
@@ -379,6 +427,7 @@ final class Model: ObservableObject {
     func tracks(for p: OTPlaylist) async -> [OTTrack] {
         if let t = playlistTracks[p.id] { return t }
         let t = p.spotifyID != nil ? ((try? await spotifyAPI.tracks(p.spotifyID!)) ?? [])
+            : p.subsonicID != nil ? ((try? await subsonic.tracks(p.subsonicID!)) ?? [])
             : ((try? await OwnTonePlaylists.tracks(p.id, base: ownToneURL)) ?? [])
         playlistTracks[p.id] = t
         return t
@@ -388,7 +437,7 @@ final class Model: ObservableObject {
         guard !loading else { return }
         loading = true; defer { loading = false }
         let job = startJob("Loading library", icon: "square.stack")
-        loadIPod()
+        await loadIPodNow()
         var tracks: [LibTrack] = []
         libraryError = nil
         if on(.ownTone) {
@@ -396,15 +445,32 @@ final class Model: ObservableObject {
             do { tracks = try await LibraryLoader.fromOwnTone(ownToneURL) }
             catch { libraryError = "OwnTone unreachable: \(error.localizedDescription)" }
         }
-        // the import folder is scanned directly too, so new files show up before OwnTone has indexed them
-        for f in folders + [importFolder] where !f.isEmpty {
+        var serverFailed = false
+        if on(.subsonic) {
+            updateJob(job) { $0.detail = "Reading Subsonic" }
+            do {
+                let known = Set(tracks.map(\.path))      // OwnTone's copy of a file keeps its uri (for playing there)
+                tracks += try await subsonic.library().filter { !known.contains($0.path) }
+                subsonic.error = nil
+            } catch { subsonic.error = error.localizedDescription; serverFailed = true }
+        }
+        // the import folder is scanned directly too, so new files show up before OwnTone has indexed them;
+        // when OwnTone doesn't answer, its whole music folder (the import folder's parent) is, so nothing goes missing
+        let ownToneRoot = on(.ownTone) && libraryError != nil ? [(importRoot as NSString).deletingLastPathComponent] : []
+        let subsonicRoot = serverFailed ? [subsonic.musicFolder] : []
+        let fromServer = tracks.count
+        for f in folders + [importRoot] + ownToneRoot + subsonicRoot where !f.isEmpty {
             updateJob(job) { $0.detail = "Scanning \((f as NSString).lastPathComponent)" }
             tracks += await LibraryLoader.scan(f, skipping: Set(tracks.map(\.path)))
         }
+        // a server song only in the download cache that also turned up as a file here is the same song: the file wins
+        let scanned = Set(tracks[fromServer...].map(\.key))
+        tracks.removeAll { scanned.contains($0.key) && subsonic.needsDownload($0.path) }
         libTracks = tracks
         rebuild()
         playlistTracks = [:]
         var lists: [OTPlaylist] = on(.ownTone) ? ((try? await OwnTonePlaylists.all(ownToneURL)) ?? []) : []
+        if on(.subsonic), !serverFailed { lists += (try? await subsonic.playlists()) ?? [] }
         spotify = []
         if on(.spotify) {
             if spotifyAPI.direct {
@@ -432,27 +498,56 @@ final class Model: ObservableObject {
     }
 
     private func loadArtwork() async {
-        // all file reading and image decoding happens off the main thread (the files live on shares)
+        // all file reading and image decoding happens off the main thread (the files live on shares). Covers are
+        // handed to the views in batches: one assignment per cover redrew everything thousands of times
+        var batch = ArtBatch()
         for ar in artists where artistArt[ar.id] == nil {
-            if let img = await Task.detached(operation: { LibraryLoader.artistImage(ar).flatMap { NSImage(data: $0) } }).value { artistArt[ar.id] = img }
+            if let img = await Task.detached(operation: { LibraryLoader.artistImage(ar).flatMap { NSImage(data: $0) } }).value {
+                batch.artists[ar.id] = img
+                if batch.due { flush(&batch) }
+            }
         }
+        flush(&batch)
         // cached copies first (quick), then whatever is still missing from the files themselves
         let cached = await Task.detached { [albums] in
             albums.compactMap { a in ArtCache.image("album:" + a.folder).map { (a.id, $0) } }
         }.value
-        for (id, img) in cached where artwork[id] == nil { artwork[id] = img }
+        artwork.merge(cached.filter { artwork[$0.0] == nil }, uniquingKeysWith: { a, _ in a })
         for a in albums where artwork[a.id] == nil {
-            if let d = await LibraryLoader.artwork(for: a),
-               let img = await Task.detached(operation: { ArtCache.store(d, for: "album:" + a.folder) ?? NSImage(data: d) }).value { artwork[a.id] = img }
+            var data = await LibraryLoader.artwork(for: a)
+            let first = a.tracks[0].path
+            if data == nil, subsonic.songs[first] != nil, !(await Task.detached { FileManager.default.fileExists(atPath: first) }.value) {
+                data = await subsonic.cover(forPath: first)      // a server album not downloaded yet (checked off the main thread: the share)
+            }
+            if let d = data,
+               let img = await Task.detached(operation: { ArtCache.store(d, for: "album:" + a.folder) ?? NSImage(data: d) }).value {
+                batch.albums[a.id] = img
+                if batch.due { flush(&batch) }
+            }
         }
+        flush(&batch)
         await loadPodArtwork()
+    }
+
+    /// Covers found but not shown yet: shown every 40 or half a second, whichever comes first.
+    struct ArtBatch {
+        var albums: [Album.ID: NSImage] = [:], artists: [Artist.ID: NSImage] = [:]
+        var since = Date()
+        var due: Bool { albums.count + artists.count >= 40 || Date().timeIntervalSince(since) > 0.5 }
+    }
+    private func flush(_ b: inout ArtBatch) {
+        if !b.albums.isEmpty { artwork.merge(b.albums, uniquingKeysWith: { _, new in new }) }
+        if !b.artists.isEmpty { artistArt.merge(b.artists, uniquingKeysWith: { _, new in new }) }
+        b = ArtBatch()
     }
 
     /// Covers for albums that only exist on the iPod: the art in its own files, else the iTunes catalogue.
     func loadPodArtwork() async {
+        var batch = ArtBatch()
+        defer { flush(&batch) }
         for a in podAlbums where isPodOnly(a) && artwork[a.id] == nil {
             let key = "pod:" + a.id
-            if let img = await Task.detached(operation: { ArtCache.image(key) }).value { artwork[a.id] = img; continue }
+            if let img = await Task.detached(operation: { ArtCache.image(key) }).value { batch.albums[a.id] = img; if batch.due { flush(&batch) }; continue }
             var data: Data?
             if let ipod, connected, let first = a.tracks.first {
                 var onPod = a; onPod.tracks = [first]
@@ -463,7 +558,7 @@ final class Model: ObservableObject {
                 let am = AMAlbum(title: a.title, artist: a.artist, tracks: [])
                 if let u = await AppleMusic.artworkURL(am), let (d, _) = try? await URLSession.shared.data(from: u) { data = d }
             }
-            if let d = data, let img = await Task.detached(operation: { ArtCache.store(d, for: key) }).value { artwork[a.id] = img }
+            if let d = data, let img = await Task.detached(operation: { ArtCache.store(d, for: key) }).value { batch.albums[a.id] = img; if batch.due { flush(&batch) } }
         }
     }
 
@@ -533,7 +628,7 @@ final class Model: ObservableObject {
                 let size = (try? FileManager.default.attributesOfItem(atPath: dst.path)[.size] as? Int) ?? 0
                 db.replaceFile(i, size: size, kbps: info.kbps, ms: info.ms)
                 rep.replaced += 1
-                if rep.replaced % 10 == 0 { try? Syncer.write(db, to: ipod) }    // the records follow the replaced files
+                if rep.replaced % 10 == 0 { try? await Syncer.save(db, to: ipod) }    // the records follow the replaced files
             } catch { converted[n] = nil; rep.failures.append("\(t.title): still lossless, \(error.localizedDescription)") }
             syncDone = n + 1
         }
@@ -541,7 +636,7 @@ final class Model: ObservableObject {
     }
 
     /// Reads these files' tags again after they were edited (the album may have a new name now).
-    func refreshFiles(_ paths: [String], cover: Data? = nil, oldID: Album.ID? = nil) async {
+    func refreshFiles(_ paths: [String], cover: Data? = nil, oldID: Album.ID? = nil, rescan: Bool = true) async {
         var fresh: [String: LibTrack] = [:]
         for p in paths {
             let parts = p.split(separator: "/").suffix(3).joined(separator: "/")
@@ -560,7 +655,7 @@ final class Model: ObservableObject {
             if let d = cover, let img = ArtCache.store(d, for: "album:" + folder) ?? NSImage(data: d) { artwork[newID] = img }
             else if artwork[newID] == nil { artwork[newID] = oldArt }
         }
-        if on(.ownTone) { await ownToneRescan(ownToneURL) }
+        if rescan { await rescanServers() }
     }
 
     /// A song whose tags changed: its copy on the iPod gets the same title/album/artist at the next sync,
@@ -577,37 +672,74 @@ final class Model: ObservableObject {
     }
 
     /// Files the organiser moved: same songs, new paths (the iPod's copies are matched on tags, not paths).
-    func moved(_ moves: [FileMove]) async {
+    func moved(_ moves: [FileMove], rescan: Bool = true) async {
         let to = Dictionary(moves.map { ($0.from, $0.to) }, uniquingKeysWith: { a, _ in a })
         libTracks = libTracks.map { t in var n = t; if let p = to[t.path] { n.path = p }; return n }
         let art = artwork
         rebuild()
         artwork = art
-        if on(.ownTone) { await ownToneRescan(ownToneURL) }
+        if rescan { await rescanServers() }
     }
 
     /// Adds freshly imported files without rescanning everything.
     func addToLibrary(_ tracks: [LibTrack]) async {
         libTracks += tracks
         rebuild()
-        if on(.ownTone) { await ownToneRescan(ownToneURL) }
+        await rescanServers()
         await loadArtwork()
     }
 
-    /// Artwork paths are relative to OwnTone, Spotify's are full URLs.
+    /// The plays in the iPod's Play Counts (indexed like `db.tracks`) as library paths and times, for scrobbling.
+    /// Play Counts keeps only the last play's time (1904-based, local); earlier plays go back a song's length each.
+    private func scrobbles(_ entries: [PlayCounts.Entry], _ db: ITunesDB) -> [(track: LibTrack, time: Date)] {
+        guard entries.count == db.tracks.count else { return [] }
+        return zip(entries, db.tracks).flatMap { e, t -> [(track: LibTrack, time: Date)] in
+            guard e.plays > 0, e.lastPlayed > 0, let lib = libraryTrack(key: aliases[t.key] ?? t.key)?.track else { return [] }
+            let last = Date(timeIntervalSince1970: Double(e.lastPlayed - 2_082_844_800 - TimeZone.current.secondsFromGMT()))
+            return (0..<e.plays).reversed().map { (lib, last.addingTimeInterval(-Double($0 * max(t.lengthMs, 1000)) / 1000)) }
+        }
+    }
+
+    /// Asks OwnTone and the Subsonic server (the ones switched on) to rescan, after files changed in their folder.
+    func rescanServers() async {
+        if on(.ownTone) { await ownToneRescan(ownToneURL) }
+        if on(.subsonic) { await subsonic.startScan() }
+    }
+
+    /// Artwork paths are relative to OwnTone, Spotify's and Subsonic's are full URLs.
     func artURL(_ path: String) -> URL? {
         if path.hasPrefix("http") { return URL(string: path) }
         guard !path.isEmpty else { return nil }
         return URL(string: ownToneURL + (path.hasPrefix("/") ? "" : "/") + path.replacingOccurrences(of: "./", with: ""))
     }
 
-    /// Plays on OwnTone when it's on (it can play Spotify too), otherwise opens the Spotify app.
+    /// Plays on the picked Music Assistant player or OwnTone (both play Spotify too), otherwise opens the Spotify app.
     func playURIs(_ uris: [String]) async {
+        if await player.playRemote(uris: uris) { return }
         if on(.ownTone) { await OwnTonePlaylists.play(uris, base: ownToneURL) }
         else if let first = uris.first, first.hasPrefix("spotify:") { SpotifyAPI.open(first) }
     }
 
-    /// Plays on the chosen output: this Mac, or OwnTone's speakers.
+    /// Where Play sends Spotify albums and server playlists: a speaker, or the Spotify app (nil: nowhere).
+    var remoteName: String? {
+        if player.remote() != nil { return ma.name(String(player.output.dropFirst(3))) }
+        return on(.ownTone) ? "OwnTone" : nil
+    }
+    /// What Play sends for a streamed sidebar playlist: Spotify's URI or OwnTone's (Subsonic playlists play as songs, see playSongs).
+    func playURI(_ p: OTPlaylist) -> String? {
+        let ma = player.remote() != nil
+        if p.spotifyID != nil { return ma && p.spotifyID == "liked" ? nil : p.uri }
+        return on(.ownTone) ? p.uri : nil
+    }
+    /// Plays a playlist's songs that are in the library, on the chosen output (this Mac or a Music Assistant player).
+    func playSongs(of p: OTPlaylist) async {
+        let ts = await tracks(for: p).compactMap { libraryTrack(for: $0)?.track }
+        if ts.isEmpty { notify("None of \(p.name)'s songs are in the library"); return }
+        player.play(ts)
+    }
+    var playURILabel: String { remoteName.map { "Play on \($0)" } ?? "Open in Spotify" }
+
+    /// Plays on the chosen output: this Mac, a Music Assistant player or OwnTone's speakers.
     func play(_ a: Album, from start: Int = 0) async {
         if player.output == "owntone", on(.ownTone) {
             let uris = a.tracks.dropFirst(start).map(\.uri).filter { !$0.isEmpty }
@@ -631,7 +763,19 @@ final class Model: ObservableObject {
 
     var podName: String { pendingName ?? db?.name ?? "iPod" }
 
+    /// The sidebar, toolbar, menu bar and iPod page all show these several times per redraw, and covers loading
+    /// redraw once per album: worked out once and kept until something they depend on changes (hiddenCache's
+    /// inputs, the queue, playlists, smart playlists, file sizes).
     var pendingCount: Int {
+        if let c = syncCache.pending { return c }
+        let n = pendingCountNow
+        syncCache.pending = n
+        return n
+    }
+    var syncCache: (pending: Int?, bytes: Int64?) = (nil, nil)
+    func invalidateSyncCache() { syncCache = (nil, nil); syncVersion += 1 }
+
+    private var pendingCountNow: Int {
         toAdd.count + toRemove.count + songsToAdd.count + songsToRemove.count + playlistsToAdd.count + playlistsToRemove.count
             + podSavedLists.count + (pendingName == nil ? 0 : 1) + smartPending + retags.count + hidePending
             + cratePlaylists.filter(crateNeedsSync).count + podEditsPending
@@ -647,7 +791,7 @@ final class Model: ObservableObject {
     enum DBRead { case ok(ITunesDB), missing, failed(String) }
 
     /// Reads the iPod's database, telling "not there" (a new iPod) apart from "can't be read".
-    static func readDB(_ url: URL) -> DBRead {
+    nonisolated static func readDB(_ url: URL) -> DBRead {
         do {
             let d = try Data(contentsOf: url)
             do { return .ok(try ITunesDB.read(d)) } catch { return .failed("the database is damaged") }
@@ -660,31 +804,61 @@ final class Model: ObservableObject {
     }
 
     /// Finds the iPod; when it's unplugged, the last one seen is shown from the cache (read only).
-    func loadIPod() {
+    /// Looks for the iPod (and reads it) in the background; see loadIPodNow.
+    func loadIPod() { Task { await loadIPodNow() } }
+
+    /// What finding and reading the iPod (or the copy from last time) turned up; worked out off the main thread.
+    private enum PodLoad {
+        case connected(IPodInfo, DBRead, plays: [PlayCounts.Entry]?, cached: ITunesDB?, otg: [OnTheGo], history: [PodSample])
+        case cached(PodCache, ITunesDB?, history: [PodSample])
+        case none
+    }
+    private var podLoads = 0
+
+    /// Finds the iPod, reads its database, Play Counts and On-The-Go lists off the main thread (USB disk,
+    /// mounted volumes), then shows them. When several run at once (mounts come in bursts) the last one wins.
+    func loadIPodNow() async {
+        guard !syncing else { return }      // a sync reads the iPod itself and loads it again when done
+        podLoads += 1
+        let mine = podLoads
+        let found = await Task.detached { () -> PodLoad in
+            if let i = IPodInfo.find() {
+                DiskRepair.keepSpotlightOff(i.mount)
+                let read = Model.readDB(i.dbURL)
+                var plays: [PlayCounts.Entry]?, cached: ITunesDB?, parsed: ITunesDB
+                switch read {
+                case .ok(let d): plays = (try? Data(contentsOf: PlayCounts.url(i))).flatMap(PlayCounts.parse); PodCache.saveDB(from: i); parsed = d
+                case .missing: parsed = .empty(name: i.mount.lastPathComponent)      // a fresh iPod: start a database
+                case .failed: cached = PodCache.loadDB(); parsed = cached ?? .empty(name: i.mount.lastPathComponent)
+                }
+                PodHistory.record(i, db: parsed)
+                return .connected(i, read, plays: plays, cached: cached, otg: OnTheGo.load(i, db: parsed), history: PodHistory.load(i.key))
+            }
+            if let c = PodCache.load() { return .cached(c, PodCache.loadDB(), history: PodHistory.load(c.info.key)) }
+            return .none
+        }.value
+        guard mine == podLoads else { return }
         let wasConnected = connected, had = ipod?.key
-        if let i = IPodInfo.find() {
+        switch found {
+        case let .connected(i, read, plays, cached, otg, hist):
             ipod = i; connected = true; lastSeen = nil
             podReadError = nil
-            DiskRepair.keepSpotlightOff(i.mount)
-            switch Self.readDB(i.dbURL) {
-            case .ok(let parsed):
-                unmergedPlays = (try? Data(contentsOf: PlayCounts.url(i))).flatMap(PlayCounts.parse)
-                db = parsed; PodCache.saveDB(from: i)
-            case .missing: db = .empty(name: i.mount.lastPathComponent)      // a fresh iPod: start a database
+            switch read {
+            case .ok(let parsed): unmergedPlays = plays; db = parsed
+            case .missing: db = .empty(name: i.mount.lastPathComponent)
             case .failed(let why):
                 podReadError = why
-                db = PodCache.loadDB() ?? .empty(name: i.mount.lastPathComponent)
+                db = cached ?? .empty(name: i.mount.lastPathComponent)
             }
-            onTheGo = OnTheGo.load(i, db: db!)
+            onTheGo = otg
             if !loading { Task { await loadPodArtwork() } }
-            PodHistory.record(i, db: db!)
-            history = PodHistory.load(i.key)
+            history = hist
             refreshSmartPending()
-        } else if let c = PodCache.load() {
+        case let .cached(c, cachedDB, hist):
             ipod = c.info; connected = false; lastSeen = c.seen
-            history = PodHistory.load(c.info.key)
-            db = PodCache.loadDB() ?? db; onTheGo = []; orphans = nil
-        } else {
+            history = hist
+            db = cachedDB ?? db; onTheGo = []; orphans = nil
+        case .none:
             ipod = nil; db = nil; connected = false; onTheGo = []; orphans = nil
             return
         }
@@ -707,6 +881,7 @@ final class Model: ObservableObject {
 
     /// Saves the queue a moment after the last change (clicking through albums shouldn't wait on disk writes).
     private func savePending() {
+        invalidateSyncCache()
         guard !restoring, ipod != nil else { return }
         saveTask?.cancel()
         saveTask = Task { [weak self] in
@@ -924,7 +1099,7 @@ final class Model: ObservableObject {
     /// sync under both names). Kept until the database, the library or a hide choice changes: albums ask per tile.
     var hiddenOnIPod: Set<String> {
         if let c = hiddenCache { return c }
-        let rule = ruleHidden(db?.playlists ?? [])
+        let rule = podRule
         var s = Set<String>()
         for t in db?.tracks ?? [] where wantsHidden(t.key, rule) {
             s.insert(t.key)
@@ -933,7 +1108,15 @@ final class Model: ObservableObject {
         hiddenCache = s
         return s
     }
-    private var hiddenCache: Set<String>?
+    private var hiddenCache: Set<String>? { didSet { if hiddenCache == nil { ruleCache = nil; invalidateSyncCache() } } }
+    /// ruleHidden for the database Crate last read, cleared with hiddenCache.
+    private var ruleCache: Set<String>?
+    private var podRule: Set<String> {
+        if let r = ruleCache { return r }
+        let r = ruleHidden(db?.playlists ?? [])
+        ruleCache = r
+        return r
+    }
 
     /// How many of an album's songs on the iPod are hidden there, of how many on the iPod.
     func hiddenCount(_ a: Album) -> (hidden: Int, onIPod: Int) {
@@ -957,7 +1140,7 @@ final class Model: ObservableObject {
     /// Hide flags and playlist marks the next sync would change.
     var hidePending: Int {
         guard let db else { return 0 }
-        let rule = ruleHidden(db.playlists)
+        let rule = podRule
         return db.tracks.filter { $0.hidden != wantsHidden($0.key, rule) }.count
             + db.playlists.filter { $0.name != podName(forPlaylist: $0.name) }.count
     }
@@ -965,7 +1148,7 @@ final class Model: ObservableObject {
     func songMark(_ t: LibTrack) -> SyncMark {
         if songsToAdd.contains(t.path) { return .adding }
         if songsToRemove.contains(podKey(t.key)) { return .removing }
-        let a = albums.first { $0.id == t.album.lowercased() }
+        let a = album(of: t)
         if podKeys.contains(t.key) { return a.map { toRemove.contains($0.id) } == true ? .removing : .onIPod }
         return a.map { toAdd.contains($0.id) } == true ? .adding : .none
     }
@@ -989,9 +1172,11 @@ final class Model: ObservableObject {
 
     /// Roughly what the queued changes add (positive) or free up on the iPod.
     var queuedBytes: Int64 {
+        if let c = syncCache.bytes { return c }
         let add = addWork(have: podKeys).reduce(Int64(0)) { $0 + podSize($1.1) }
         let keys = removalKeys
         let out = Int64((db?.tracks ?? []).filter { keys.contains($0.key) }.map(\.size).reduce(0, +))
+        syncCache.bytes = add - out
         return add - out
     }
 
@@ -1056,7 +1241,7 @@ final class Model: ObservableObject {
         // Only a database that truly isn't there yet starts from what Crate knows; one that can't be
         // read (I/O error) stops the sync, or an empty database would be written over the real one.
         let current: ITunesDB?
-        switch Self.readDB(ipod.dbURL) {
+        switch await Task.detached(operation: { Model.readDB(ipod.dbURL) }).value {
         case .ok(let d): current = d
         case .missing: current = known.tracks.isEmpty ? known : nil
         case .failed(let why): current = nil; podReadError = why
@@ -1080,8 +1265,10 @@ final class Model: ObservableObject {
         }
         syncPhase = "Preparing"; syncDone = 0; syncTotal = 0
         rep.changedElsewhere = elsewhere
-        if let entries = (try? Data(contentsOf: PlayCounts.url(ipod))).flatMap(PlayCounts.parse), let n = db.mergePlayCounts(entries) {
-            rep.playCounts = n; playCountsMerged = true
+        var plays: [(track: LibTrack, time: Date)] = []      // for the Subsonic server, once they're safely in the database
+        if let entries = await Task.detached(operation: { (try? Data(contentsOf: PlayCounts.url(ipod))).flatMap(PlayCounts.parse) }).value {
+            if on(.subsonic) { plays = scrobbles(entries, db) }
+            if let n = db.mergePlayCounts(entries) { rep.playCounts = n; playCountsMerged = true } else { plays = [] }
         }
         if let n = pendingName, !n.isEmpty { db.name = n }
         // what the iPod saved, read again against this database (its playlists still as the iPod knows them)
@@ -1100,7 +1287,7 @@ final class Model: ObservableObject {
         syncTotal = removing.count; syncDone = 0
         for t in removing {
             syncCurrent = "\(t.artist) – \(t.title)"
-            Syncer.remove(t, from: ipod); rep.removed += 1; syncDone += 1
+            await Task.detached { Syncer.remove(t, from: ipod) }.value; rep.removed += 1; syncDone += 1
         }
         syncCurrent = ""
         db.tracks.removeAll { removeKeys.contains($0.key) }
@@ -1109,7 +1296,7 @@ final class Model: ObservableObject {
         // write now (before the track order changes again), so On-The-Go lists and play counts can't be imported twice
         if !otg.isEmpty || rep.removed > 0 || pendingName != nil || playCountsMerged || !podHides.isEmpty || !podSkips.isEmpty {
             do {
-                try Syncer.write(db, to: ipod)
+                try await Syncer.save(db, to: ipod)
                 otg.forEach { try? FileManager.default.removeItem(at: $0.url) }
                 if !podHides.isEmpty { try? FileManager.default.removeItem(at: PodHides.url(ipod)) }
                 if !podSkips.isEmpty {      // (a file left behind is stale now: the database's stamp moved on)
@@ -1118,6 +1305,11 @@ final class Model: ObservableObject {
                 }
                 if playCountsMerged { try? FileManager.default.removeItem(at: PlayCounts.url(ipod)); unmergedPlays = nil }
             } catch { rep.error = "Writing the database failed: \(error.localizedDescription)"; return }
+            if !plays.isEmpty {
+                syncPhase = "Sending plays to Subsonic"
+                let sent = await subsonic.scrobble(plays)
+                if sent < plays.count { rep.failures.append("Subsonic took \(sent) of \(plays.count) plays") }
+            }
         }
         pendingName = nil; toRemove = []; songsToRemove = []; playlistsToRemove = []
         let renames = retags
@@ -1155,6 +1347,16 @@ final class Model: ObservableObject {
                 if let a = libraryTrack(key: t.key)?.album { work.append((a, t)) }
             }
         }
+        let remote = work.filter { subsonic.needsDownload($0.1.path) }     // server songs this Mac has no file for
+        if !remote.isEmpty {
+            syncPhase = "Downloading from Subsonic"; syncTotal = remote.count; syncDone = 0
+            for (n, (_, t)) in remote.enumerated() {
+                syncCurrent = "\(t.trackArtist.isEmpty ? t.artist : t.trackArtist) – \(t.title)"
+                do { try await subsonic.download(t.path) } catch { rep.failures.append("\(t.title): \(error.localizedDescription)") }
+                syncDone = n + 1
+            }
+            work.removeAll { subsonic.needsDownload($0.1.path) }
+        }
         syncPhase = "Adding songs"; syncTotal = work.count; syncDone = 0
         // Conversions run ahead, several at once on this Mac; the iPod gets one copy at a time, in order.
         let settings = podSettings
@@ -1188,7 +1390,7 @@ final class Model: ObservableObject {
             do {
                 db.tracks.append(try await Syncer.add(t, to: ipod, albumCount: album.tracks.count, id: db.nextID, settings: podSettings, prepared: ready))
                 rep.added += 1
-                if n % 10 == 9 { try Syncer.write(db, to: ipod) }    // keep the database current during long syncs
+                if n % 10 == 9 { try await Syncer.save(db, to: ipod) }    // keep the database current during long syncs
             } catch { rep.failures.append("\(t.title): \(error.localizedDescription)") }
             syncDone = n + 1
         }
@@ -1270,7 +1472,7 @@ final class Model: ObservableObject {
         }
         syncPhase = "Writing the database"; syncCurrent = ""; syncTotal = 0
         do {
-            try Syncer.write(db, to: ipod)
+            try await Syncer.save(db, to: ipod)
             retags = retags.filter { renames[$0.key] == nil }
             syncPhase = "Cover art"; syncCurrent = ""; syncTotal = 0
             await FroggerArt.write(db, to: ipod, albums: albums) { done, total, album in     // for Frogger's Now Playing page
@@ -1325,7 +1527,7 @@ final class Model: ObservableObject {
         try? fm.removeItem(atPath: album.folder + "/cover.jpg")
         guard fm.createFile(atPath: album.folder + "/cover.jpg", contents: data) else { notify("Couldn't write cover.jpg in \(album.folder)"); return }
         artwork[album.id] = ArtCache.store(data, for: "album:" + album.folder) ?? NSImage(data: data)
-        if on(.ownTone) { await ownToneRescan(ownToneURL) }
+        await rescanServers()
         notify("New cover for \(album.title)")
     }
 
@@ -1346,7 +1548,7 @@ final class Model: ObservableObject {
         try? fm.removeItem(atPath: album.folder + "/cover.jpg")
         guard fm.createFile(atPath: album.folder + "/cover.jpg", contents: d) else { return "couldn't write cover.jpg" }
         artwork[album.id] = ArtCache.store(d, for: "album:" + album.folder) ?? img
-        if on(.ownTone) { step("Asking OwnTone to rescan"); await ownToneRescan(ownToneURL) }
+        if on(.ownTone) || on(.subsonic) { step("Asking the server to rescan"); await rescanServers() }
         return existing.isEmpty ? "cover saved" : "cover replaced"
     }
 
@@ -1362,7 +1564,7 @@ final class Model: ObservableObject {
             }
             return (n, err)
         }.value
-        if result.0 > 0, on(.ownTone) { await ownToneRescan(ownToneURL) }
+        if result.0 > 0 { await rescanServers() }
         return result
     }
 
@@ -1370,11 +1572,13 @@ final class Model: ObservableObject {
 
     /// Copies audio files into the import folder and adds them to the library; optionally queues them.
     @discardableResult
-    func importFiles(_ urls: [URL], toIPod: Bool, job: UUID? = nil, title: String = "Importing") async -> Set<Album.ID> {
+    func importFiles(_ urls: [URL], toIPod: Bool, job: UUID? = nil, title: String = "Importing", move: Bool = false) async -> Set<Album.ID> {
         let job = job ?? startJob(title, icon: "square.and.arrow.down")
-        updateJob(job) { $0.state = .running; $0.detail = "Copying into \((self.importFolder as NSString).lastPathComponent)" }
+        let root = importRoot
+        guard !root.isEmpty else { finishJob(job, "Choose a folder to import into in Settings › Library"); return [] }
+        updateJob(job) { $0.state = .running; $0.detail = "Copying into \((root as NSString).lastPathComponent)" }
         do {
-            let r = try await Importer.run(urls, into: importFolder)
+            let r = try await Importer.run(urls, into: root, move: move)
             guard !r.tracks.isEmpty else {
                 finishJob(job, r.skipped > 0 ? "Already in the library (\(r.skipped) files)" : "No audio files found")
                 return []
@@ -1395,28 +1599,68 @@ final class Model: ObservableObject {
     func copyFromIPod(_ albums: [Album]) async {
         guard let ipod, connected, let db else { notify("Connect the iPod to copy from it"); return }
         let keys = Set(albums.flatMap { $0.tracks.map(\.key) })
-        let urls = db.tracks.filter { keys.contains($0.key) }.map { ipod.mount.appendingPathComponent($0.relativePath) }
-        guard !urls.isEmpty else { return }
+        // with renames waiting for the next sync applied, as podAlbums has them
+        let songs = db.tracks.map { t in
+            var t = t
+            if let r = retags[t.key] { t.title = r.title; t.album = r.album; t.artist = r.artist; if let aa = r.albumArtist { t.albumArtist = aa } }
+            return t
+        }.filter { keys.contains($0.key) }
+        guard !songs.isEmpty else { notify("None of those songs are on the iPod's list"); return }
         let job = startJob(albums.count == 1 ? "Copying \(albums[0].title) from the iPod" : "Copying \(albums.count) albums from the iPod", icon: "ipod")
-        do {
-            let r = try await Importer.run(urls, into: importFolder, rename: true)
-            await addToLibrary(r.tracks)
-            finishJob(job, "\(r.tracks.count) songs copied to the library" + (r.skipped > 0 ? ", \(r.skipped) already there" : ""))
-        } catch { finishJob(job, "Copying failed: \(error.localizedDescription)", failed: true) }
+        // Files Crate converted for the iPod carry no tags of their own (the iPod's list has them), so the
+        // copies are named, filed and tagged from the list, not from the files.
+        var copied: [LibTrack] = [], skipped = 0, failed: [String] = []
+        let root = importRoot, mount = ipod.mount
+        for (n, t) in songs.enumerated() {
+            updateJob(job) { $0.detail = "\(n + 1) of \(songs.count): \(t.title)" }
+            let r = await Task.detached { () -> Result<LibTrack?, Error> in
+                do { return .success(try Self.copyOut(t, from: mount, into: root)) } catch { return .failure(error) }
+            }.value
+            switch r {
+            case .success(let lt?): copied.append(lt)
+            case .success(nil): skipped += 1
+            case .failure(let e): failed.append("\(t.title): \(e.localizedDescription)")
+            }
+        }
+        await addToLibrary(copied)
+        finishJob(job, "\(copied.count) songs copied to the library" + (skipped > 0 ? ", \(skipped) already there" : "")
+                  + (failed.isEmpty ? "" : ", \(failed.count) failed (\(failed[0]))"), failed: copied.isEmpty && !failed.isEmpty)
+    }
+
+    /// Copies one iPod song to <root>/<album artist>/<album>/<NN title>.ext and writes the iPod's tags
+    /// into it; nil when that file is already there.
+    nonisolated static func copyOut(_ t: PodTrack, from mount: URL, into root: String) throws -> LibTrack? {
+        let fm = FileManager.default
+        let src = mount.appendingPathComponent(t.relativePath).path
+        let artist = t.albumArtist.isEmpty ? t.artist : t.albumArtist
+        let ext = (src as NSString).pathExtension
+        let dir = root + "/" + Importer.safe(artist.isEmpty ? "Unknown Artist" : artist) + "/" + Importer.safe(t.album.isEmpty ? "Unknown Album" : t.album)
+        let dst = dir + "/" + (t.trackNumber > 0 ? String(format: "%02d ", t.trackNumber) : "") + Importer.safe(t.title) + "." + ext
+        if fm.fileExists(atPath: dst) { return nil }
+        try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try fm.copyItem(atPath: src, toPath: dst)
+        let some = { (s: String) in s.isEmpty ? nil : s }
+        if TagWriter.canWrite(dst) {
+            try? TagWriter.write(dst, TagEdit(title: some(t.title), artist: some(t.artist), albumArtist: some(artist), album: some(t.album),
+                                              genre: some(t.genre), track: t.trackNumber > 0 ? t.trackNumber : nil))
+        }
+        return LibTrack(title: t.title, artist: artist, album: t.album, genre: t.genre, trackNumber: t.trackNumber, discNumber: 0,
+                        year: 0, lengthMs: t.lengthMs, path: dst, trackArtist: t.artist == artist ? "" : t.artist, added: Date())
     }
 
     var podOnlyAlbums: [Album] { podAlbums.filter(isPodOnly) }
 
     /// Where a remote playlist comes from (a sidebar group of its own).
-    func source(of p: OTPlaylist) -> String { p.spotifyID != nil ? "Spotify" : "OwnTone" }
-    var remoteSources: [String] { ["Spotify", "OwnTone"].filter { s in playlists.contains { source(of: $0) == s } } }
+    func source(of p: OTPlaylist) -> String { p.spotifyID != nil ? "Spotify" : p.subsonicID != nil ? "Subsonic" : "OwnTone" }
+    var remoteSources: [String] { ["Spotify", "OwnTone", "Subsonic"].filter { s in playlists.contains { source(of: $0) == s } } }
 
     /// Where a playlist on the iPod came from.
-    enum PodOrigin { case spotify, ownTone, smart, crate, onTheGo, ipod
+    enum PodOrigin { case spotify, ownTone, subsonic, smart, crate, onTheGo, ipod
         var icon: String {
             switch self {
             case .spotify: return "dot.radiowaves.left.and.right"
             case .ownTone: return "hifispeaker"
+            case .subsonic: return "server.rack"
             case .smart: return "gearshape.2"
             case .crate: return "music.note.list"
             case .onTheGo: return "hand.tap"
@@ -1427,6 +1671,7 @@ final class Model: ObservableObject {
             switch self {
             case .spotify: return "Copied from a Spotify playlist"
             case .ownTone: return "Copied from an OwnTone playlist"
+            case .subsonic: return "Copied from a Subsonic playlist"
             case .smart: return "Kept up to date from a smart playlist"
             case .crate: return "Kept up to date from a playlist in Crate"
             case .onTheGo: return "Made on the iPod (On-The-Go)"
@@ -1437,13 +1682,13 @@ final class Model: ObservableObject {
     func origin(of p: PodPlaylist) -> PodOrigin {
         if smartPlaylists.contains(where: { $0.name == p.name }) { return .smart }
         if cratePlaylists.contains(where: { $0.podID == p.id || $0.name == p.name }) { return .crate }
-        if let r = playlists.first(where: { $0.name == p.name }) { return r.spotifyID != nil ? .spotify : .ownTone }
+        if let r = playlists.first(where: { $0.name == p.name }) { return r.spotifyID != nil ? .spotify : r.subsonicID != nil ? .subsonic : .ownTone }
         return p.name.hasPrefix("On-The-Go") ? .onTheGo : .ipod
     }
 
     /// Drag and drop onto the window (library) or the iPod card (library + queue).
     func importDropped(_ urls: [URL], toIPod: Bool) async {
-        let roots = folders + [importFolder, (importFolder as NSString).deletingLastPathComponent]
+        let roots = libraryRoots
         let known = urls.filter { u in Organizer.root(of: u.path, roots: roots) != nil }
         if !known.isEmpty, known.count == urls.count {
             if toIPod {      // already in the library: just queue those albums
@@ -1461,11 +1706,12 @@ final class Model: ObservableObject {
 
     /// A finished Soulseek download: copy its folder into the library.
     func importDownloaded(_ job: SlskJob, folder: String) async {
+        guard !slsk.downloadsFolder.isEmpty else { notify("Set slskd's downloads folder in Settings › Plugins › Soulseek to import downloads"); return }
         guard FileManager.default.fileExists(atPath: folder) else {
             notify("Can't find \(folder) – is the share with slskd's downloads mounted?")
             return
         }
-        await importFiles([URL(fileURLWithPath: folder)], toIPod: false, title: "Importing \(job.name)")
+        await importFiles([URL(fileURLWithPath: folder)], toIPod: false, title: "Importing \(job.name)", move: true)
     }
 
     // MARK: Apple Music
@@ -1527,7 +1773,7 @@ final class Model: ObservableObject {
               let (d, _) = try? await URLSession.shared.data(from: u), let img = NSImage(data: d) else { return }
         if fm.createFile(atPath: lib.folder + "/cover.jpg", contents: d) {
             artwork[lib.id] = ArtCache.store(d, for: "album:" + lib.folder) ?? img
-            if on(.ownTone) { await ownToneRescan(ownToneURL) }
+            await rescanServers()
         }
     }
 

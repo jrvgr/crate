@@ -160,11 +160,11 @@ extension Model {
     }
 
     func crateNeedsSync(_ p: CratePlaylist) -> Bool {
-        guard p.onIPod, let db else { return false }
+        guard p.onIPod, db != nil else { return false }
         let ts = songs(p)
         guard let pod = podCopy(of: p) else { return !ts.isEmpty }
         let keys = podKeys
-        let byID = Dictionary(db.tracks.map { ($0.id, $0.key) }, uniquingKeysWith: { a, _ in a })
+        let byID = podKeyByID
         return !samePlaylist(pod.name, p.name) || ts.contains { !keys.contains($0.key) } || pod.items.compactMap { byID[$0.trackID] } != ts.map(\.key)
     }
 
@@ -302,7 +302,7 @@ extension Model {
         try? await Task.sleep(for: .seconds(3))
         guard let fresh = try? await OwnTonePlaylists.all(ownToneURL) else { return }
         let spotify = playlists.filter { $0.spotifyID != nil }, names = Set(spotify.map { $0.name.lowercased() })
-        playlists = (spotify + fresh.filter { !names.contains($0.name.lowercased()) })
+        playlists = (spotify + playlists.filter { $0.subsonicID != nil } + fresh.filter { !names.contains($0.name.lowercased()) })
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         for p in fresh { playlistTracks[p.id] = nil }
         if let name, case .playlist = pane, let p = fresh.first(where: { $0.name == name }) { pane = .playlist(p.id) }

@@ -16,11 +16,12 @@ final class SettingsUI: ObservableObject {
 
 struct SettingsView: View {
     @EnvironmentObject var model: Model
+    @AppStorage("settingsTab") var tab = "Library"
     var body: some View {
-        TabView {
-            Tab("Library", systemImage: "square.stack") { LibrarySettings() }
-            Tab("Plugins", systemImage: "puzzlepiece.extension") { PluginSettings() }
-            Tab("iPod", systemImage: "ipod") { IPodSettingsInfo() }
+        TabView(selection: $tab) {
+            Tab("Library", systemImage: "square.stack", value: "Library") { LibrarySettings() }
+            Tab("Plugins", systemImage: "puzzlepiece.extension", value: "Plugins") { PluginSettings() }
+            Tab("iPod", systemImage: "ipod", value: "iPod") { IPodSettingsInfo() }
         }
         .frame(width: 620, height: 600)
     }
@@ -93,6 +94,20 @@ struct LibrarySettings: View {
                 Text("Crate reads every audio file in these folders (Artist/Album/Track, or the files' tags).")
             }
             Section {
+                FolderField(title: "Import into", path: model.$importFolder, help: "Where dropped files, imports and downloads go; empty: the music folder")
+            } header: { Text("Imports") } footer: {
+                Text("Files dropped on the window, Apple Music imports and finished Soulseek downloads go here as Artist/Album/ (downloads on the same share are moved, not copied). Left empty, that's the Subsonic server's music folder, else your first music folder, else ~/Music/Crate on this Mac.")
+            }
+            Section {
+                SecureField("Discogs token", text: model.$discogsToken, prompt: Text("Optional"))
+            } header: { Text("Metadata") } footer: {
+                Text("Find Metadata… searches MusicBrainz. A personal token from discogs.com/settings/developers adds Discogs results.")
+            }
+            Section {
+                Toggle("Show Crate in the menu bar", isOn: $menuBar)
+                SettingsTransferRow()
+            } header: { Text("App") }
+            Section {
                 LabeledContent("Deleted from shares") {
                     HStack {
                         Text(ui.trashSize > 0 ? ByteCountFormatter.string(fromByteCount: ui.trashSize, countStyle: .file) : "Empty").foregroundStyle(.secondary)
@@ -103,24 +118,6 @@ struct LibrarySettings: View {
                 .task { ui.trashSize = model.crateTrashSize() }
             } header: { Text("Crate Trash") } footer: {
                 Text("Network shares have no Trash, so Crate keeps what you delete there in a hidden .crate-trash folder until you empty it.")
-            }
-            Section {
-                FolderField(title: "Import into", path: model.$importFolder, help: "Where dropped files, imports and downloads are copied")
-            } header: { Text("Imports") } footer: {
-                Text("Files dropped on the window, Apple Music imports and finished Soulseek downloads are copied here as Artist/Album/. With OwnTone on, pick a folder inside its music folder so it picks them up.")
-            }
-            Section {
-                Picker("Play music on", selection: model.player.$output) {
-                    Text("This Mac").tag("mac")
-                    if model.on(.ownTone) { Text("OwnTone's speakers").tag("owntone") }
-                }
-                Toggle("Show Crate in the menu bar", isOn: $menuBar)
-                SettingsTransferRow()
-            } header: { Text("App") }
-            Section {
-                SecureField("Discogs token", text: model.$discogsToken, prompt: Text("Optional"))
-            } header: { Text("Metadata") } footer: {
-                Text("Find Metadata… searches MusicBrainz. A personal token from discogs.com/settings/developers adds Discogs results.")
             }
         }
         .formStyle(.grouped)
@@ -135,7 +132,7 @@ struct PluginSettings: View {
 
     var body: some View {
         Form {
-            ForEach(PluginID.allCases) { p in
+            ForEach(PluginID.allCases.filter { $0 != .ownTone || model.plugins.contains(.ownTone) }) { p in
                 Section {
                     PluginHeader(plugin: p)
                     if model.on(p) { options(p) }
@@ -164,6 +161,10 @@ struct PluginSettings: View {
                     }
                 }
             }
+        case .subsonic:
+            SubsonicSettings(sub: model.subsonic)
+        case .musicAssistant:
+            MusicAssistantSettings(ma: model.ma)
         case .spotify:
             Picker("Read from", selection: Binding(get: { spot.mode }, set: { spot.mode = $0; model.objectWillChange.send(); Task { await model.reload() } })) {
                 Text("My Spotify account").tag("account")
@@ -265,6 +266,51 @@ extension PluginSettings {
         ui.password = ""
         ui.testing = .soulseek
         Task { await slsk.check(); ui.testing = nil }
+    }
+}
+
+struct SubsonicSettings: View {
+    @EnvironmentObject var model: Model
+    @ObservedObject var sub: Subsonic
+    @StateObject private var ui = SettingsUI()
+
+    var body: some View {
+        TextField("Server", text: sub.$url, prompt: Text("http://host:4533"))
+        TextField("Username", text: sub.$user)
+        LabeledContent("Password") {
+            HStack {
+                SecureField("", text: $ui.password, prompt: Text(sub.password.isEmpty ? "Your password on the server" : "Saved – type to change"))
+                    .onSubmit { save() }
+                Button("Save") { save() }.disabled(ui.password.isEmpty)
+            }
+        }
+        if ui.passwordSaved {
+            LabeledContent("") { Label("Saved", systemImage: "key.fill").font(.caption).foregroundStyle(.green) }
+        }
+        FolderField(title: "Music folder", path: sub.$musicFolder, help: "The server's music folder as this Mac sees it (on a mounted share)")
+        LabeledContent("Status") {
+            HStack {
+                if ui.testing == .subsonic { ProgressView().controlSize(.small) }
+                Text(sub.error ?? (sub.status.isEmpty ? (sub.configured ? "Not checked" : "Not set up") : sub.status))
+                    .foregroundStyle(sub.error == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red)).lineLimit(2)
+                Button("Test") { ui.testing = .subsonic; Task { await sub.check(); ui.testing = nil } }
+                    .disabled(!sub.configured)
+            }
+        }
+        Text("Songs in the music folder are used from there (in Navidrome, turn on Report Real Path for the Crate player under Settings › Players); the rest are downloaded when a sync needs them.")
+            .font(.caption).foregroundStyle(.secondary)
+    }
+
+    /// Saves the password, logs in with it and, when that works, reads the server's library.
+    func save() {
+        sub.password = ui.password
+        ui.passwordSaved = !sub.password.isEmpty && sub.password == ui.password
+        ui.password = ""
+        ui.testing = .subsonic
+        Task {
+            await sub.check(); ui.testing = nil
+            if sub.error == nil { await model.reload() }
+        }
     }
 }
 

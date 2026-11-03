@@ -56,6 +56,7 @@ struct CrateApp: App {
 @main
 enum Main {
     static func main() {
+        Rename.run()
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--selftest"), args.count > i + 1 { selftest(args[i + 1]); return }
         if let i = args.firstIndex(of: "--add-folder"), args.count > i + 1 { addFolder(args[i + 1]); return }
@@ -129,6 +130,8 @@ enum Main {
             print("set:", Keychain.set("crate-test", "dummy"), "get:", Keychain.get("crate-test") == "dummy")
             Keychain.set("crate-test", ""); return
         }
+        if args.contains("--subsonic-check") { subsonicCheck(); return }
+        if let i = args.firstIndex(of: "--ma-check"), args.count > i + 2 { maCheck(player: args[i + 1], album: args[i + 2]); return }
         if let i = args.firstIndex(of: "--slskd-check") { slskdCheck(args.count > i + 1 ? args[i + 1] : ""); return }
         if let i = args.firstIndex(of: "--import"), args.count > i + 2 { importFiles(Array(args[(i + 2)...]), into: args[i + 1]); return }
         if let i = args.firstIndex(of: "--tag"), args.count > i + 1 { tag(args[i + 1], Array(args[(i + 2)...])); return }
@@ -184,13 +187,16 @@ enum Main {
         if let i = args.firstIndex(of: "--pull-test"), args.count > i + 1 {     // copies the iPod-only albums into <root> (reads the iPod only)
             let root = args[i + 1]
             Task { @MainActor in
-                let m = Model(); await m.reload()
-                let albums = m.podOnlyAlbums
-                print("only on the iPod:", albums.map(\.title))
+                // with an album name after <root>: just that album, read from the iPod only (no library load)
+                let m = Model(), only = args.count > i + 2 ? args[i + 2].lowercased() : nil
+                if only != nil { await m.loadIPodNow() } else { await m.reload() }
+                let albums = only.map { o in m.podAlbums.filter { $0.id == o } } ?? m.podOnlyAlbums
+                print("copying:", albums.map(\.title))
                 let keys = Set(albums.flatMap { $0.tracks.map(\.key) })
-                let urls = (m.db?.tracks ?? []).filter { keys.contains($0.key) }.map { m.ipod!.mount.appendingPathComponent($0.relativePath) }
-                let r = try await Importer.run(urls, into: root, rename: true)
-                r.tracks.forEach { print(String($0.path.dropFirst(root.count))) }
+                for t in (m.db?.tracks ?? []) where keys.contains(t.key) {
+                    let r = try Model.copyOut(t, from: m.ipod!.mount, into: root)
+                    print(r.map { String($0.path.dropFirst(root.count)) } ?? "already there: \(t.title)")
+                }
                 exit(0)
             }
             RunLoop.main.run()
@@ -602,6 +608,56 @@ enum Main {
         RunLoop.main.run()
     }
 
+    /// Logs in to the Subsonic server (ping) and reads its library and playlists; no downloads, no scrobbles.
+    static func subsonicCheck() {
+        Task { @MainActor in
+            let s = Subsonic()
+            await s.check()
+            print("server:", s.status, "error:", s.error ?? "none")
+            if s.error == nil {
+                do {
+                    let songs = try await s.library()
+                    let here = songs.filter { !s.needsDownload($0.path) }.count
+                    print("\(songs.count) songs, \(here) with a file on this Mac, \(songs.count - here) to download")
+                    songs.prefix(3).forEach { print("  \($0.artist) – \($0.album) – \($0.title) | \($0.path)") }
+                    let lists = try await s.playlists()
+                    print("\(lists.count) playlists", lists.prefix(5).map(\.name).joined(separator: ", "))
+                } catch { print("library:", error.localizedDescription) }
+            }
+            exit(0)
+        }
+        RunLoop.main.run()
+    }
+
+    /// Plays an album from the Subsonic server on a Music Assistant player through Crate's Player, then tries
+    /// pause, play, next and seek and stops. Doesn't touch the volume: turn the speaker down first.
+    static func maCheck(player id: String, album: String) {
+        Task { @MainActor in
+            let s = Subsonic(), ma = MusicAssistant(), p = Player()
+            await ma.check()
+            print("ma:", ma.status, "error:", ma.error ?? "none", "|", ma.players.map { "\($0.name) (\($0.id))" }.joined(separator: ", "))
+            guard let songs = try? await s.library() else { print("subsonic: no library"); exit(1) }
+            let tracks = songs.filter { $0.album.localizedCaseInsensitiveContains(album) }.sorted { ($0.discNumber, $0.trackNumber) < ($1.discNumber, $1.trackNumber) }
+            print("\(tracks.count) songs on \(tracks.first?.album ?? album)")
+            p.remote = { (ma, id) }
+            p.remoteURI = { MusicAssistant.uri(subsonicID: s.song(for: $0)?.id, uri: $0.uri) }
+            p.onRemoteError = { print("error:", $0) }
+            @MainActor func show(_ what: String) async {
+                try? await Task.sleep(for: .seconds(3))
+                print("\(what): \(p.playing ? "playing" : "paused") \(p.index + 1)/\(p.queue.count) \(p.current?.title ?? "-") \(Int(p.time))/\(Int(p.length)) s, volume \(p.volume)")
+            }
+            p.play(tracks); await show("play")
+            p.toggle(); await show("pause")
+            p.toggle(); await show("play again")
+            p.next(); await show("next")
+            p.seek(60); await show("seek 60")
+            await ma.command("stop", id); p.stop()
+            print("stopped")
+            exit(0)
+        }
+        RunLoop.main.run()
+    }
+
     /// Lists the Apple Music (iTunes Match) albums Crate can import.
     static func appleMusic() {
         let done = DispatchSemaphore(value: 0)
@@ -686,5 +742,24 @@ enum Main {
             } catch { print("error: \(error)") }
         }
         done.wait()
+    }
+}
+
+/// Crate was nl.jaccogroen.crate until 2026-11-03: the settings and the Subsonic download cache move over once.
+enum Rename {
+    static let old = "nl.jaccogroen.crate"
+    static func run() {
+        let d = UserDefaults.standard
+        guard !d.bool(forKey: "renamedFromOldID") else { return }
+        if let o = UserDefaults(suiteName: old)?.persistentDomain(forName: old) {
+            for (k, v) in o where d.object(forKey: k) == nil { d.set(v, forKey: k) }
+        }
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let from = caches.appendingPathComponent(old + "/Subsonic"), to = Subsonic.cache
+        if FileManager.default.fileExists(atPath: from.path), !FileManager.default.fileExists(atPath: to.path) {
+            try? FileManager.default.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? FileManager.default.moveItem(at: from, to: to)
+        }
+        d.set(true, forKey: "renamedFromOldID")
     }
 }

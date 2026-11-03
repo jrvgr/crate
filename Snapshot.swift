@@ -1,0 +1,63 @@
+import SwiftUI
+import AppKit
+import ScreenCaptureKit
+
+// For reviewing the UI without Screen Recording permission (only when launched with --snapshots): another process posts the distributed
+// notification "nl.jrvgr.crate.snapshot" with an object like "albums /tmp/a.png" (a pane, "album:<title>",
+// "artist:<name>" or "settings:<tab>", then the file), and Crate shows that page and draws its own window into the PNG.
+
+@MainActor
+enum Snapshot {
+    private static var observer: NSObjectProtocol?
+
+    static func listen(_ model: Model) {
+        guard observer == nil, CommandLine.arguments.contains("--snapshots") else { return }
+        observer = DistributedNotificationCenter.default().addObserver(forName: .init("nl.jrvgr.crate.snapshot"), object: nil, queue: .main) { n in
+            guard let s = n.object as? String, let space = s.lastIndex(of: " ") else { return }
+            let what = String(s[..<space]), file = String(s[s.index(after: space)...])
+            Task { @MainActor in await take(what, to: file, model) }
+        }
+    }
+
+    private static let panes: [String: Pane] = ["recent": .recent, "albums": .albums, "artists": .artists, "songs": .songs,
+                                                 "ipod": .ipod, "health": .health, "spotify": .spotify, "downloads": .downloads,
+                                                 "soulseek": .soulseek, "apple-music": .appleMusic, "youtube": .youtube]
+
+    static func take(_ what: String, to file: String, _ model: Model) async {
+        var settings = false
+        if what.hasPrefix("settings:") {
+            UserDefaults.standard.set(String(what.dropFirst(9)), forKey: "settingsTab")
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            settings = true
+        } else if what.hasPrefix("album:"), let a = model.allAlbums.first(where: { $0.title == String(what.dropFirst(6)) }) {
+            model.search = ""; model.pane = .albums; model.path = [.album(a)]
+        } else if what.hasPrefix("artist:") {
+            model.search = ""; model.pane = .artists; model.path = [.artist(String(what.dropFirst(7)))]
+        } else if what.hasPrefix("search:") {
+            model.search = String(what.dropFirst(7))
+        } else if let p = panes[what] {
+            model.search = ""; model.path = []; model.pane = p
+        }
+        try? await Task.sleep(for: .seconds(1.5))
+        // Crate's own windows: the one in front of the kind asked for (Settings, or the main window)
+        let mine = NSApp.windows.filter { $0.isVisible && $0.frame.width > 300 }
+        let isSettings = { (w: NSWindow) in w.identifier?.rawValue.localizedCaseInsensitiveContains("settings") == true }
+        let target = settings ? mine.first(where: isSettings) : mine.first { $0.identifier?.rawValue.hasPrefix("main") == true } ?? mine.first { !isSettings($0) }
+        try? mine.map { "\($0.identifier?.rawValue ?? "-") \($0.title) \(Int($0.frame.width))" }.joined(separator: "\n")
+            .write(toFile: file + ".windows", atomically: true, encoding: .utf8)
+        guard let target else { return }
+        do {
+            let content = try await SCShareableContent.currentProcess
+            guard let w = content.windows.first(where: { $0.windowID == CGWindowID(target.windowNumber) }) else { return }
+            let filter = SCContentFilter(desktopIndependentWindow: w)
+            let config = SCStreamConfiguration()
+            config.width = Int(w.frame.width * 2); config.height = Int(w.frame.height * 2)
+            config.showsCursor = false
+            let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            let rep = NSBitmapImageRep(cgImage: image)
+            try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: file))
+        } catch {
+            try? ("error: " + error.localizedDescription).write(toFile: file + ".txt", atomically: true, encoding: .utf8)
+        }
+    }
+}
