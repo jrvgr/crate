@@ -682,7 +682,7 @@ struct SyncSheet: View {
         }
         }
         .padding(24)
-        .frame(width: 760, height: 480)
+        .frame(width: 760, height: 560)
         .interactiveDismissDisabled(model.syncing)
     }
 
@@ -726,6 +726,30 @@ struct SyncSheet: View {
                 }
             }
             .glassEffect(.regular, in: .rect(cornerRadius: 14))
+            let preview = model.syncPreview()
+            if !preview.isEmpty {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(Array(preview.enumerated()), id: \.offset) { _, a in
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                    Text(a.album).font(.callout.weight(.semibold)).lineLimit(1)
+                                    Text(a.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                    Spacer()
+                                    if !a.add.isEmpty { Text("+\(a.add.count)").font(.caption.bold()).foregroundStyle(.tint) }
+                                    if !a.remove.isEmpty { Text("−\(a.remove.count)").font(.caption.bold()).foregroundStyle(.red) }
+                                }
+                                ForEach(a.add, id: \.self) { Label($0, systemImage: "plus").font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+                                ForEach(a.remove, id: \.self) { Label($0, systemImage: "minus").font(.caption).foregroundStyle(.red.opacity(0.8)).lineLimit(1) }
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: .infinity)
+                .glassEffect(.regular, in: .rect(cornerRadius: 14))
+            }
             VStack(alignment: .leading, spacing: 6) {
                 CapacityBar(height: 12, incoming: max(0, p.bytesIn - p.bytesOut))
                 HStack {

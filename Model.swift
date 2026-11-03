@@ -367,6 +367,26 @@ final class Model: ObservableObject {
         for a in albums where artwork[a.id] == nil {
             if let d = await LibraryLoader.artwork(for: a), let img = ArtCache.store(d, for: "album:" + a.folder) ?? NSImage(data: d) { artwork[a.id] = img }
         }
+        await loadPodArtwork()
+    }
+
+    /// Covers for albums that only exist on the iPod: the art in its own files, else the iTunes catalogue.
+    func loadPodArtwork() async {
+        for a in podAlbums where isPodOnly(a) && artwork[a.id] == nil {
+            let key = "pod:" + a.id
+            if let img = ArtCache.image(key) { artwork[a.id] = img; continue }
+            var data: Data?
+            if let ipod, connected, let first = a.tracks.first {
+                var onPod = a; onPod.tracks = [first]
+                onPod.tracks[0].path = ipod.mount.appendingPathComponent(first.path).path
+                data = await LibraryLoader.artwork(for: onPod)
+            }
+            if data == nil {
+                let am = AMAlbum(title: a.title, artist: a.artist, tracks: [])
+                if let u = await AppleMusic.artworkURL(am), let (d, _) = try? await URLSession.shared.data(from: u) { data = d }
+            }
+            if let d = data, let img = ArtCache.store(d, for: key) { artwork[a.id] = img }
+        }
     }
 
     /// Reads these files' tags again after they were edited (the album may have a new name now).
@@ -464,6 +484,7 @@ final class Model: ObservableObject {
             if let d = try? Data(contentsOf: i.dbURL), let parsed = try? ITunesDB.read(d) { db = parsed; PodCache.saveDB(from: i) }
             else { db = .empty(name: i.mount.lastPathComponent) }
             onTheGo = OnTheGo.load(i, db: db!)
+            if !loading { Task { await loadPodArtwork() } }
             PodHistory.record(i, db: db!)
             history = PodHistory.load(i.key)
             refreshSmartPending()
@@ -603,6 +624,17 @@ final class Model: ObservableObject {
         plan = makePlan()
         showSync = true
         Task { await estimateSizes() }
+    }
+
+    /// Per album, the songs the next sync adds and removes (for the sync sheet's preview).
+    func syncPreview() -> [(album: String, artist: String, add: [String], remove: [String])] {
+        var out: [String: (album: String, artist: String, add: [String], remove: [String])] = [:]
+        for (a, t) in addWork(have: podKeys) { out[a.id, default: (a.title, a.artist, [], [])].add.append(t.title) }
+        let keys = removalKeys
+        for t in (db?.tracks ?? []) where keys.contains(t.key) {
+            out[t.album.lowercased(), default: (t.album, t.artist, [], [])].remove.append(t.title)
+        }
+        return out.values.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
     }
 
     private func addWork(have: Set<String>) -> [(Album, LibTrack)] {
