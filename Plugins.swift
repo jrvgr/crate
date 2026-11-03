@@ -63,26 +63,51 @@ enum PluginStore {
     static func save(_ s: Set<PluginID>) { UserDefaults.standard.set(s.map(\.rawValue).sorted(), forKey: key) }
 }
 
-/// Passwords live in the login keychain, not in the defaults.
+/// Secrets (slskd password, Spotify token) in a file only this user can read (0600), like command
+/// line tools keep their tokens. The login keychain was used before, but without an Apple team ID
+/// macOS ties its "Always Allow" to one exact build and asks again after every update; entries
+/// still there are moved over once.
 enum Keychain {
     static let service = "nl.jaccogroen.crate"
+    static var url: URL { PodCache.dir.appendingPathComponent("secrets.json") }
+    private static var cache: [String: String]?
+
+    private static func load() -> [String: String] {
+        if let c = cache { return c }
+        let c = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+        cache = c
+        return c
+    }
+
+    private static func store(_ c: [String: String]) -> OSStatus {
+        cache = c
+        do {
+            try JSONEncoder().encode(c).write(to: url, options: [.atomic])
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return errSecSuccess
+        } catch { return errSecIO }
+    }
 
     static func get(_ account: String) -> String {
+        if let v = load()[account] { return v }
+        // once: take it out of the old keychain entry (may ask one last time)
+        guard !migrated.contains(account) else { return "" }
+        migrated.insert(account)
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                 kSecAttrAccount as String: account, kSecReturnData as String: true]
         var out: AnyObject?
         guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess, let d = out as? Data else { return "" }
-        return String(decoding: d, as: UTF8.self)
+        let v = String(decoding: d, as: UTF8.self)
+        var c = load(); c[account] = v; _ = store(c)
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account] as CFDictionary)
+        return v
     }
+    private static var migrated = Set<String>()
 
     @discardableResult
     static func set(_ account: String, _ value: String) -> OSStatus {
-        let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-                                kSecAttrAccount as String: account]
-        SecItemDelete(q as CFDictionary)
-        guard !value.isEmpty else { return errSecSuccess }
-        var add = q; add[kSecValueData as String] = Data(value.utf8)
-        add[kSecAttrLabel as String] = "Crate (\(account))"
-        return SecItemAdd(add as CFDictionary, nil)
+        var c = load()
+        c[account] = value.isEmpty ? nil : value
+        return store(c)
     }
 }

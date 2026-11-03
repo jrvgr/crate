@@ -159,6 +159,10 @@ struct AlbumMenu: View {
     var album: Album
     var body: some View {
         let m = model.mark(album)
+        if model.isPodOnly(album) {
+            Button("Copy to Library", systemImage: "square.and.arrow.down") { Task { await model.copyFromIPod([album]) } }
+                .disabled(!model.connected)
+        }
         if !model.isPodOnly(album), m != .onIPod, m != .removing {
             Button(m == .adding ? "Don't Add to iPod" : m == .partial ? "Add Missing Songs" : "Add to iPod", systemImage: "plus.circle") {
                 model.toggleAdd(album)
@@ -277,6 +281,10 @@ struct AlbumDetail: View {
                                 Button(m == .removing ? "Keep on iPod" : "Remove from iPod",
                                        systemImage: m == .removing ? "arrow.uturn.backward" : "minus") { model.toggleRemove(album) }
                                     .buttonStyle(.glass)
+                            }
+                            if podOnly {
+                                Button("Copy to Library", systemImage: "square.and.arrow.down") { Task { await model.copyFromIPod([album]) } }
+                                    .buttonStyle(.glass).disabled(!model.connected).help("Copy these songs from the iPod into your library")
                             }
                             if !podOnly {
                                 Button("Play", systemImage: "play.fill") { Task { await model.play(album) } }.buttonStyle(.glass)

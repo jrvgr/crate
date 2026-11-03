@@ -326,7 +326,9 @@ enum Importer {
     }
 
     /// Returns the copied tracks (at their new paths) and how many files were already there.
-    static func run(_ urls: [URL], into root: String) async throws -> (tracks: [LibTrack], skipped: Int) {
+    /// `rename` names files "01 Title.ext" from their tags (for the iPod's own "ABCD.mp3" names) and
+    /// skips copying covers from the source folder.
+    static func run(_ urls: [URL], into root: String, rename: Bool = false) async throws -> (tracks: [LibTrack], skipped: Int) {
         let fm = FileManager.default
         guard fm.fileExists(atPath: root) || (try? fm.createDirectory(atPath: root, withIntermediateDirectories: true)) != nil else {
             throw SyncError.missingSource(root)
@@ -336,13 +338,15 @@ enum Importer {
             let t = await LibraryLoader.track(f.path, relative: f.relative)
             let dir = root + "/" + safe(t.artist) + "/" + safe(t.album)
             try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            let dst = dir + "/" + (f.path as NSString).lastPathComponent
+            let ext = (f.path as NSString).pathExtension
+            let dst = dir + "/" + (rename ? (t.trackNumber > 0 ? String(format: "%02d ", t.trackNumber) : "") + safe(t.title) + "." + ext
+                                          : (f.path as NSString).lastPathComponent)
             if fm.fileExists(atPath: dst) { skipped += 1; continue }
             try await Task.detached { try fm.copyItem(atPath: f.path, toPath: dst) }.value
             var copied = t; copied.path = dst
             out.append(copied)
             let srcDir = (f.path as NSString).deletingLastPathComponent
-            if coversDone.insert(srcDir).inserted {
+            if !rename, coversDone.insert(srcDir).inserted {
                 for n in (try? fm.contentsOfDirectory(atPath: srcDir)) ?? []
                 where images.contains((n as NSString).pathExtension.lowercased()) && !fm.fileExists(atPath: dir + "/" + n) {
                     try? fm.copyItem(atPath: srcDir + "/" + n, toPath: dir + "/" + n)

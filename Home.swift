@@ -77,6 +77,20 @@ struct IPodView: View {
                     capacity(i)
                     storageHistory
                     if model.pendingCount > 0 { pending }
+                    if !model.podOnlyAlbums.isEmpty {
+                        HStack(spacing: 12) {
+                            Image(systemName: "square.and.arrow.down").font(.title2).foregroundStyle(.tint)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(model.podOnlyAlbums.count) album\(model.podOnlyAlbums.count == 1 ? " is" : "s are") only on the iPod").font(.headline)
+                                Text(model.podOnlyAlbums.prefix(4).map(\.title).joined(separator: ", ") + (model.podOnlyAlbums.count > 4 ? "…" : ""))
+                                    .font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Spacer()
+                            Button("Copy to Library") { Task { await model.copyFromIPod(model.podOnlyAlbums) } }
+                                .buttonStyle(.glassProminent).disabled(!model.connected)
+                        }
+                        .padding(14).glassEffect(.regular, in: .rect(cornerRadius: 18))
+                    }
                     MostPlayed()
                     settings
                     maintenance(i, db)

@@ -846,6 +846,22 @@ final class Model: ObservableObject {
         }
     }
 
+    /// Copies albums from the iPod into the library (for music that only lives on the iPod).
+    func copyFromIPod(_ albums: [Album]) async {
+        guard let ipod, connected, let db else { notify("Connect the iPod to copy from it"); return }
+        let keys = Set(albums.flatMap { $0.tracks.map(\.key) })
+        let urls = db.tracks.filter { keys.contains($0.key) }.map { ipod.mount.appendingPathComponent($0.relativePath) }
+        guard !urls.isEmpty else { return }
+        let job = startJob(albums.count == 1 ? "Copying \(albums[0].title) from the iPod" : "Copying \(albums.count) albums from the iPod", icon: "ipod")
+        do {
+            let r = try await Importer.run(urls, into: importFolder, rename: true)
+            await addToLibrary(r.tracks)
+            finishJob(job, "\(r.tracks.count) songs copied to the library" + (r.skipped > 0 ? ", \(r.skipped) already there" : ""))
+        } catch { finishJob(job, "Copying failed: \(error.localizedDescription)", failed: true) }
+    }
+
+    var podOnlyAlbums: [Album] { podAlbums.filter(isPodOnly) }
+
     /// Drag and drop onto the window (library) or the iPod card (library + queue).
     func importDropped(_ urls: [URL], toIPod: Bool) async {
         let roots = folders + [importFolder, (importFolder as NSString).deletingLastPathComponent]

@@ -136,6 +136,20 @@ enum Main {
             }
             RunLoop.main.run()
         }
+        if let i = args.firstIndex(of: "--pull-test"), args.count > i + 1 {     // copies the iPod-only albums into <root> (reads the iPod only)
+            let root = args[i + 1]
+            Task { @MainActor in
+                let m = Model(); await m.reload()
+                let albums = m.podOnlyAlbums
+                print("only on the iPod:", albums.map(\.title))
+                let keys = Set(albums.flatMap { $0.tracks.map(\.key) })
+                let urls = (m.db?.tracks ?? []).filter { keys.contains($0.key) }.map { m.ipod!.mount.appendingPathComponent($0.relativePath) }
+                let r = try await Importer.run(urls, into: root, rename: true)
+                r.tracks.forEach { print(String($0.path.dropFirst(root.count))) }
+                exit(0)
+            }
+            RunLoop.main.run()
+        }
         if let i = args.firstIndex(of: "--write-tags"), args.count > i + 3 { writeTags(args[i + 1], args[i + 2], args[i + 3]); return }
         if let i = args.firstIndex(of: "--lookup"), args.count > i + 2 { lookup(args[i + 1], args[i + 2]); return }
         spaceKey()
