@@ -116,6 +116,7 @@ final class IPodUI: ObservableObject {
     @Published var confirmRestore = false
     @Published var confirmOrphans = false
     @Published var checking = false
+    @AppStorage("ipodTab") var tab = "overview"          // Overview or Settings (remembered)
 }
 
 struct IPodView: View {
@@ -129,6 +130,10 @@ struct IPodView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     header(i, db)
                     DiskRepairCard()
+                    if ui.tab == "settings" {
+                        settings
+                        maintenance(i, db)
+                    } else {
                     capacity(i)
                     storageHistory
                     if model.pendingCount > 0 { pending }
@@ -148,13 +153,22 @@ struct IPodView: View {
                         .padding(14).glassEffect(.regular, in: .rect(cornerRadius: 18))
                     }
                     MostPlayed()
-                    settings
-                    maintenance(i, db)
+                    }
                 }
                 .padding(.horizontal, 32).padding(.top, 24).padding(.bottom, 90)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .navigationTitle(model.podName)
+            .toolbar {
+                // the page was the iPod's state and then a long scroll down to its settings: one or the other
+                ToolbarItem(placement: .navigation) {
+                    Picker("Show", selection: $ui.tab) {
+                        Text("Overview").tag("overview")
+                        Text("Settings").tag("settings")
+                    }
+                    .pickerStyle(.segmented).labelsHidden().fixedSize()
+                }
+            }
             .confirmationDialog("Restore the previous database?", isPresented: $ui.confirmRestore) {
                 Button("Restore", role: .destructive) { model.restoreBackup() }
             } message: {
@@ -257,7 +271,7 @@ struct IPodView: View {
             if p.onTheGo > 0 { PlanRow(icon: "music.note.list", tint: .green, title: "\(p.onTheGo) playlist\(p.onTheGo == 1 ? "" : "s") from the iPod to save", detail: "") }
             if let n = p.rename { PlanRow(icon: "pencil.circle.fill", tint: .purple, title: "Rename to “\(n)”", detail: "") }
             if p.retag > 0 { PlanRow(icon: "pencil.circle.fill", tint: .purple, title: "Update the tags of \(p.retag) song\(p.retag == 1 ? "" : "s")", detail: "") }
-            if !p.markPlaylists.isEmpty { PlanRow(icon: "eye.slash", tint: .secondary, title: "Rename \(p.markPlaylists.count) playlist\(p.markPlaylists.count == 1 ? "" : "s")", detail: "") }
+            if !p.markPlaylists.isEmpty { PlanRow(icon: "pencil.circle.fill", tint: .purple, title: "Rename \(p.markPlaylists.count) playlist\(p.markPlaylists.count == 1 ? "" : "s")", detail: p.markPlaylists.joined(separator: ", ")) }
             if p.hide + p.unhide > 0 { PlanRow(icon: "eye.slash", tint: .secondary, title: hideTitle(p), detail: "") }
         }
         .padding(.bottom, 6)

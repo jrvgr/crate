@@ -1295,7 +1295,7 @@ final class Model: ObservableObject {
         let rule = ruleHidden(db?.playlists ?? [])
         p.hide = (db?.tracks ?? []).filter { !$0.hidden && wantsHidden($0.key, rule) }.count
         p.unhide = (db?.tracks ?? []).filter { $0.hidden && !wantsHidden($0.key, rule) }.count
-        p.markPlaylists = (db?.playlists ?? []).filter { $0.name != podName(forPlaylist: $0.name) }.map { podName(forPlaylist: $0.name) }
+        p.markPlaylists = (db?.playlists ?? []).filter { $0.name != podName(forPlaylist: $0.name) }.map { "\($0.name) → \(podName(forPlaylist: $0.name))" }
         return p
     }
 

@@ -66,9 +66,6 @@ struct ContentView: View {
         .quickLookPreview($model.quickLook)
         .onChange(of: model.place) { old, _ in model.visited(from: old) }
         .toolbar {
-            if model.on(.soulseek) || model.on(.appleMusic) || model.on(.youtube) {
-                ToolbarItem { DownloadsButton() }
-            }
             if model.on(.musicAssistant) || model.on(.ownTone) {
                 ToolbarItem { PlayOnMenu(player: model.player, ma: model.ma) }
             }
@@ -425,7 +422,7 @@ struct Sidebar: View {
                 Section("Sources") {
                     ForEach(sources) { p in
                         Group {
-                            if p == .spotify { Label { Text(p.name) } icon: { SpotifyMark(mono: true).frame(width: 15, height: 15) } }
+                            if p == .spotify { Label { Text(p.name) } icon: { Image(nsImage: SpotifyMark.template) } }
                             else { Label(p.name, systemImage: p.icon) }
                         }
                         .tag(p == .spotify ? Pane.spotify : p == .appleMusic ? .appleMusic : p == .youtube ? .youtube : .soulseek)
@@ -810,33 +807,23 @@ struct ActivityBar: View {
     }
 }
 
-/// Opens Downloads; shows how many are running.
-struct DownloadsButton: View {
-    @EnvironmentObject var model: Model
-    @EnvironmentObject var slsk: Slskd
-    var body: some View {
-        let n = slsk.active.count + model.jobs.filter { $0.source != nil && $0.active }.count + model.yt.jobs.filter { !$0.finished }.count
-        Button { model.search = ""; model.pane = .downloads } label: {
-            Label("Downloads", systemImage: n > 0 ? "arrow.down.circle.dotted" : "arrow.down.circle")
-        }
-        .badge(n)
-        .help(n > 0 ? "\(n) downloading" : "Downloads")
-    }
-}
-
 /// Toolbar button with a list of everything Crate did or is doing.
+/// Downloads live here too (they're things running): a row at the bottom opens their page.
 struct ActivityButton: View {
     @EnvironmentObject var model: Model
+    @EnvironmentObject var slsk: Slskd
     @StateObject private var shown = Toggle()
     final class Toggle: ObservableObject { @Published var on = false }
 
     var body: some View {
         let n = model.activeJobs.count
+        let downloads = slsk.active.count + model.jobs.filter { $0.source != nil && $0.active }.count + model.yt.jobs.filter { !$0.finished }.count
+        let downloading = model.on(.soulseek) || model.on(.appleMusic) || model.on(.youtube)
         Button { shown.on.toggle() } label: {
             // not a clock: next to Refresh's arrow, two circles read as the same thing
-            Label("Activity", systemImage: n > 0 ? "bell.badge" : "bell")
+            Label("Activity", systemImage: n + downloads > 0 ? "bell.badge" : "bell")
         }
-        .help("Activity")
+        .help(downloads > 0 ? "Activity · \(downloads) downloading" : "Activity")
         .popover(isPresented: $shown.on, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
@@ -873,6 +860,19 @@ struct ActivityButton: View {
                         }
                     }
                     .frame(maxHeight: 380)
+                }
+                if downloading {
+                    Divider()
+                    Button { shown.on = false; model.search = ""; model.pane = .downloads } label: {
+                        HStack {
+                            Label("Downloads", systemImage: "arrow.down.circle")
+                            Spacer()
+                            if downloads > 0 { Text("\(downloads) downloading").foregroundStyle(.secondary) }
+                            Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                        }
+                        .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain).padding(14)
                 }
             }
             .frame(width: 360)
@@ -986,7 +986,7 @@ struct SyncSheet: View {
                             detail: "Merged or edited in Crate; the iPod's copies get the new album and title")
                 }
                 if !p.markPlaylists.isEmpty {
-                    PlanRow(icon: "eye.slash", tint: .secondary, title: "Rename \(p.markPlaylists.count) playlist\(p.markPlaylists.count == 1 ? "" : "s")",
+                    PlanRow(icon: "pencil.circle.fill", tint: .purple, title: "Rename \(p.markPlaylists.count) playlist\(p.markPlaylists.count == 1 ? "" : "s")",
                             detail: p.markPlaylists.joined(separator: ", "))
                 }
                 if p.hide + p.unhide > 0 {
