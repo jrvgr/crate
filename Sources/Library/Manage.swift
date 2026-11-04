@@ -88,7 +88,7 @@ struct MergeSheet: View {
             HStack(spacing: 10) {
                 ForEach(albums.prefix(6)) { a in
                     VStack(spacing: 4) {
-                        Cover(image: model.artwork[a.id], seed: a.id).frame(width: 74, height: 74).clipShape(.rect(cornerRadius: 8))
+                        Cover(image: model.artwork[a.id], seed: a.id).frame(width: 74, height: 74).clipShape(.rect(cornerRadius: 8, style: .continuous))
                         Text(a.title).font(.caption).lineLimit(1).frame(width: 80)
                     }
                     .onTapGesture { s.title = a.title; s.artist = a.artist }
@@ -134,7 +134,11 @@ struct MergeSheet: View {
 
     func merge() async {
         s.working = true; s.error = nil
-        let tracks = albums.flatMap(\.tracks).filter { TagWriter.canWrite($0.path) }
+        // a server song that isn't on this Mac (not on the share, not downloaded) has no file to write;
+        // the server keeps its own tags for it
+        let tracks = await Task.detached { [all = albums.flatMap(\.tracks)] in
+            all.filter { TagWriter.canWrite($0.path) && FileManager.default.fileExists(atPath: $0.path) }
+        }.value
         let e = TagEdit(albumArtist: s.artist, album: s.title)
         var failed: [String] = []
         s.phase = "Writing album tags"; s.done = 0; s.total = tracks.count
@@ -176,8 +180,8 @@ struct CoverDrop: ViewModifier {
             content
                 .overlay {
                     if model.coverDrop == album.id {
-                        RoundedRectangle(cornerRadius: corner).strokeBorder(.tint, lineWidth: 3)
-                            .background(Color.accentColor.opacity(0.18), in: .rect(cornerRadius: corner))
+                        RoundedRectangle(cornerRadius: corner, style: .continuous).strokeBorder(.tint, lineWidth: 3)
+                            .background(Color.accentColor.opacity(0.18), in: .rect(cornerRadius: corner, style: .continuous))
                             .overlay { Label("Use as Cover", systemImage: "photo").font(.callout.bold()).padding(8).glassEffect(.regular, in: .capsule) }
                             .allowsHitTesting(false)
                     }

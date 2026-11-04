@@ -69,7 +69,7 @@ struct TagEditor: View {
             Label("Editing Tags", systemImage: "pencil").font(.caption.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
             HStack(alignment: .top, spacing: 18) {
                 VStack(spacing: 8) {
-                    Cover(image: s.cover, seed: album.id).frame(width: 220, height: 220).clipShape(.rect(cornerRadius: 16))
+                    Cover(image: s.cover, seed: album.id).frame(width: 220, height: 220).clipShape(.rect(cornerRadius: 16, style: .continuous))
                         .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
                         .dropDestination(for: URL.self) { urls, _ in setCover(urls.first); return true }
                     Button("Choose Image…") {

@@ -26,10 +26,21 @@ of them off Crate is a plain folder → iPod manager.
   on Frogger's Now Playing page (levels, brightness, contrast, midtones, sharpen, dither method),
   previewed on a mock of the iPod's screen and on other albums. Saved as you go and used by every
   sync; "Write to iPod" redoes the covers now. Hovering an album page's cover wipes to its iPod picture.
+- **Frogger switches** (iPod page › Frogger card, "On the iPod"): the same eight switches as
+  Frogger! on the iPod (Cover Page, Hold Menu, Quick Settings, Battery Percent, Page Slide, Jump by
+  Letter, Resume Mixes, Show Hidden). They're bits of Apple's prefs flags word, which the iPod saves
+  in `iPod_Control/Device/Preferences`: the file is the prefs struct from `prefs+8`, so the word
+  (`prefs+0xb04`) is the little-endian u32 at **file offset `0xafc`** (bit 16 Show Hidden On; 17,
+  18 and 19–23 Jump by Letter, Resume Mixes and the five features Off; 0 is Apple's Clicker, 24–26
+  the backlight timer). Crate changes only those bits, only in a 2,872-byte file (firmware 2.3), and
+  only while the iPod is mounted; the iPod reads the file when it starts, so a change applies after it
+  restarts, and it writes the file back from memory when it sleeps. Found by diffing the file around
+  a Show Hidden toggle on the device (2026-11-03); emupod never writes this file, so test it on a
+  device. Frogger's `docs/tcmd.md`, "On the disk", has the full table.
 - **Unplugged**: the last iPod's database and the queued changes are cached in
   `~/Library/Application Support/Crate/` (`ipod.json`, `iTunesDB.cached`); changes can be queued
   and sync by themselves when it's plugged in (when "Sync when connected" is on).
-- **Sync** opens a sheet: review (what changes, size, fits?) → progress (every phase in a checklist, each with its own bar and count: songs removed, added, measured, covers read; a moving bar for the ones without a count) →
+- **Sync** opens a panel in the window (not a sheet, so the sidebar's iPod can fly into it): review (what changes, size, fits?) → progress (every phase in a checklist, each with its own bar and count: songs removed, added, measured, covers read; a moving bar for the ones without a count) →
   result. It re-reads the iPod's iTunesDB right before writing and applies only the queued
   changes, so changes made elsewhere stay; the iPod's `Play Counts` (plays, ratings, last played)
   are merged into the tracks and the file removed, like iTunes; so are Frogger's `FroggerHidden`

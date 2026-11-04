@@ -63,6 +63,7 @@ extension Model {
 final class HealthUI: ObservableObject {
     @Published var filter: Issue?
     @Published var cache: [(Album, [Issue])] = []
+    @Published var checked = false                    // the first pass is done: until then empty means "don't know yet"
     var sizes: [String: Int?] = [:]                   // file probes so far
     @Published var dedupe = false
     @Published var genres = false
@@ -78,15 +79,20 @@ struct HealthView: View {
         let fixable = shown.filter { $0.1.contains(where: \.metadata) }.map(\.0)
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                HStack(spacing: 8) {
-                    Chip(title: "All", count: all.count, on: ui.filter == nil) { ui.filter = nil }
-                    ForEach(Issue.allCases) { i in
-                        let n = all.filter { $0.1.contains(i) }.count
-                        if n > 0 { Chip(title: i.rawValue, icon: i.icon, count: n, on: ui.filter == i) { ui.filter = i } }
+                if !all.isEmpty {        // nothing to filter: no "All 0"
+                    HStack(spacing: 8) {
+                        Chip(title: "All", count: all.count, on: ui.filter == nil) { ui.filter = nil }
+                        ForEach(Issue.allCases) { i in
+                            let n = all.filter { $0.1.contains(i) }.count
+                            if n > 0 { Chip(title: i.rawValue, icon: i.icon, count: n, on: ui.filter == i) { ui.filter = i } }
+                        }
                     }
                 }
-                if all.isEmpty && !model.loading {
-                    ContentUnavailableView("Everything looks good", systemImage: "checkmark.seal",
+                if all.isEmpty && (model.loading || !ui.checked) {
+                    ProgressView("Checking the library…").frame(maxWidth: .infinity).padding(.top, 60)
+                } else if all.isEmpty {
+                    // "every album", not "everything": duplicates and genre spellings can still be listed below
+                    ContentUnavailableView("Every album looks good", systemImage: "checkmark.seal",
                                            description: Text("Every album has a cover, year, genre and tidy track numbers.")).padding(.top, 60)
                 }
                 if !fixable.isEmpty {
@@ -133,7 +139,7 @@ struct HealthView: View {
                 LazyVStack(spacing: 8) {
                     ForEach(shown, id: \.0.id) { a, issues in
                         HStack(spacing: 12) {
-                            Cover(image: model.artwork[a.id], seed: a.id).frame(width: 48, height: 48).clipShape(.rect(cornerRadius: 7))
+                            Cover(image: model.artwork[a.id], seed: a.id).frame(width: 48, height: 48).clipShape(.rect(cornerRadius: 7, style: .continuous))
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(a.title).font(.headline).lineLimit(1)
                                 HStack(spacing: 6) {
@@ -174,6 +180,7 @@ struct HealthView: View {
             let paths = model.albums.flatMap { $0.tracks.map(\.path) }.filter { ui.sizes[$0] == nil }
             if !paths.isEmpty { ui.sizes.merge(await Model.probe(paths)) { _, new in new } }
             ui.cache = model.unhealthy(sizes: ui.sizes)
+            if !model.loading { ui.checked = true }
         }
     }
 }
@@ -274,10 +281,10 @@ struct BatchMetadataSheet: View {
                     ForEach($s.rows) { $r in
                         HStack(spacing: 12) {
                             Toggle("", isOn: $r.include).labelsHidden().disabled(r.chosen == nil || s.applying)
-                            Cover(image: model.artwork[r.album.id], seed: r.album.id).frame(width: 44, height: 44).clipShape(.rect(cornerRadius: 6))
+                            Cover(image: model.artwork[r.album.id], seed: r.album.id).frame(width: 44, height: 44).clipShape(.rect(cornerRadius: 6, style: .continuous))
                             Image(systemName: "arrow.right").foregroundStyle(.tertiary)
                             CachedImage(url: r.chosen.map { MusicBrainz.coverURL($0, size: 250) }, seed: "Health.swift:2")
-                                .frame(width: 44, height: 44).clipShape(.rect(cornerRadius: 6))
+                                .frame(width: 44, height: 44).clipShape(.rect(cornerRadius: 6, style: .continuous))
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(r.album.title).font(.headline).lineLimit(1)
                                 if let c = r.chosen {

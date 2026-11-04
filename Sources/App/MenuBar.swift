@@ -42,7 +42,7 @@ struct MenuBarView: View {
             if let t = player.current {
                 HStack(spacing: 10) {
                     let album = model.albums.first { $0.id == t.album.lowercased() }
-                    Cover(image: album.flatMap { model.artwork[$0.id] }, seed: t.album).frame(width: 36, height: 36).clipShape(.rect(cornerRadius: 6))
+                    Cover(image: album.flatMap { model.artwork[$0.id] }, seed: t.album).frame(width: 36, height: 36).clipShape(.rect(cornerRadius: 6, style: .continuous))
                     VStack(alignment: .leading, spacing: 1) {
                         Text(t.title).font(.callout.weight(.medium)).lineLimit(1)
                         Text(t.trackArtist.isEmpty ? t.artist : t.trackArtist).font(.caption).foregroundStyle(.secondary).lineLimit(1)

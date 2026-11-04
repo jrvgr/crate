@@ -16,12 +16,19 @@ final class Player: ObservableObject {
     @Published var length = 0.0
     @Published var volume = 1.0 { didSet { if remoteQueue == nil { player.volume = Float(volume) } } }
     var current: LibTrack? { queue.indices.contains(index) ? queue[index] : nil }
+    /// What Music Assistant shows for its current song, while Crate follows an MA queue: for songs not in the library (Spotify's).
+    @Published var remoteArt: URL?
+    /// The remote was dragged back into the iPod card: out of the way (the music plays on) until it's pulled out again.
+    @Published var docked = false
+    var showsRemote: Bool { current != nil && !docked }
     /// Where a song without a file on this Mac streams from (a Subsonic server's), if anywhere.
     var stream: @MainActor (LibTrack) -> URL? = { _ in nil }
     /// The Music Assistant player picked as the output (when that plugin is on), and a song's URI for it.
     var remote: @MainActor () -> (MusicAssistant, String)? = { nil }
     var remoteURI: @MainActor (LibTrack) -> String? = { _ in nil }
     var onRemoteError: @MainActor (String) -> Void = { _ in }
+    /// A picked-up speaker's song in the library: its album's songs and where it is in them.
+    var local: @MainActor (LibTrack) -> ([LibTrack], Int)? = { _ in nil }
     private var remoteQueue: String?                  // the MA queue Crate started (or picked up), while it shows it
     private var adopted = false                       // picked up: the queue was started elsewhere, only its current song is known
     private var ma: MusicAssistant?
@@ -49,6 +56,7 @@ final class Player: ObservableObject {
     }
 
     func play(_ tracks: [LibTrack], from start: Int = 0) {
+        docked = false
         if let (ma, q) = remote() { playRemote(Array(tracks.dropFirst(start)), ma: ma, queue: q); return }
         endRemote()
         let playable = tracks.filter { FileManager.default.fileExists(atPath: $0.path) || stream($0) != nil }
@@ -61,13 +69,41 @@ final class Player: ObservableObject {
 
     private var startAt: Double?                      // where the first song starts, when playback moves here
 
-    /// Picking another output moves what's playing there right away: same queue, same song, same spot.
-    /// The old one goes quiet. OwnTone's speakers aren't driven from here, so playback just stops for them.
+    /// Music Assistant moves the whole queue (Spotify songs too) from the picked speaker to this one, where
+    /// it was, and Crate follows it there.
+    func transfer(to out: String) {
+        guard out != output, out.hasPrefix("ma:"), let q = remoteQueue, let m = ma else { return }
+        let target = String(out.dropFirst(3)), autoPlay = playing
+        stop()
+        output = out
+        Task {
+            do { try await m.call("player_queues/transfer", ["source_queue_id": q, "target_queue_id": target, "auto_play": autoPlay]) }
+            catch { onRemoteError("Couldn't move the queue: \(error.localizedDescription)"); return }
+            // the new speaker's queue fills in a moment after MA answers
+            for _ in 0..<5 where current == nil {
+                pickUp()
+                try? await Task.sleep(for: .milliseconds(600))
+            }
+        }
+    }
+
+    var canTransfer: Bool { remoteQueue != nil && current != nil }
+
+    /// Picking another output. From this Mac (or a speaker it only picked up) what's playing moves there when
+    /// the library has it; OwnTone's speakers aren't driven from here, so playback just stops for them.
     func move(to out: String) {
         guard out != output else { return }
-        // a speaker that was only picked up keeps playing what it played; Crate just lets go of it
-        let was = playing && !adopted ? (queue, index, time) : nil
-        if let q = remoteQueue, !adopted { let m = ma; Task { await m?.command("pause", q) } }
+        // another speaker: just pick it (what it plays shows here); the music on this one plays on.
+        // Moving the music there is transfer(to:)
+        if remoteQueue != nil, out.hasPrefix("ma:") { stop(); output = out; pickUp(); return }
+        // a speaker that was only picked up hands over its song when the library has it (the rest of
+        // that album follows); otherwise it keeps playing and Crate just lets go of it
+        var was = playing && !adopted ? (queue, index, time) : nil
+        if playing, adopted, let t = current {
+            if let (album, i) = local(t) { was = (album, i, time) }
+            else { onRemoteError("\(t.title) isn't in the library, so it keeps playing on the speaker") }
+        }
+        if let q = remoteQueue, was != nil { let m = ma; Task { await m?.command("pause", q) } }
         stop()
         output = out
         guard let (tracks, i, t) = was, out != "owntone" else { pickUp(); return }
@@ -128,7 +164,7 @@ final class Player: ObservableObject {
         Task {
             guard let s = await ma.state(q), s.items > 0, !s.title.isEmpty, current == nil, remoteQueue == nil else { return }
             self.ma = ma; remoteQueue = q; adopted = true
-            queue = [Self.track(s)]; index = 0; time = s.elapsed; length = s.duration; playing = s.playing
+            queue = [Self.track(s)]; index = 0; time = s.elapsed; length = s.duration; playing = s.playing; remoteArt = s.image
             follow()
         }
     }
@@ -165,6 +201,7 @@ final class Player: ObservableObject {
                     self.index = min(s.index, self.queue.count - 1)
                 }
                 if self.seeks == 0 { self.time = s.elapsed }
+                if self.remoteArt != s.image { self.remoteArt = s.image }
                 self.length = s.duration > 0 ? s.duration : Double(self.queue[self.index].lengthMs) / 1000
                 self.playing = s.playing
                 if let v = s.volume, self.volumeSend == nil, Date().timeIntervalSince(self.volumeTouched) > 2 { self.volume = v }
@@ -172,7 +209,7 @@ final class Player: ObservableObject {
         }
     }
 
-    private func endRemote() { poll?.cancel(); poll = nil; remoteQueue = nil; adopted = false }
+    private func endRemote() { poll?.cancel(); poll = nil; remoteQueue = nil; adopted = false; remoteArt = nil }
 
     /// The wheel's volume: on MA, sent while it turns (at most every 100 ms), always ending on the last value.
     func setVolume(_ v: Double) {

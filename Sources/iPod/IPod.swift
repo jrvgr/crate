@@ -18,7 +18,7 @@ struct PodSettings: Codable, Equatable {
         soundCheck = v(.soundCheck, d.soundCheck); calendars = v(.calendars, d.calendars); calendarIDs = v(.calendarIDs, d.calendarIDs)
         calendarPastDays = v(.calendarPastDays, d.calendarPastDays); calendarFutureDays = v(.calendarFutureDays, d.calendarFutureDays)
         reminders = v(.reminders, d.reminders); reminderIDs = v(.reminderIDs, d.reminderIDs)
-        hiddenPlaylists = v(.hiddenPlaylists, d.hiddenPlaylists); hideMarkAtEnd = v(.hideMarkAtEnd, d.hideMarkAtEnd)
+        hiddenPlaylists = v(.hiddenPlaylists, d.hiddenPlaylists)
         frogger = v(.frogger, d.frogger); mainArtistOnly = v(.mainArtistOnly, d.mainArtistOnly)
     }
     var aacKbps = 256                 // for FLAC/WAV/AIFF and converted MP3s
@@ -35,7 +35,6 @@ struct PodSettings: Codable, Equatable {
     var reminders = false             // open reminders → To Do
     var reminderIDs: [String] = []
     var hiddenPlaylists: [String: Bool] = [:]  // name without the mark → marked by you (true) or unmarked (false); others go by their name
-    var hideMarkAtEnd = false           // "Name ~" instead of "~Name"
     var mainArtistOnly = true           // "Ski Aggu, SEZA" files under Ski Aggu on the iPod (ArtistCredit)
     enum FroggerState: String, Codable { case unknown, installed, removed }
     var frogger = FroggerState.unknown  // what the firmware partition held when Crate last read it (Frogger.swift)

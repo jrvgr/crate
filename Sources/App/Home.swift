@@ -93,7 +93,7 @@ struct SinglesTile: View {
                 ForEach(Array(albums.prefix(3).enumerated().reversed()), id: \.offset) { i, a in
                     Color.clear.aspectRatio(1, contentMode: .fit)
                         .overlay { Cover(image: model.artwork[a.id], seed: a.id) }
-                        .clipShape(.rect(cornerRadius: 14))
+                        .clipShape(.rect(cornerRadius: 14, style: .continuous))
                         .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
                         .scaleEffect(1 - CGFloat(i) * 0.06)
                         .offset(y: CGFloat(i) * -9)
@@ -120,6 +120,7 @@ final class IPodUI: ObservableObject {
 
 struct IPodView: View {
     @EnvironmentObject var model: Model
+    @EnvironmentObject var player: Player
     @StateObject private var ui = IPodUI()
 
     var body: some View {
@@ -175,7 +176,9 @@ struct IPodView: View {
 
     func header(_ i: IPodInfo, _ db: ITunesDB) -> some View {
         HStack(spacing: 22) {
-            PodPicture(height: 220)
+            // while something plays it's the remote (what the sidebar showed), wheel and buttons working
+            Group { if player.current != nil { LiveIPod(height: 220) } else { PodPicture(height: 220) } }
+                .heroTarget(.ipod("page"))
             VStack(alignment: .leading, spacing: 6) {
                 Text(i.modelName).font(.caption.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
                 Text(model.podName).font(.largeTitle.bold())
@@ -186,7 +189,7 @@ struct IPodView: View {
                 }
                 if !model.connected {
                     Label("Not connected · last seen \((model.lastSeen ?? Date()).formatted(.relative(presentation: .named))). Changes you queue sync \(model.podSettings.syncOnConnect ? "by themselves when it's plugged in" : "when you press Sync").",
-                          systemImage: "powerplug").font(.callout).foregroundStyle(.orange)
+                          systemImage: "powerplug").font(.callout).foregroundStyle(.secondary)     // a normal state, not a warning
                 }
                 Text([ByteCountFormatter.string(fromByteCount: i.capacity, countStyle: .file),
                       (try? i.mount.resourceValues(forKeys: [.volumeLocalizedFormatDescriptionKey]))?.volumeLocalizedFormatDescription ?? "",
@@ -292,17 +295,6 @@ struct IPodView: View {
             SettingsCard {
                 SettingRow(icon: "music.note.list", title: "Save On-The-Go lists", detail: "On-The-Go becomes an “On-The-Go N” playlist (playlists saved or changed on the iPod are always kept)") {
                     Toggle("", isOn: $model.podSettings.importOnTheGo).toggleStyle(.switch).labelsHidden()
-                }
-                if model.froggerFeatures {
-                Divider().padding(.leading, 50)
-                SettingRow(icon: "eye.slash", title: "Hidden playlists",
-                           detail: "Right-click a playlist › Hide Its Songs from iPod Library. Songs only in those playlists stay out of Artists and Albums (needs Frogger on the iPod)") {
-                    Picker("", selection: $model.podSettings.hideMarkAtEnd) {
-                        Text("~Name").tag(false)
-                        Text("Name ~").tag(true)
-                    }
-                    .labelsHidden().fixedSize()
-                }
                 }
                 Divider().padding(.leading, 50)
                 SettingRow(icon: "person.2", title: "File collaborations under the main artist",
@@ -537,14 +529,16 @@ struct SongsView: View {
         let rows = ui.rows(rowsKey) { filtered.sorted(using: ui.sort) }
         Table(rows, selection: $ui.selection, sortOrder: $ui.sort, columnCustomization: $ui.columns) {
             TableColumn("") { (t: LibTrack) in
-                // on the iPod is the usual state: faint; queued, partly and removing stand out, as on album covers
-                let m = model.songMark(t)
+                // on the iPod or not is the usual state: only on the selected rows (and clickable only where it shows);
+                // queued, partly and removing always stand out, as on album covers
+                let m = model.songMark(t), shown = (m != .none && m != .onIPod) || ui.selection.contains(t.id)
                 Button { model.toggleSong(t) } label: {
-                    Image(systemName: m.icon.map { $0 == "checkmark" ? "checkmark.circle" : $0 + ".circle.fill" } ?? "plus.circle")
-                        .foregroundStyle(m == .none ? AnyShapeStyle(.quaternary) : m == .onIPod ? AnyShapeStyle(.tertiary) : AnyShapeStyle(m.tint))
+                    Image(systemName: m.icon.map { $0 == "checkmark" ? "checkmark.circle.fill" : $0 + ".circle.fill" } ?? "plus.circle")
+                        .foregroundStyle(m == .none ? AnyShapeStyle(.secondary) : AnyShapeStyle(m.tint))
                 }
                 .buttonStyle(.plain)
                 .help(m == .none ? "Add this song to the iPod" : m.help)
+                .opacity(shown ? 1 : 0).allowsHitTesting(shown)
             }
             .width(22).customizationID("ipod").disabledCustomizationBehavior(.visibility)
             TableColumn("Title", value: \.title) { (t: LibTrack) in
@@ -553,16 +547,16 @@ struct SongsView: View {
                         if let img = model.artwork[t.album.lowercased()] { Image(nsImage: img).resizable().scaledToFill() }
                         else { Color.secondary.opacity(0.15) }
                     }
-                    .frame(width: 26, height: 26).clipShape(.rect(cornerRadius: 4))
+                    .frame(width: 26, height: 26).clipShape(.rect(cornerRadius: 4, style: .continuous))
                     Text(t.title).lineLimit(1)
                     if model.player.current?.id == t.id { Image(systemName: "speaker.wave.2.fill").font(.caption).foregroundStyle(.tint) }
                 }
             }
             .width(min: 160, ideal: 280).customizationID("title").disabledCustomizationBehavior(.visibility)
             TableColumn("Artist", value: \.artist) { (t: LibTrack) in Text(t.trackArtist.isEmpty ? t.artist : t.trackArtist).foregroundStyle(.secondary) }
-                .customizationID("artist")
+                .width(min: 100, ideal: 180).customizationID("artist")
             TableColumn("Album", value: \.album) { (t: LibTrack) in Text(t.album).foregroundStyle(.secondary) }
-                .customizationID("album")
+                .width(min: 100, ideal: 200).customizationID("album")
             TableColumn("Genre", value: \.genre) { (t: LibTrack) in Text(t.genre).foregroundStyle(.secondary) }
                 .width(min: 60, ideal: 90).customizationID("genre").defaultVisibility(.hidden)
             TableColumn("Year", value: \.year) { (t: LibTrack) in Text(t.year > 0 ? String(t.year) : "").monospacedDigit().foregroundStyle(.secondary) }
@@ -638,7 +632,7 @@ struct SongsView: View {
     var filterBar: some View {
         let (genres, kinds) = ui.menus(model.libraryVersion, model.libTracks)
         return HStack(spacing: 8) {
-            FilterField(prompt: "Title, artist, album, genre, year", text: $ui.query)
+            FilterField(prompt: "Filter songs", text: $ui.query)
             Menu {
                 Picker("Show", selection: $ui.show) { ForEach(SongsUI.Show.allCases, id: \.self) { Text($0.rawValue) } }.pickerStyle(.inline)
             } label: { Text(ui.show.rawValue) }

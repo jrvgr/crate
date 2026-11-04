@@ -97,15 +97,15 @@ struct CoverFlow<Art: View>: View {
 
     func cover(_ i: Int, d: Double, size: Double) -> some View {
         let t = min(abs(d), 1), s: Double = d < 0 ? -1 : 1, far = abs(d)
-        let art = self.art(i).frame(width: size, height: size).clipShape(.rect(cornerRadius: 14))
+        let art = self.art(i).frame(width: size, height: size).clipShape(.rect(cornerRadius: 14, style: .continuous))
         return VStack(spacing: 6) {
             art
                 .overlay {   // a glassy edge and a soft specular sheen, strongest on the cover in the middle
-                    RoundedRectangle(cornerRadius: 14)
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .strokeBorder(LinearGradient(colors: [.white.opacity(0.55), .white.opacity(0.05), .white.opacity(0.25)],
                                                      startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
                     LinearGradient(colors: [.white.opacity(0.12 * (1 - t)), .clear], startPoint: .topLeading, endPoint: .center)
-                        .clipShape(.rect(cornerRadius: 14)).allowsHitTesting(false)
+                        .clipShape(.rect(cornerRadius: 14, style: .continuous)).allowsHitTesting(false)
                 }
                 .shadow(color: .black.opacity(0.35), radius: 14, y: 8)
             art

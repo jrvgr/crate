@@ -43,6 +43,11 @@ enum Snapshot {
             model.search = ""; model.pane = .albums; model.path = [.album(a)]
         } else if what.hasPrefix("artist:") {
             model.search = ""; model.pane = .artists; model.path = [.artist(String(what.dropFirst(7)))]
+        } else if what.hasPrefix("soulseek-search:") {      // "soulseek-search:<songs>:<query>", as an album page's Find on Soulseek
+            let parts = what.dropFirst(16).split(separator: ":", maxSplits: 1).map(String.init)
+            model.findOnSoulseek("", parts.last ?? "", songs: Int(parts.first ?? "") ?? 0)
+        } else if what.hasPrefix("push-artist:") {          // an artist page over whatever is showing (a search's results, say)
+            model.path.append(.artist(String(what.dropFirst(12))))
         } else if what.hasPrefix("search:") {
             model.search = String(what.dropFirst(7))
         } else if let p = panes[what] {

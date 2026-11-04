@@ -137,7 +137,9 @@ struct DownloadsView: View {
                                                              : "Download from Soulseek or import from Apple Music; everything shows up here."))
                         .padding(.top, 50)
                 }
-                let active = shown.filter { !$0.finished }, done = shown.filter(\.finished)
+                // the ones that went wrong first, so one failure isn't buried among the finished ones
+                let wrong = { (e: DownloadEntry) in e.failed || e.files.contains(where: \.failed) }
+                let active = shown.filter { !$0.finished }, done = shown.filter { $0.finished && wrong($0) } + shown.filter { $0.finished && !wrong($0) }
                 if !active.isEmpty {
                     SectionTitle(text: "In Progress", count: active.count)
                     ForEach(active) { DownloadCard(entry: $0, ui: ui) }
@@ -223,11 +225,13 @@ struct DownloadCard: View {
                     else if let u = entry.artURL { CachedImage(url: u, seed: "Downloads.swift:10") }
                     else { Cover(image: nil, seed: entry.title) }
                 }
-                .frame(width: 56, height: 56).clipShape(.rect(cornerRadius: 9))
+                .frame(width: 56, height: 56).clipShape(.rect(cornerRadius: 9, style: .continuous))
                 .overlay(alignment: .bottomTrailing) {
-                    Image(systemName: entry.source.icon).font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
-                        .frame(width: 20, height: 20).background(entry.source.tint, in: .circle)
-                        .offset(x: 5, y: 5).help(entry.source.name)
+                    if !quiet {        // where it came from, like the buttons: on hover once it's in the library
+                        Image(systemName: entry.source.icon).font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
+                            .frame(width: 20, height: 20).background(entry.source.tint, in: .circle)
+                            .offset(x: 5, y: 5).help(entry.source.name)
+                    }
                 }
                 VStack(alignment: .leading, spacing: 3) {
                     Text(entry.title).font(.headline).lineLimit(1)
@@ -326,7 +330,7 @@ struct YTJobDetail: View {
         let done = job.items.filter(\.done).count
         return HStack(spacing: 14) {
             CachedImage(url: URL(string: job.art), seed: "Downloads.swift:10")
-                .frame(width: 72, height: 72).clipShape(.rect(cornerRadius: 10))
+                .frame(width: 72, height: 72).clipShape(.rect(cornerRadius: 10, style: .continuous))
             VStack(alignment: .leading, spacing: 3) {
                 Text(job.title).font(.title3.bold()).lineLimit(1)
                 Text([job.subtitle, "\(done) of \(job.items.count) songs", "started " + job.started.formatted(date: .omitted, time: .shortened)]

@@ -93,7 +93,7 @@ struct DedupeSheet: View {
             }
             ScrollView {
                 LazyVStack(spacing: 8) {
-                    ForEach(shown) { g in row(g) }
+                    ForEach(shown) { g in DupeGroupRow(g: g, s: s) }
                 }
             }
             HStack {
@@ -119,9 +119,22 @@ struct DedupeSheet: View {
         }
     }
 
-    func row(_ g: DupeGroup) -> some View {
+    func trash(_ groups: [DupeGroup]) async {
+        s.working = true
+        await model.trash(groups.flatMap(\.extra))
+        s.working = false
+        dismiss()
+    }
+}
+
+/// One song's copies: tick to keep only the best one, or pick another copy to keep.
+struct DupeGroupRow: View {
+    var g: DupeGroup
+    @ObservedObject var s: DedupeState
+
+    var body: some View {
         let first = g.copies[0]
-        return HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: 12) {
             Toggle("", isOn: Binding(get: { s.picked.contains(g.id) },
                                      set: { if $0 { s.picked.insert(g.id) } else { s.picked.remove(g.id) } }))
                 .labelsHidden().disabled(s.working)
@@ -170,10 +183,55 @@ struct DedupeSheet: View {
         s.groups[i].keep = path
     }
 
-    func trash(_ groups: [DupeGroup]) async {
-        s.working = true
-        await model.trash(groups.flatMap(\.extra))
-        s.working = false
-        dismiss()
+}
+
+/// Duplicates on an album's own page (like Find Metadata): the songs that are on it more than once, also
+/// counting other albums with the same name by the same artist (a second copy of the album).
+struct DedupePanel: View {
+    @EnvironmentObject var model: Model
+    var album: Album
+    var close: () -> Void
+    @StateObject private var s = DedupeState()
+
+    var body: some View {
+        let chosen = s.groups.filter { s.picked.contains($0.id) }
+        let freed = chosen.flatMap { g in g.extra.map { g.sizes[$0.path] ?? 0 } }.reduce(0, +)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label("Duplicates", systemImage: "square.on.square").font(.title3.bold())
+                Spacer()
+                Button(action: close) { Image(systemName: "xmark") }.buttonStyle(.borderless).help("Close").disabled(s.working)
+            }
+            Text(s.scanning ? "Looking for songs that are here more than once…"
+                 : s.groups.isEmpty ? "No song is on this album twice."
+                 : "\(chosen.count) of \(s.groups.count) keep only their best copy; \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file)) to the Trash")
+                .foregroundStyle(.secondary)
+            VStack(spacing: 8) { ForEach(s.groups) { g in DupeGroupRow(g: g, s: s) } }
+            HStack {
+                if s.scanning || s.working { ProgressView().controlSize(.small) }
+                Spacer()
+                if s.groups.isEmpty && !s.scanning {
+                    Button("Done", action: close).buttonStyle(.glassProminent).keyboardShortcut(.defaultAction)
+                } else {
+                    Button("Cancel", action: close).buttonStyle(.glass).keyboardShortcut(.cancelAction).disabled(s.working)
+                    Button("Move \(chosen.map(\.extra.count).reduce(0, +)) to Trash") {
+                        Task { s.working = true; await model.trash(chosen.flatMap(\.extra)); s.working = false; close() }
+                    }
+                    .buttonStyle(.glassProminent).keyboardShortcut(.defaultAction)
+                    .disabled(chosen.isEmpty || s.working)
+                }
+            }
+        }
+        .padding(18)
+        .glassEffect(.regular.tint(.accentColor.opacity(0.08)), in: .rect(cornerRadius: 18))
+        .task {
+            // this album and its other copies: the same name (editions aside) by the same artist
+            let key = Dedupe.loose(Dedupe.plain(album.title)), artist = album.artist.lowercased()
+            let tracks = model.albums.filter { $0.id == album.id || ($0.artist.lowercased() == artist && Dedupe.loose(Dedupe.plain($0.title)) == key) }
+                .flatMap(\.tracks)
+            s.groups = await Task.detached { Dedupe.find(tracks) }.value
+            s.picked = Set(s.groups.map(\.id))
+            s.scanning = false
+        }
     }
 }

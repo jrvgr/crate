@@ -106,7 +106,7 @@ struct LinkSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
                 CachedImage(url: model.artURL(track.artworkPath), seed: "Links.swift")
-                    .frame(width: 44, height: 44).clipShape(.rect(cornerRadius: 6))
+                    .frame(width: 44, height: 44).clipShape(.rect(cornerRadius: 6, style: .continuous))
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Link “\(track.title)” to a song you have").font(.headline).lineLimit(1)
                     Text("\(track.artist) — \(track.album)\(track.lengthMs > 0 ? " · " + duration(track.lengthMs) : "")")

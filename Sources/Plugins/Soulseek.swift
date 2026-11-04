@@ -99,6 +99,12 @@ final class Slskd: ObservableObject {
     @Published var searching = false
     @Published var searchState = ""
     @Published var results: [SlskFolder] = []
+    // browsing one user's shares, instead of the search results
+    @Published var browsing: String?
+    @Published var browseFolders: [SlskFolder] = []
+    @Published var browseState = ""
+    @Published var browseFilter = ""
+    private var browseTask: Task<Void, Never>?
     @Published var jobs: [SlskJob] = []
     // quality rules: what counts as a usable folder, and which one is picked automatically
     @AppStorage("slskdPrefer") var prefer = "any"           // "any", "lossless", "mp3"
@@ -146,10 +152,10 @@ final class Slskd: ObservableObject {
         token = t
     }
 
-    func call(_ path: String, method: String = "GET", body: Any? = nil, retry: Bool = true) async throws -> Any? {
+    func call(_ path: String, method: String = "GET", body: Any? = nil, timeout: Double = 15, retry: Bool = true) async throws -> Any? {
         guard configured, let u = URL(string: base + "/api/v0" + path) else { throw SlskdError.notConfigured }
         if apiKey.isEmpty, token.isEmpty { try await login() }
-        var r = URLRequest(url: u); r.httpMethod = method; r.timeoutInterval = 15
+        var r = URLRequest(url: u); r.httpMethod = method; r.timeoutInterval = timeout
         if !apiKey.isEmpty { r.setValue(apiKey, forHTTPHeaderField: "X-API-Key") }
         else { r.setValue("Bearer " + token, forHTTPHeaderField: "Authorization") }
         if let body {
@@ -158,7 +164,7 @@ final class Slskd: ObservableObject {
         }
         let (d, resp) = try await URLSession.shared.data(for: r)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        if code == 401, retry, apiKey.isEmpty { token = ""; return try await call(path, method: method, body: body, retry: false) }
+        if code == 401, retry, apiKey.isEmpty { token = ""; return try await call(path, method: method, body: body, timeout: timeout, retry: false) }
         guard (200..<300).contains(code) else { throw SlskdError.http(code) }
         return d.isEmpty ? nil : try? JSONSerialization.jsonObject(with: d)
     }
@@ -184,6 +190,7 @@ final class Slskd: ObservableObject {
         let q = q.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return }
         query = q
+        closeBrowse()
         searchTask?.cancel()
         searchTask = Task { await runSearch(q) }
     }
@@ -202,10 +209,22 @@ final class Slskd: ObservableObject {
         } catch { self.error = error.localizedDescription; searchState = "" }
     }
 
+    /// What Soulseek can match: peers match whole words of the file path, so punctuation glues words
+    /// together ("tomorrow's", "a.k.a"), a leading "-" excludes a word, and "(Deluxe Edition)" or
+    /// "[Remastered]" rarely is in anyone's folder name.
+    static func terms(_ q: String) -> String {
+        var s = q.replacingOccurrences(of: #"\s*[\(\[][^\)\]]*[\)\]]"#, with: " ", options: .regularExpression)
+        s = s.replacingOccurrences(of: "'", with: "").replacingOccurrences(of: "’", with: "").replacingOccurrences(of: "&", with: " ")
+        s = String(s.map { $0.isLetter || $0.isNumber ? $0 : " " })
+        let words = s.split(separator: " ").map(String.init).filter { $0.count > 1 || $0.first?.isNumber == true }
+        return words.isEmpty ? q : words.joined(separator: " ")
+    }
+
     /// One Soulseek search, start to finish (about 15 s); `update` gets the folders as they come in.
     func find(_ q: String, update: (([SlskFolder], Int, Bool) -> Void)? = nil) async throws -> [SlskFolder] {
         let id = UUID().uuidString.lowercased()
-        _ = try await call("/searches", method: "POST", body: ["id": id, "searchText": q, "searchTimeout": 15000])
+        _ = try await call("/searches", method: "POST", body: ["id": id, "searchText": Self.terms(q), "searchTimeout": 15000,
+                                                               "responseLimit": 300, "fileLimit": 20000])
         defer { Task { _ = try? await self.call("/searches/\(id)", method: "DELETE") } }
         var complete = false, folders: [SlskFolder] = []
         for _ in 0..<40 where !complete {
@@ -242,14 +261,24 @@ final class Slskd: ObservableObject {
         .max { $0.rank < $1.rank }
     }
 
+    /// The file to download for one song: in a folder that passes the rules, named like the song,
+    /// from a folder that looks like its album when there is one, then the best source.
+    func bestSong(_ folders: [SlskFolder], title: String, album: String) -> (SlskFolder, SlskFile)? {
+        let loose = { (s: String) in s.lowercased().filter { $0.isLetter || $0.isNumber } }
+        let want = loose(title), albumWant = loose(album)
+        guard !want.isEmpty else { return nil }
+        let hits = folders.filter(passes).compactMap { f in
+            f.audio.first { loose(($0.name as NSString).deletingPathExtension).contains(want) }.map { (f, $0) }
+        }
+        let fromAlbum = hits.filter { !albumWant.isEmpty && loose($0.0.name + $0.0.parent).contains(albumWant) }
+        return (fromAlbum.isEmpty ? hits : fromAlbum).max { $0.0.rank < $1.0.rank }
+    }
+
     private func parse(_ j: Any?) -> [SlskFolder] {
         var out: [SlskFolder] = []
         for r in (j as? [[String: Any]]) ?? [] {
             let user = r["username"] as? String ?? ""
-            let files: [SlskFile] = ((r["files"] as? [[String: Any]]) ?? []).map { f in
-                SlskFile(filename: f["filename"] as? String ?? "", size: f["size"] as? Int ?? 0, bitRate: f["bitRate"] as? Int ?? 0,
-                         bitDepth: f["bitDepth"] as? Int ?? 0, sampleRate: f["sampleRate"] as? Int ?? 0, length: f["length"] as? Int ?? 0)
-            }
+            let files = ((r["files"] as? [[String: Any]]) ?? []).map { Self.file($0, in: nil) }
             let byDir = Dictionary(grouping: files) { $0.filename.split(separator: "\\").dropLast().joined(separator: "\\") }
             for (dir, fs) in byDir where fs.contains(where: \.isAudio) {
                 out.append(SlskFolder(username: user, directory: dir, files: fs.sorted { $0.filename < $1.filename },
@@ -260,12 +289,66 @@ final class Slskd: ObservableObject {
         return out.sorted { $0.rank > $1.rank }
     }
 
+    /// A file from slskd JSON; browse and folder answers name it relative to its folder.
+    private static func file(_ f: [String: Any], in dir: String?) -> SlskFile {
+        var name = f["filename"] as? String ?? ""
+        if let dir, !name.contains("\\") { name = dir + "\\" + name }
+        return SlskFile(filename: name, size: f["size"] as? Int ?? 0, bitRate: f["bitRate"] as? Int ?? 0,
+                        bitDepth: f["bitDepth"] as? Int ?? 0, sampleRate: f["sampleRate"] as? Int ?? 0, length: f["length"] as? Int ?? 0)
+    }
+
+    private static func folders(_ j: Any?) -> [(String, [SlskFile])] {
+        let dirs = (j as? [[String: Any]]) ?? ((j as? [String: Any]).map { [$0] } ?? [])
+        return dirs.compactMap { d in
+            guard let name = (d["name"] ?? d["directory"]) as? String else { return nil }
+            return (name, ((d["files"] as? [[String: Any]]) ?? []).map { file($0, in: name) }.sorted { $0.filename < $1.filename })
+        }
+    }
+
+    private func path(_ user: String) -> String { user.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? user }
+
+    // MARK: browsing a user
+
+    /// Shows everything `user` shares, folder per folder (large shares take a minute to come in).
+    func browse(_ user: String) {
+        browseTask?.cancel()
+        browsing = user; browseFolders = []; browseFilter = ""; browseState = "Asking \(user) for their shares…"
+        browseTask = Task {
+            do {
+                let info = try? await call("/users/\(path(user))/info") as? [String: Any]
+                let j = try await call("/users/\(path(user))/browse", timeout: 180) as? [String: Any]
+                guard browsing == user else { return }
+                let free = info?["hasFreeUploadSlot"] as? Bool ?? false, queue = info?["queueLength"] as? Int ?? 0
+                let speed = info?["uploadSpeed"] as? Int ?? 0
+                browseFolders = Self.folders(j?["directories"]).filter { $0.1.contains(where: \.isAudio) }.map {
+                    SlskFolder(username: user, directory: $0.0, files: $0.1, freeSlot: free, speed: speed, queue: queue)
+                }.sorted { $0.directory.localizedStandardCompare($1.directory) == .orderedAscending }
+                browseState = browseFolders.isEmpty ? "\(user) shares no music (or is offline)" : ""
+            } catch is CancellationError {
+            } catch {
+                if browsing == user { browseState = "Couldn't browse \(user): \(error.localizedDescription)" }
+            }
+        }
+    }
+
+    func closeBrowse() { browseTask?.cancel(); browsing = nil; browseFolders = []; browseState = "" }
+
+    /// The whole remote folder: a search answer only lists the files that matched.
+    func complete(_ f: SlskFolder) async -> SlskFolder {
+        guard let j = try? await call("/users/\(path(f.username))/directory", method: "POST", body: ["directory": f.directory], timeout: 60),
+              let files = Self.folders(j).first(where: { $0.0 == f.directory })?.1 ?? Self.folders(j).first?.1,
+              files.filter(\.isAudio).count >= f.audio.count else { return f }
+        var full = f; full.files = files
+        return full
+    }
+
     // MARK: downloads
 
-    /// Queues the folder's audio files (and its cover images) on slskd.
-    func download(_ f: SlskFolder) async throws {
+    /// Queues the folder's audio files (or only `song`), and its cover images, on slskd.
+    func download(_ f: SlskFolder, only song: SlskFile? = nil) async throws {
+        let f = song == nil ? await complete(f) : f
         let images: Set<String> = ["jpg", "jpeg", "png"]
-        let files = f.files.filter { $0.isAudio || images.contains($0.ext) }.map { ["filename": $0.filename, "size": $0.size] as [String: Any] }
+        let files = f.files.filter { file in song.map { file == $0 } ?? file.isAudio || images.contains(file.ext) }.map { ["filename": $0.filename, "size": $0.size] as [String: Any] }
         let user = f.username.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? f.username
         _ = try await call("/transfers/downloads/\(user)", method: "POST", body: files)
         requested.insert(f.id)
@@ -371,11 +454,22 @@ struct SoulseekView: View {
             }
             .padding(.horizontal, 30).padding(.vertical, 10)
 
-            if !slsk.configured {
+            if let user = slsk.browsing {
+                SlskBrowseView(user: user)
+            } else if !slsk.configured {
                 PluginSetupNotice(plugin: .soulseek, text: "Add your slskd address and login to search Soulseek.")
             } else if let e = slsk.error, slsk.results.isEmpty {
                 ContentUnavailableView("slskd unreachable", systemImage: "wifi.exclamationmark", description: Text(e))
-            } else if shown.isEmpty && !slsk.searching {
+            } else if shown.isEmpty && slsk.searching {
+                // a search takes about 15 s and folders come in as users answer: say so instead of an empty page
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text("Searching Soulseek for “\(slsk.query)”").font(.headline)
+                    Text(slsk.results.isEmpty ? "Folders show up here as users answer" : "\(slsk.results.count) folders so far, none pass the quality rules yet")
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity).padding(.top, 60)
+            } else if shown.isEmpty {
                 ContentUnavailableView("Search Soulseek", systemImage: "arrow.down.circle",
                                        description: Text("Results are grouped per folder; download one and it's imported into the library when it's done."))
             } else {
@@ -428,7 +522,11 @@ struct SlskFolderRow: View {
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
-                    Label(folder.username, systemImage: "person.fill").font(.caption).lineLimit(1)
+                    Button { slsk.browse(folder.username) } label: {
+                        Label(folder.username, systemImage: "person.fill").font(.caption).lineLimit(1)
+                    }
+                    .buttonStyle(.plain).help("Browse everything \(folder.username) shares")
+                    .disabled(slsk.browsing == folder.username)
                     HStack(spacing: 4) {
                         Circle().fill(folder.freeSlot ? .green : .orange).frame(width: 7, height: 7)
                         Text(folder.freeSlot ? "Free slot" : "Queue \(folder.queue)")
@@ -471,6 +569,43 @@ struct SlskFolderRow: View {
             }
         }
         .glassEffect(.regular, in: .rect(cornerRadius: 14))
+    }
+}
+
+/// Everything one user shares, as folders with music, filtered by folder name.
+struct SlskBrowseView: View {
+    @EnvironmentObject var slsk: Slskd
+    var user: String
+
+    var body: some View {
+        let words = slsk.browseFilter.lowercased().split(separator: " ")
+        let shown = slsk.browseFolders.filter { f in words.allSatisfy { f.directory.lowercased().contains($0) } }
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Button { slsk.closeBrowse() } label: { Label("Search Results", systemImage: "chevron.left") }
+                    .buttonStyle(.glass)
+                Label(user, systemImage: "person.fill").font(.headline)
+                Spacer()
+                TextField("Filter folders", text: $slsk.browseFilter).textFieldStyle(.roundedBorder).frame(width: 220)
+                Text(slsk.browseFolders.isEmpty ? "" : "\(shown.count) of \(slsk.browseFolders.count) folders")
+                    .font(.callout).foregroundStyle(.secondary).monospacedDigit()
+            }
+            .padding(.horizontal, 30).padding(.bottom, 10)
+            if slsk.browseFolders.isEmpty {
+                VStack(spacing: 10) {
+                    if slsk.browseState.hasPrefix("Asking") { ProgressView() }
+                    Text(slsk.browseState).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity).padding(.top, 60)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach(shown.prefix(500)) { SlskFolderRow(folder: $0) }
+                    }
+                    .padding(.horizontal, 24).padding(.bottom, 60)
+                }
+            }
+        }
     }
 }
 
