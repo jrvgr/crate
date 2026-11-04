@@ -38,23 +38,40 @@ struct ArtistPortrait: View {
 
 /// Spotify's mark (a green disc with three arcs), for what's only on Spotify; the radio waves didn't say Spotify.
 struct SpotifyMark: View {
-    var mono = false            // in the foreground colour with the arcs cut out, like an SF Symbol (the sidebar)
     var body: some View {
         Canvas { ctx, size in
             let w = size.width
-            ctx.fill(Path(ellipseIn: CGRect(origin: .zero, size: size)), with: mono ? .foreground : .color(Color(red: 0.12, green: 0.84, blue: 0.38)))
-            if mono { ctx.blendMode = .destinationOut }
-            // three arcs, widest on top, each a little lower on the right
-            for (i, (x0, x1, y, line)) in [(0.22, 0.79, 0.36, 0.105), (0.26, 0.74, 0.53, 0.085), (0.3, 0.69, 0.68, 0.07)].enumerated() {
-                var p = Path()
-                p.move(to: CGPoint(x: x0 * w, y: y * w))
-                p.addQuadCurve(to: CGPoint(x: x1 * w, y: (y + 0.05) * w), control: CGPoint(x: 0.5 * w, y: (y - 0.12 + Double(i) * 0.015) * w))
-                ctx.stroke(p, with: .color(.black), style: StrokeStyle(lineWidth: line * w, lineCap: .round))
-            }
+            ctx.fill(Path(ellipseIn: CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.12, green: 0.84, blue: 0.38)))
+            for (p, line) in Self.arcs(w) { ctx.stroke(p, with: .color(.black), style: StrokeStyle(lineWidth: line, lineCap: .round)) }
         }
         .aspectRatio(1, contentMode: .fit)
         .accessibilityLabel("Spotify")
     }
+
+    /// The three arcs at width `w`, widest on top, each a little lower on the right; with their line widths.
+    static func arcs(_ w: CGFloat) -> [(Path, CGFloat)] {
+        [(0.22, 0.79, 0.36, 0.105), (0.26, 0.74, 0.53, 0.085), (0.3, 0.69, 0.68, 0.07)].enumerated().map { i, a in
+            let (x0, x1, y, line) = a
+            var p = Path()
+            p.move(to: CGPoint(x: x0 * w, y: y * w))
+            p.addQuadCurve(to: CGPoint(x: x1 * w, y: (y + 0.05) * w), control: CGPoint(x: 0.5 * w, y: (y - 0.12 + Double(i) * 0.015) * w))
+            return (p, line * w)
+        }
+    }
+
+    /// The mark as a template image: a sidebar tints it like an SF Symbol (the accent, white when selected),
+    /// which a Canvas in a Label's icon doesn't get.
+    static let template: NSImage = {
+        let image = NSImage(size: NSSize(width: 16, height: 16), flipped: true) { r in
+            guard let cg = NSGraphicsContext.current?.cgContext else { return false }
+            cg.addEllipse(in: r.insetBy(dx: 0.5, dy: 0.5)); cg.setFillColor(.black); cg.fillPath()
+            cg.setBlendMode(.clear); cg.setLineCap(.round)
+            for (p, line) in arcs(r.width) { cg.addPath(p.cgPath); cg.setLineWidth(line); cg.strokePath() }
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
 }
 
 /// A Spotify album in a grid: its cover with whether you have the files.

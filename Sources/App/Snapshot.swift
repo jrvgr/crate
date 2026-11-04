@@ -34,6 +34,18 @@ enum Snapshot {
             try? out.write(toFile: file, atomically: true, encoding: .utf8)
             return
         }
+        if what == "pending-info" {                // what the Sync button's count is made of, as text
+            let m = model
+            let parts: [(String, Int)] = [("toAdd", m.toAdd.count), ("toRemove", m.toRemove.count), ("songsToAdd", m.songsToAdd.count),
+                ("songsToRemove", m.songsToRemove.count), ("playlistsToAdd", m.playlistsToAdd.count), ("playlistsToRemove", m.playlistsToRemove.count),
+                ("podSavedLists", m.podSavedLists.count), ("pendingName", m.pendingName == nil ? 0 : 1), ("smartPending", m.smartPending),
+                ("retags", m.retags.count), ("hidePending", m.hidePending), ("crateNeedsSync", m.cratePlaylists.filter(m.crateNeedsSync).count),
+                ("podEditsPending", m.podEditsPending), ("pendingCount", m.pendingCount)]
+            let p = m.makePlan()
+            let out = parts.map { "\($0.0): \($0.1)" } + ["plan hide \(p.hide) show \(p.unhide) marks \(p.markPlaylists) add \(p.playlistsAdd)"]
+            try? out.joined(separator: "\n").write(toFile: file, atomically: true, encoding: .utf8)
+            return
+        }
         var settings = false
         if what.hasPrefix("settings:") {
             UserDefaults.standard.set(String(what.dropFirst(9)), forKey: "settingsTab")

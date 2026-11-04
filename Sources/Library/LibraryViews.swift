@@ -2,9 +2,39 @@ import SwiftUI
 
 // MARK: albums
 
+/// The artist whose header floats at the top of the grid: its own header has scrolled past, its albums haven't.
+@MainActor
+final class FloatingHeader: ObservableObject {
+    @Published var key: String?
+    var top: CGFloat = 0                                // where the floating header sits (the toolbar's edge)
+}
+
 struct AlbumsView: View {
     @EnvironmentObject var model: Model
+    @StateObject private var floating = FloatingHeader()
     private let columns = [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 22)]
+
+    func artistHeader(_ group: [Album]) -> some View {
+        NavigationLink(value: Route.artist(group[0].artist)) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(group[0].artist).font(.title2.bold())
+                Text("\(group.count)").foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 6).padding(.horizontal, 10)
+            .glassEffect(.regular, in: .capsule)
+        }
+        .buttonStyle(.plain)
+        .help("Open \(group[0].artist)")
+    }
+
+    /// A section reports where it is: it floats once its header has gone under the toolbar, and lets go
+    /// (the header flies up) when the end of its albums comes up to the header.
+    func track(_ key: String, _ f: CGRect) {
+        let header: CGFloat = 50
+        let floats = f.minY < floating.top && f.maxY > floating.top + header
+        if floats, floating.key != key { floating.key = key }
+        else if !floats, floating.key == key { floating.key = nil }
+    }
 
     var shown: [Album] {
         model.allAlbums.filter { a in
@@ -74,23 +104,15 @@ struct AlbumsView: View {
                             .padding(.top, 120)
                     }
                     if model.albumsByArtist {
-                        LazyVStack(alignment: .leading, spacing: 26, pinnedViews: [.sectionHeaders]) {
+                        LazyVStack(alignment: .leading, spacing: 26) {
                             ForEach(byArtist(list), id: \.0) { key, group in
-                                Section {
+                                VStack(alignment: .leading, spacing: 26) {
+                                    artistHeader(group)
+                                        .opacity(floating.key == key ? 0 : 1)     // its floating copy is showing
                                     tiles(group)
-                                } header: {
-                                    NavigationLink(value: Route.artist(group[0].artist)) {
-                                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                            Text(group[0].artist).font(.title2.bold())
-                                            Text("\(group.count)").foregroundStyle(.secondary)
-                                        }
-                                        .padding(.vertical, 6).padding(.horizontal, 10)
-                                        .glassEffect(.regular, in: .capsule)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("Open \(group[0].artist)")
-                                    .padding(.top, 10)      // pinned, it keeps some air under the toolbar
                                 }
+                                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("albums")) } action: { track(key, $0) }
+                                .onDisappear { if floating.key == key { floating.key = nil } }
                                 .id("artist-" + key)
                             }
                         }
@@ -102,6 +124,18 @@ struct AlbumsView: View {
                             .padding(.bottom, 50)
                     }
                 }
+                .coordinateSpace(.named("albums"))
+                .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.top } action: { floating.top = $0 + 10 }
+                .overlay(alignment: .topLeading) {
+                    // the current artist's header, under the toolbar until its albums run out; then it flies up
+                    if model.albumsByArtist, let key = floating.key, let group = byArtist(list).first(where: { $0.0 == key })?.1 {
+                        artistHeader(group)
+                            .padding(.leading, 24).padding(.top, 10)
+                            .transition(.asymmetric(insertion: .identity, removal: .move(edge: .top).combined(with: .opacity)))
+                            .id(key)
+                    }
+                }
+                .animation(.snappy(duration: 0.3), value: floating.key)
                 .overlay(alignment: .trailing) {
                     if marks.count > 3 {
                         LetterIndex(letters: LetterIndex.all) { l in
