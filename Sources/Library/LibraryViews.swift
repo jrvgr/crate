@@ -2,11 +2,37 @@ import SwiftUI
 
 // MARK: albums
 
-/// The artist whose header floats at the top of the grid: its own header has scrolled past, its albums haven't.
+/// The artist whose header floats at the top of the grid: the first section whose albums haven't run out
+/// under the header. While its own header is still below the spot, the copy follows it there; when the one
+/// before it runs out, the next one springs up into the spot (the bounce of the covers' flights).
 @MainActor
 final class FloatingHeader: ObservableObject {
     @Published var key: String?
+    @Published var offset: CGFloat = 0                  // below the spot: following its header, or springing up
     var top: CGFloat = 0                                // where the floating header sits (the toolbar's edge)
+    private var frames: [String: CGRect] = [:]          // the sections on screen, in the grid's space
+    private var pinned = false                          // sprang up ahead of its header: stays in the spot
+
+    static let header: CGFloat = 44, reach: CGFloat = 90      // a header's height; how far below the spot one can spring from
+
+    func track(_ key: String, _ f: CGRect?, order: [String]) {
+        frames[key] = f
+        guard let k = order.first(where: { (frames[$0]?.maxY ?? -.infinity) > top + Self.header }),
+              let f = frames[k], f.minY < top + Self.reach else {
+            if self.key != nil { withAnimation(.snappy(duration: 0.3)) { self.key = nil } }
+            pinned = false
+            return
+        }
+        let below = max(0, f.minY - top)
+        if k != self.key {
+            let hop = self.key != nil && below > 0      // the one before ran out: this one comes up to meet the spot
+            offset = below; pinned = hop
+            withAnimation(.snappy(duration: 0.3)) { self.key = k }     // the old one flies up
+            if hop { DispatchQueue.main.async { withAnimation(.spring(duration: 0.5, bounce: 0.3)) { self.offset = 0 } } }
+        } else if !pinned {
+            if offset != below { offset = below }
+        } else if below == 0 { pinned = false }         // its header caught up with it
+    }
 }
 
 struct AlbumsView: View {
@@ -25,15 +51,6 @@ struct AlbumsView: View {
         }
         .buttonStyle(.plain)
         .help("Open \(group[0].artist)")
-    }
-
-    /// A section reports where it is: it floats once its header has gone under the toolbar, and lets go
-    /// (the header flies up) when the end of its albums comes up to the header.
-    func track(_ key: String, _ f: CGRect) {
-        let header: CGFloat = 50
-        let floats = f.minY < floating.top && f.maxY > floating.top + header
-        if floats, floating.key != key { floating.key = key }
-        else if !floats, floating.key == key { floating.key = nil }
     }
 
     var shown: [Album] {
@@ -104,15 +121,16 @@ struct AlbumsView: View {
                             .padding(.top, 120)
                     }
                     if model.albumsByArtist {
+                        let groups = byArtist(list), order = groups.map(\.0)
                         LazyVStack(alignment: .leading, spacing: 26) {
-                            ForEach(byArtist(list), id: \.0) { key, group in
+                            ForEach(groups, id: \.0) { key, group in
                                 VStack(alignment: .leading, spacing: 26) {
                                     artistHeader(group)
                                         .opacity(floating.key == key ? 0 : 1)     // its floating copy is showing
                                     tiles(group)
                                 }
-                                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("albums")) } action: { track(key, $0) }
-                                .onDisappear { if floating.key == key { floating.key = nil } }
+                                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("albums")) } action: { floating.track(key, $0, order: order) }
+                                .onDisappear { floating.track(key, nil, order: order) }
                                 .id("artist-" + key)
                             }
                         }
@@ -128,14 +146,15 @@ struct AlbumsView: View {
                 .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.top } action: { floating.top = $0 + 10 }
                 .overlay(alignment: .topLeading) {
                     // the current artist's header, under the toolbar until its albums run out; then it flies up
+                    // and the next one springs up from its place in the grid (FloatingHeader)
                     if model.albumsByArtist, let key = floating.key, let group = byArtist(list).first(where: { $0.0 == key })?.1 {
                         artistHeader(group)
                             .padding(.leading, 24).padding(.top, 10)
+                            .offset(y: floating.offset)
                             .transition(.asymmetric(insertion: .identity, removal: .move(edge: .top).combined(with: .opacity)))
                             .id(key)
                     }
                 }
-                .animation(.snappy(duration: 0.3), value: floating.key)
                 .overlay(alignment: .trailing) {
                     if marks.count > 3 {
                         LetterIndex(letters: LetterIndex.all) { l in
