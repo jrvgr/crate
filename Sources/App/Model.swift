@@ -462,6 +462,12 @@ final class Model: ObservableObject {
         guard !loading else { return }
         loading = true; defer { loading = false }
         let job = startJob("Loading library", icon: "square.stack")
+        // at launch: the library as it was last time, with the covers this Mac has, while the folders and
+        // servers are read (shares can take a while); the scan below replaces it
+        if libTracks.isEmpty {
+            let last = await Task.detached { Store.load("library.json", [LibTrack]()) }.value
+            if !last.isEmpty { libTracks = last; rebuild(); await showCachedArtwork() }
+        }
         await loadIPodNow()
         var tracks: [LibTrack] = []
         libraryError = nil
@@ -503,6 +509,7 @@ final class Model: ObservableObject {
         }.map(\.element)
         subsonic.link(linked)
         libTracks = tracks
+        if !tracks.isEmpty { Task.detached { Store.save("library.json", tracks) } }     // for the next launch
         rebuild()
         await showCachedArtwork()
         playlistTracks = [:]
@@ -1313,6 +1320,8 @@ final class Model: ObservableObject {
     func sync() async {
         guard let ipod, let known = db, connected, !syncing else { return }
         syncing = true; report = nil
+        // at launch the library shown may still be last time's: sync against the one the scan finds
+        while loading { try? await Task.sleep(for: .milliseconds(250)) }
         // Start from what's on the iPod right now, not what Crate read earlier: anything another app
         // (or the iPod itself) changed in the meantime is kept, and only the queued changes are applied.
         // Only a database that truly isn't there yet starts from what Crate knows; one that can't be
