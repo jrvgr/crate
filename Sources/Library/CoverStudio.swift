@@ -9,7 +9,7 @@ import AppKit
 final class CoverStudioUI: ObservableObject {
     @Published var open = false
     @Published var look = FroggerArt.Look.saved {
-        didSet { FroggerArt.Look.saved = look; rerender() }
+        didSet { rerender(); save() }
     }
     @Published var query = ""
     @Published var album: Album?
@@ -21,18 +21,21 @@ final class CoverStudioUI: ObservableObject {
     @Published var message: String?
     private var gray: [Double]?
     private var otherGrays: [(id: String, gray: [Double])] = []
+    private var renderTask: Task<Void, Never>?
+    private var saveTask: Task<Void, Never>?
 
     /// The palette is emupod's (tools/emupod/npcycle.py): level 0 white … 3 black.
     static let lcd: [(UInt8, UInt8, UInt8)] = [(0xc6, 0xd0, 0xc0), (0x8c, 0x95, 0x88), (0x50, 0x56, 0x4e), (0x10, 0x12, 0x10)]
 
     @MainActor
     func select(_ a: Album, model: Model) async {
-        album = a; original = nil; gray = nil; rerender()
+        album = a; original = nil; gray = nil; before = nil; rerender()
         // the full-size file when the album folder has one, else the cover Crate already shows
         let data = await LibraryLoader.artwork(for: a) ?? model.artwork[a.id]?.tiffRepresentation
         guard album == a else { return }
         original = data.flatMap { NSImage(data: $0) } ?? model.artwork[a.id]
         gray = data.flatMap(FroggerArt.gray)
+        before = gray.map { Self.image(FroggerArt.render($0, look: FroggerArt.Look())) }
         rerender()
     }
 
@@ -46,21 +49,44 @@ final class CoverStudioUI: ObservableObject {
         rerender()
     }
 
+    /// Off the main thread, so a slider stays smooth; a newer look cancels the one still rendering.
     func rerender() {
-        preview = gray.map { Self.image(FroggerArt.render($0, look: look)) }
-        before = gray.map { Self.image(FroggerArt.render($0, look: FroggerArt.Look())) }
-        others = otherGrays.map { (id: $0.id, image: Self.image(FroggerArt.render($0.gray, look: look))) }
+        renderTask?.cancel()
+        let look = look, gray = gray, otherGrays = otherGrays
+        renderTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let preview = gray.map { Self.image(FroggerArt.render($0, look: look)) }
+            guard !Task.isCancelled else { return }
+            let others = otherGrays.map { (id: $0.id, image: Self.image(FroggerArt.render($0.gray, look: look))) }
+            await self?.show(preview, others)
+        }
     }
 
-    static func image(_ px: Data) -> CGImage {
+    @MainActor private func show(_ preview: CGImage?, _ others: [(id: String, image: CGImage)]) {
+        guard !Task.isCancelled else { return }      // a newer look is on its way
+        self.preview = preview; self.others = others
+    }
+
+    /// Saved once the look stops changing: every save wakes whatever draws covers with it (the sidebar's iPod).
+    private func save() {
+        saveTask?.cancel()
+        let look = look
+        saveTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            if !Task.isCancelled { FroggerArt.Look.saved = look }
+        }
+    }
+
+    /// The four levels in `palette` (white … black, each with its alpha; emupod's LCD by default).
+    static func image(_ px: Data, palette: [(UInt8, UInt8, UInt8, UInt8)] = lcd.map { ($0.0, $0.1, $0.2, 255) }) -> CGImage {
         let n = FroggerArt.size
         let ctx = CGContext(data: nil, width: n, height: n, bitsPerComponent: 8, bytesPerRow: n * 4,
                             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         let rgb = ctx.data!.assumingMemoryBound(to: UInt8.self)      // the context's own buffer: row 0 is the top
         for y in 0..<n {
             for x in 0..<n {
-                let c = lcd[FroggerArt.level(px, x, y)], i = (y * n + x) * 4
-                rgb[i] = c.0; rgb[i + 1] = c.1; rgb[i + 2] = c.2; rgb[i + 3] = 255
+                let c = palette[FroggerArt.level(px, x, y)], i = (y * n + x) * 4
+                let a = UInt16(c.3)
+                rgb[i] = UInt8(UInt16(c.0) * a / 255); rgb[i + 1] = UInt8(UInt16(c.1) * a / 255); rgb[i + 2] = UInt8(UInt16(c.2) * a / 255); rgb[i + 3] = c.3
             }
         }
         return ctx.makeImage()!
@@ -71,6 +97,7 @@ final class CoverStudioUI: ObservableObject {
         guard let ipod = model.ipod, let db = try? ITunesDB.read(Data(contentsOf: ipod.dbURL)) else {
             message = "Couldn't read the iPod's database"; return
         }
+        saveTask?.cancel(); FroggerArt.Look.saved = look        // the write reads the saved look
         writing = true; message = nil
         let n = await FroggerArt.write(db, to: ipod, albums: model.albums)
         writing = false
@@ -131,7 +158,7 @@ struct CoverStudio: View {
             List(shown) { a in
                 Button { Task { await ui.select(a, model: model) } } label: {
                     HStack(spacing: 8) {
-                        Cover(image: model.artwork[a.id], seed: a.id).frame(width: 30, height: 30).clipShape(.rect(cornerRadius: 4))
+                        Cover(image: model.artwork[a.id], seed: a.id).frame(width: 30, height: 30).clipShape(.rect(cornerRadius: 4, style: .continuous))
                         VStack(alignment: .leading, spacing: 0) {
                             Text(a.title).lineLimit(1)
                             Text(a.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -208,7 +235,7 @@ struct CoverStudio: View {
             Group {
                 if let v { v } else { Color.secondary.opacity(0.15) }
             }
-            .frame(width: 108, height: 108).clipped().clipShape(.rect(cornerRadius: 6))
+            .frame(width: 108, height: 108).clipped().clipShape(.rect(cornerRadius: 6, style: .continuous))
             Text(label).font(.caption).foregroundStyle(.secondary)
         }
     }

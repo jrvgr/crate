@@ -264,6 +264,11 @@ final class Subsonic: ObservableObject {
     }
 
     /// Whether this library path is one of the server's songs still waiting to be downloaded.
+    /// Library files that are a server song under another path (the server copy was dropped for the file).
+    func link(_ files: [String: String]) {
+        for (file, server) in files { if let s = songs[server] { songs[file] = s; paths[s.id] = file } }
+    }
+
     func needsDownload(_ path: String) -> Bool { songs[path] != nil && !FileManager.default.fileExists(atPath: path) }
 
     /// Downloads the original file to the track's path in the cache.

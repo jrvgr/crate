@@ -21,32 +21,63 @@ struct IPodArt: View {
     var controls: Controls? = nil
     /// The iPod runs Frogger: it wears a frog sticker.
     var frogger = false
+    /// Now Playing opens on Frogger's cover page (the song's title, this picture, the progress bar), before Apple's page.
+    var coverPage = false
+    var art: CGImage? = nil
+    /// A Now Playing line was clicked and Crate is still finding where it goes: a box over the screen says so.
+    var lookingUp = false
     @StateObject private var wheelState = WheelState()
 
-    init(mode: Mode, name: String, height: CGFloat, nowPlaying: NowPlaying? = nil, controls: Controls? = nil, frogger: Bool = false) {
+    init(mode: Mode, name: String, height: CGFloat, nowPlaying: NowPlaying? = nil, controls: Controls? = nil, frogger: Bool = false,
+         coverPage: Bool = false, art: CGImage? = nil, lookingUp: Bool = false) {
         self.mode = mode; self.name = name; self.height = height
         self.nowPlaying = nowPlaying; self.controls = controls; self.frogger = frogger
+        self.coverPage = coverPage; self.art = art; self.lookingUp = lookingUp
     }
 
     struct Controls {
-        var previous, toggle, next, menu, select: () -> Void
-        var openArtist: () -> Void
+        var previous, toggle, next, menu: () -> Void
+        var showSong, showArtist, showAlbum: () -> Void    // the Now Playing lines
         var seek: (Double) -> Void                     // 0…1 of the song
         var position: Double                           // 0…1 of the song
         var volume: Double
         var setVolume: (Double) -> Void
+        var rating: Int                                // 0…5 stars
+        var rate: (Int) -> Void
     }
 
     final class WheelState: ObservableObject {
         var lastAngle: Double?
         var turned = 0.0
         @Published var dragging = false
-        @Published var adjustedAt = Date.distantPast
-        /// The centre button switches the wheel from volume to scrubbing, until it's left alone
-        /// for 3 s, like the real one.
-        @Published var scrubbing = false
-        var scrubActive: Bool { scrubbing && Date().timeIntervalSince(adjustedAt) < 3 }
-        var showingVolume: Bool { !scrubActive && Date().timeIntervalSince(adjustedAt) < 1.5 }
+        @Published var adjustedAt = Date.distantPast    // the page last pressed or turned on
+        @Published var volumeAt = Date.distantPast
+        /// The centre button goes through Frogger's cycle: cover page → Apple's page → scrubbing →
+        /// rating → cover page. Scrubbing and rating go back when left alone for 5 s, like the real one.
+        enum Page { case cover, apple, scrub, rating }
+        @Published var page = Page.cover
+        var scrubbed = false                            // Select after a scrub goes back, skipping rating
+        func shown(cover: Bool) -> Page {
+            let normal: Page = cover ? .cover : .apple
+            switch page {
+            case .cover: return normal
+            case .apple: return .apple
+            case .scrub, .rating: return Date().timeIntervalSince(adjustedAt) < 5 ? page : normal
+            }
+        }
+        func select(cover: Bool) {
+            let normal: Page = cover ? .cover : .apple
+            switch shown(cover: cover) {
+            case .cover: page = .apple
+            case .apple: page = .scrub
+            case .scrub: page = scrubbed ? normal : .rating
+            case .rating: page = normal
+            }
+            scrubbed = false; adjustedAt = Date(); volumeAt = .distantPast
+        }
+        func showingVolume(cover: Bool) -> Bool {
+            [.cover, .apple].contains(shown(cover: cover)) && Date().timeIntervalSince(volumeAt) < 1.5
+        }
     }
 
     struct NowPlaying: Equatable {
@@ -143,6 +174,55 @@ struct IPodArt: View {
 
     /// The firmware's screens, laid out on the LCD's 160 × 128 pixel grid (u = one pixel).
     func lcd(u: CGFloat) -> some View {
+        ZStack {
+            if let np = nowPlaying, mode == .idle, coverPage, wheelState.shown(cover: true) == .cover {
+                coverScreen(np, u: u).foregroundStyle(lcdInk).transition(.move(edge: .leading))
+            } else {
+                menuScreen(u: u).transition(.move(edge: .trailing))
+            }
+            if lookingUp { lookingUpBox(u: u).transition(.opacity) }
+        }
+        .animation(.easeOut(duration: 0.15), value: lookingUp)
+    }
+
+    /// A firmware-style box in the middle of the LCD, its dots counting while Crate looks the album up.
+    func lookingUpBox(u: CGFloat) -> some View {
+        TimelineView(.periodic(from: .now, by: 0.35)) { tl in
+            let dots = Int(tl.date.timeIntervalSinceReferenceDate / 0.35) % 4
+            Text("Looking up" + String(repeating: ".", count: dots))
+                .font(chicago(12 * u))
+                .frame(width: 112 * u, height: 28 * u, alignment: .center)
+                .background(Color(red: 0.84, green: 0.89, blue: 0.95))
+                .overlay(Rectangle().strokeBorder(lineWidth: u))
+                .foregroundStyle(lcdInk)
+                .shadow(color: lcdInk, radius: 0, x: 2 * u, y: 2 * u)
+        }
+    }
+
+    /// Frogger's cover page (payload/nowplaying.h): no title bar, the song's title at the top,
+    /// the 72 × 72 cover at (44, 19), Apple's progress bar and times below.
+    func coverScreen(_ np: NowPlaying, u: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear
+            link(Text(np.title).font(chicago(12 * u)).lineLimit(1), help: "Show the song in its album") { $0.showSong() }
+                .frame(width: 150 * u).offset(x: 5 * u, y: 2 * u)
+            if let art {
+                link(Image(decorative: art, scale: 1).interpolation(.none).resizable(), help: "Show the song in its album") { $0.showSong() }
+                    .frame(width: 72 * u, height: 72 * u).offset(x: 44 * u, y: 19 * u)
+            }
+            bar(np, u: u, page: .cover).frame(width: 150 * u).offset(x: 5 * u, y: 96 * u)
+        }
+    }
+
+    /// A Now Playing line that goes somewhere in the library when clicked.
+    func link<V: View>(_ v: V, help: String, _ go: @escaping (Controls) -> Void) -> some View {
+        v.highPriorityGesture(TapGesture().onEnded { if let c = controls { Clicker.press(); go(c) } },
+                              including: controls == nil ? .subviews : .all)
+            .pointerStyle(controls == nil ? nil : .link)
+            .help(controls == nil ? "" : help)
+    }
+
+    func menuScreen(u: CGFloat) -> some View {
         let titleH = 19 * u
         return VStack(spacing: 0) {
             // title bar: title centred, battery on the right, rule underneath
@@ -227,27 +307,46 @@ struct IPodArt: View {
     /// The firmware's Now Playing screen: "3 of 12", song / artist / album, the scrubber, and
     /// elapsed and remaining time.
     func nowPlayingPage(_ np: NowPlaying, u: CGFloat) -> some View {
-        let p = np.length > 0 ? min(max(np.time / np.length, 0), 1) : 0
-        let clock = { (s: Double) in String(format: "%d:%02d", Int(s) / 60, Int(s) % 60) }
-        return VStack(spacing: 0) {
+        VStack(spacing: 0) {
             Text("\(np.index) of \(np.count)").font(chicago(9 * u))
                 .frame(maxWidth: .infinity, alignment: .leading)
-            // song and album open the album in the library, the artist opens the artist
+            // the song shows in its album, the artist opens the artist, the album shows on its artist's page
             VStack(spacing: 2 * u) {
-                ForEach(Array([(np.title, "Show the album"), (np.artist, "Show the artist"), (np.album, "Show the album")].enumerated()), id: \.offset) { i, line in
-                    if !line.0.isEmpty {
-                        Text(line.0).font(chicago(12 * u)).lineLimit(1)
-                            .highPriorityGesture(TapGesture().onEnded { if let c = controls { Clicker.press(); i == 1 ? c.openArtist() : c.select() } },
-                                                 including: controls == nil ? .subviews : .all)
-                            .pointerStyle(controls == nil ? nil : .link)
-                            .help(controls == nil ? "" : line.1)
-                    }
+                let lines: [(String, String, (Controls) -> Void)] = [(np.title, "Show the song in its album", { $0.showSong() }),
+                                                                    (np.artist, "Show the artist", { $0.showArtist() }),
+                                                                    (np.album, "Show the album on its artist's page", { $0.showAlbum() })]
+                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                    if !line.0.isEmpty { link(Text(line.0).font(chicago(12 * u)).lineLimit(1), help: line.1, line.2) }
                 }
             }
             .frame(maxWidth: .infinity)
             .padding(.top, 3 * u)
             Spacer(minLength: 0)
-            if let c = controls, wheelState.showingVolume {
+            bar(np, u: u, page: wheelState.shown(cover: coverPage))
+        }
+        .padding(.horizontal, 5 * u).padding(.top, 3 * u).padding(.bottom, 5 * u)
+    }
+
+    /// Below the song: the progress bar and times, the scrub marker, the rating's stars, or the volume while the wheel turns.
+    @ViewBuilder func bar(_ np: NowPlaying, u: CGFloat, page: WheelState.Page) -> some View {
+        let p = np.length > 0 ? min(max(np.time / np.length, 0), 1) : 0
+        let clock = { (s: Double) in String(format: "%d:%02d", Int(s) / 60, Int(s) % 60) }
+        VStack(spacing: 0) {
+            if let c = controls, page == .rating {
+                // the firmware's rating: a star for each one given, dots for the rest
+                HStack(spacing: 6 * u) {
+                    ForEach(1...5, id: \.self) { i in
+                        Group {
+                            if i <= c.rating { Image(systemName: "star.fill").font(.system(size: 9 * u)) }
+                            else { Circle().frame(width: 3 * u, height: 3 * u) }
+                        }
+                        .frame(width: 10 * u, height: 10 * u).contentShape(.rect)
+                        .highPriorityGesture(TapGesture().onEnded { Clicker.press(); c.rate(i == c.rating ? 0 : i); wheelState.adjustedAt = Date() })
+                        .pointerStyle(.link)
+                    }
+                }
+                .frame(maxWidth: .infinity).padding(.top, 2 * u).padding(.bottom, 8 * u)
+            } else if let c = controls, wheelState.showingVolume(cover: coverPage) {
                 // turning the wheel: the firmware's volume bar, speaker to loud speaker
                 HStack(spacing: 4 * u) {
                     Image(systemName: "speaker.fill").font(.system(size: 8 * u))
@@ -262,7 +361,7 @@ struct IPodArt: View {
             } else {
                 ZStack(alignment: .leading) {
                     Capsule().strokeBorder(lineWidth: u)
-                    if wheelState.scrubActive {
+                    if page == .scrub {
                         // the firmware's scrub marker
                         Rectangle().frame(width: 6 * u, height: 6 * u).rotationEffect(.degrees(45))
                             .offset(x: 150 * u * p - 3 * u)
@@ -286,7 +385,6 @@ struct IPodArt: View {
                 .padding(.top, 3 * u)
             }
         }
-        .padding(.horizontal, 5 * u).padding(.top, 3 * u).padding(.bottom, 5 * u)
     }
 
     /// The four touch buttons between screen and wheel; their labels glow red like the 3G's
@@ -338,9 +436,8 @@ struct IPodArt: View {
             }
             Button {
                 guard controls != nil else { return }
-                wheelState.scrubbing = !wheelState.scrubActive
-                wheelState.adjustedAt = Date()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.1) { wheelState.objectWillChange.send() }
+                withAnimation(.easeOut(duration: 0.2)) { wheelState.select(cover: coverPage) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5.1) { withAnimation(.easeOut(duration: 0.2)) { wheelState.objectWillChange.send() } }
             } label: {
                 Circle().fill(LinearGradient(colors: [Color(white: 0.985), Color(white: 0.91)], startPoint: .top, endPoint: .bottom))
                     .overlay(Circle().strokeBorder(Color(white: 0.8), lineWidth: max(0.4, w * 0.004)))
@@ -351,7 +448,7 @@ struct IPodArt: View {
             .buttonStyle(TouchButton())
             .disabled(controls == nil)
             .pointerStyle(controls == nil ? nil : .link)
-            .help("Scrub with the wheel")
+            .help("Next screen: \(coverPage ? "cover, " : "")song, scrubbing, rating")
         }
         .frame(width: d, height: d)
         .contentShape(Circle())
@@ -361,12 +458,12 @@ struct IPodArt: View {
             turn(g.location, d: d)
         }.onEnded { _ in
             wheelState.lastAngle = nil; wheelState.turned = 0; wheelState.dragging = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.1) { wheelState.objectWillChange.send() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.1) { withAnimation(.easeOut(duration: 0.2)) { wheelState.objectWillChange.send() } }
         }, including: controls == nil ? .subviews : .all)
     }
 
-    /// Turning the wheel changes the volume in steps of 5%, 24 a turn, each one clicking; after
-    /// the centre button it scrubs through the song in steps of 2% instead.
+    /// Turning the wheel changes the volume in steps of 5%, 24 a turn, each one clicking; while
+    /// scrubbing it goes through the song in steps of 2% instead, and while rating a star every 3 clicks.
     func turn(_ p: CGPoint, d: CGFloat) {
         guard let c = controls else { return }
         let angle = atan2(p.y - d / 2, p.x - d / 2)    // grows clockwise (y is down)
@@ -376,7 +473,20 @@ struct IPodArt: View {
         if delta > .pi { delta -= 2 * .pi } else if delta < -.pi { delta += 2 * .pi }
         wheelState.turned += delta
         let click = 2 * Double.pi / 24
-        if wheelState.scrubActive {
+        let page = wheelState.shown(cover: coverPage)
+        if page == .rating {
+            var r = c.rating
+            while abs(wheelState.turned) >= click * 3 {
+                let dir = wheelState.turned > 0 ? 1 : -1
+                wheelState.turned -= Double(dir) * click * 3
+                let nr = min(max(r + dir, 0), 5)
+                if nr != r { r = nr; Clicker.tick() }
+            }
+            if r != c.rating { c.rate(r) }
+            wheelState.adjustedAt = Date()
+            return
+        }
+        if page == .scrub {
             var pos = c.position
             while abs(wheelState.turned) >= click {
                 let dir: Double = wheelState.turned > 0 ? 1 : -1
@@ -384,7 +494,7 @@ struct IPodArt: View {
                 let np = min(max(pos + dir * 0.02, 0), 1)
                 if np != pos { pos = np; Clicker.tick() }
             }
-            if pos != c.position { c.seek(pos) }
+            if pos != c.position { c.seek(pos); wheelState.scrubbed = true }
             wheelState.adjustedAt = Date()
             return
         }
@@ -396,7 +506,7 @@ struct IPodArt: View {
             if nv != v { v = nv; Clicker.tick() }
         }
         if v != c.volume { c.setVolume(v) }
-        wheelState.adjustedAt = Date()
+        wheelState.volumeAt = Date()
     }
 }
 
@@ -571,16 +681,20 @@ extension Model {
     }
 }
 
-/// The iPod drawing with the player's song on its Now Playing screen.
-/// While something plays, its buttons are the player's controls: |◀◀ ▶❚❚ ▶▶|, MENU goes back,
-/// the centre button shows the album and the wheel turns the volume.
+/// The iPod drawing with the player's song on its Now Playing screen, Frogger's: it opens on the
+/// cover page (the album's cover as the iPod shows it, with the Cover Studio's look), and the centre
+/// button goes on to Apple's page, scrubbing and rating. While something plays, its buttons are the
+/// player's controls: |◀◀ ▶❚❚ ▶▶|, MENU goes back and the wheel turns the volume.
 struct LiveIPod: View {
     @EnvironmentObject var model: Model
     @EnvironmentObject var player: Player
     var height: CGFloat
     @StateObject private var last = LastPlaying()
+    @StateObject private var art = NowPlayingArt()
+    @StateObject private var lookup = HoverState()     // on while a clicked line finds its album outside the library
     var body: some View {
         let t = player.current
+        let album = (t ?? last.track).flatMap { t in model.albums.first { $0.id == t.album.lowercased() } }
         let np = t.map { t in
             IPodArt.NowPlaying(title: t.title, artist: t.trackArtist.isEmpty ? t.artist : t.trackArtist, album: t.album,
                                index: player.index + 1, count: player.queue.count, time: player.time, length: player.length, playing: player.playing)
@@ -592,21 +706,70 @@ struct LiveIPod: View {
                 controls: t.map { t in
             .init(previous: { player.previous() }, toggle: { player.toggle() }, next: { player.next() },
                   menu: { if !model.path.isEmpty { model.path.removeLast() } },
-                  select: {
-                      if let album = model.albums.first(where: { $0.id == t.album.lowercased() }) { model.search = ""; model.path = [.album(album)] }
+                  showSong: {
+                      model.search = ""
+                      if let album { model.highlight = t.id; model.path = [.album(album)]; return }
+                      // not in the library: the Spotify or MusicBrainz album page, else the artist
+                      guard !lookup.on else { return }
+                      lookup.on = true
+                      Task {
+                          let r = await model.outsideAlbum(t.album, artist: t.artist) ?? .artist(t.artist)
+                          lookup.on = false; model.path = [r]
+                      }
                   },
-                  openArtist: { model.search = ""; model.pane = .artists; model.path = [.artist(t.artist)] },
+                  showArtist: { model.search = ""; model.pane = .artists; model.path = [.artist(t.artist)] },
+                  showAlbum: {
+                      model.search = ""; model.pane = .artists
+                      model.highlight = Model.releaseHighlight(album?.title ?? t.album); model.path = [.artist(album?.artist ?? t.artist)]
+                  },
                   seek: { player.seek($0 * player.length) },
                   position: player.length > 0 ? player.time / player.length : 0,
-                  volume: player.volume, setVolume: { player.setVolume($0) })
-        }, frogger: model.froggerSticker)
-        .onChange(of: np) { _, v in if let v { last.value = v } }
-        .onAppear { last.value = np }
+                  volume: player.volume, setVolume: { player.setVolume($0) },
+                  rating: model.rating(t), rate: { model.rate(t, $0) })
+        }, frogger: model.froggerSticker, coverPage: true, art: art.image, lookingUp: lookup.on)
+        .onChange(of: np) { _, v in if let v { last.value = v; last.track = t } }
+        .onAppear { last.value = np; last.track = t; art.load(album, remote: player.remoteArt, model: model) }
+        .onChange(of: album?.id) { art.load(album, remote: player.remoteArt, model: model) }
+        .onChange(of: player.remoteArt) { art.load(album, remote: player.remoteArt, model: model) }
+        .onChange(of: model.artwork[album?.id ?? ""] != nil) { art.load(album, remote: player.remoteArt, model: model) }
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in   // the Cover Studio's look
+            art.load(album, remote: player.remoteArt, model: model)
+        }
     }
 }
 
 @MainActor
-final class LastPlaying: ObservableObject { var value: IPodArt.NowPlaying? }
+final class LastPlaying: ObservableObject { var value: IPodArt.NowPlaying?; var track: LibTrack? }
+
+/// The playing album's cover as Frogger shows it: 72 × 72 in four greys with the Cover Studio's
+/// look, in the drawn LCD's ink (lightest level clear, so the backlight shows through). The library
+/// album's cover, else the one Music Assistant shows (a Spotify song's).
+@MainActor
+final class NowPlayingArt: ObservableObject {
+    @Published var image: CGImage?
+    private var key = ""
+    private static let ink: [(UInt8, UInt8, UInt8, UInt8)] = [0, 85, 170, 255].map { (43, 51, 74, $0) }   // IPodArt.lcdInk
+
+    func load(_ album: Album?, remote: URL?, model: Model) {
+        let look = FroggerArt.Look.saved, small = album.flatMap { model.artwork[$0.id] }
+        let which = album?.id ?? remote?.absoluteString ?? ""
+        let key = which + "\u{1f}" + String(describing: look) + "\u{1f}" + String(small.map { ObjectIdentifier($0).hashValue } ?? 0)
+        guard key != self.key else { return }
+        if which != self.key.components(separatedBy: "\u{1f}").first { image = nil }
+        self.key = key
+        guard album != nil || remote != nil else { return }
+        let tiff = small?.tiffRepresentation
+        Task {
+            // the full-size file when the album folder has one, else the cover Crate already shows (as the Cover Studio does)
+            var data: Data? = nil
+            if let album { data = await LibraryLoader.artwork(for: album) ?? tiff }
+            if data == nil, let remote { data = try? await URLSession.shared.data(from: remote).0 }
+            guard let data, self.key == key else { return }
+            let cg = await Task.detached { FroggerArt.pixels(data, look: look).map { CoverStudioUI.image($0, palette: Self.ink) } }.value
+            if self.key == key { image = cg }
+        }
+    }
+}
 
 /// The real iPod as drawn: its name, sync state and sticker, never what Crate is playing.
 struct PodPicture: View {

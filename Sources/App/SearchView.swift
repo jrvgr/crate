@@ -1,13 +1,16 @@
 import SwiftUI
 
-// Search across everything: the library (artists, albums, songs), playlists, and the enabled
-// sources (Apple Music, Spotify), with a jump to a Soulseek search at the end.
+// Search across everything: the library (artists, albums, songs), playlists, the enabled
+// sources (Apple Music, Spotify) and MusicBrainz's artists, with a jump to a Soulseek search at the end.
 
 /// The query the results are for (it follows the search field once typing pauses) and the library matches,
 /// kept until the query or the library changes.
 @MainActor
 final class SearchUI: ObservableObject {
     @Published var q = ""
+    /// Artists MusicBrainz knows by that name that the library doesn't have (their pages show the discography).
+    @Published var others: [String] = []
+    @Published var lookingUp = false
     private var key: Int?
     private var cached: (artists: [Artist], albums: [Album], songs: [LibTrack]) = ([], [], [])
     func library(_ model: Model, _ match: (String, [String]) -> Bool) -> (artists: [Artist], albums: [Album], songs: [LibTrack]) {
@@ -20,6 +23,28 @@ final class SearchUI: ObservableObject {
             key = k
         }
         return cached
+    }
+
+    /// MusicBrainz's answers this run, by query: going back to the results shows them at once (and the artist flies home to them).
+    private static var answers: [String: [String]] = [:]
+
+    func lookUpArtists(_ q: String, except have: Set<String>) async {
+        let key = q.lowercased()
+        if let a = Self.answers[key] { others = a.filter { !have.contains($0.lowercased()) }; return }
+        others = []
+        guard q.count >= 2 else { return }
+        lookingUp = true; defer { lookingUp = false }
+        try? await Task.sleep(for: .milliseconds(400))            // MusicBrainz takes a request a second: wait for the typing to stop
+        guard !Task.isCancelled else { return }
+        var c = URLComponents(string: "https://musicbrainz.org/ws/2/artist/")!
+        c.queryItems = [.init(name: "query", value: q), .init(name: "fmt", value: "json"), .init(name: "limit", value: "8")]
+        guard let j = try? await MusicBrainz.get(c.url!), !Task.isCancelled else { return }
+        var seen = have
+        others = ((j["artists"] as? [[String: Any]]) ?? []).compactMap { a in
+            guard (a["score"] as? Int ?? 0) >= 85, let n = a["name"] as? String, seen.insert(n.lowercased()).inserted else { return nil }
+            return n
+        }
+        Self.answers[key] = others
     }
 }
 
@@ -35,29 +60,52 @@ struct SearchView: View {
         let podLists = model.podOnlyPlaylists.filter { matches(q, $0.name) }
         let am = model.on(.appleMusic) ? model.amAlbums.filter { matches(q, $0.title, $0.artist) && !model.inLibrary($0) } : []
         let sp = model.on(.spotify) ? model.spotify.filter { matches(q, $0.name, $0.artist) && !model.hasFiles($0) } : []
+        let others = ui.others
         let nothing = artists.isEmpty && albums.isEmpty && songs.isEmpty && lists.isEmpty && podLists.isEmpty && am.isEmpty && sp.isEmpty
+            && others.isEmpty && !ui.lookingUp
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 if nothing {
-                    ContentUnavailableView.search(text: q).padding(.top, 40)
+                    Text("Nothing for “\(q)” in your library, Spotify, Apple Music or MusicBrainz").foregroundStyle(.secondary)
                 }
-                if !artists.isEmpty {
-                    ResultSection(title: "Artists", count: artists.count) {
+                if !artists.isEmpty || !others.isEmpty || ui.lookingUp {
+                    ResultSection(title: "Artists", count: artists.count + others.count) {
                         ScrollView(.horizontal) {
-                            LazyHStack(spacing: 22) {
+                            LazyHStack(alignment: .top, spacing: 22) {
                                 ForEach(artists.prefix(20)) { a in
                                     NavigationLink(value: Route.artist(a.name)) {
                                         VStack(spacing: 6) {
-                                            ArtistImage(artist: a).frame(width: 110, height: 110).clipShape(.circle)
+                                            ArtistImage(artist: a).frame(width: 110, height: 110).clipShape(.circle).heroSource(.artist(a.name))
                                                 .overlay(alignment: .bottomTrailing) { MarkBadge(mark: model.artistMark(a), size: 22) }
                                             Text(a.name).font(.callout.weight(.medium)).lineLimit(1).frame(width: 120)
                                         }
                                     }
                                     .buttonStyle(.plain)
                                 }
+                                // the ones only MusicBrainz knows, after yours; grey circles hold their place while it answers
+                                ForEach(others, id: \.self) { n in
+                                    NavigationLink(value: Route.artist(n)) {
+                                        VStack(spacing: 6) {
+                                            ArtistPortrait(name: n).frame(width: 110, height: 110).clipShape(.circle).heroSource(.artist(n))
+                                            Text(n).font(.callout.weight(.medium)).lineLimit(1).frame(width: 120)
+                                            Text("Not in your library").font(.caption).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                if ui.lookingUp && others.isEmpty {
+                                    ForEach(0..<(artists.isEmpty ? 3 : 1), id: \.self) { _ in
+                                        VStack(spacing: 6) {
+                                            Circle().fill(.quaternary).frame(width: 110, height: 110)
+                                            Capsule().fill(.quaternary).frame(width: 80, height: 10).padding(.top, 4)
+                                        }
+                                        .phaseAnimator([0.5, 1]) { v, o in v.opacity(o) } animation: { _ in .easeInOut(duration: 0.8) }
+                                    }
+                                }
                             }
                         }
                         .scrollIndicators(.never)
+                        .animation(.easeOut(duration: 0.25), value: others)
                     }
                 }
                 if !albums.isEmpty {
@@ -78,7 +126,7 @@ struct SearchView: View {
                                 let album = model.album(of: t)
                                 HStack(spacing: 12) {
                                     Cover(image: album.flatMap { model.artwork[$0.id] }, seed: t.album)
-                                        .frame(width: 34, height: 34).clipShape(.rect(cornerRadius: 5))
+                                        .frame(width: 34, height: 34).clipShape(.rect(cornerRadius: 5, style: .continuous))
                                     VStack(alignment: .leading, spacing: 1) {
                                         Text(t.title).lineLimit(1)
                                         Text("\(t.trackArtist.isEmpty ? t.artist : t.trackArtist) — \(t.album)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -120,7 +168,7 @@ struct SearchView: View {
                             ForEach(sp.prefix(10)) { a in
                                 HStack(spacing: 12) {
                                     CachedImage(url: model.artURL(a.artworkPath), seed: "SearchView.swift:4")
-                                    .frame(width: 34, height: 34).clipShape(.rect(cornerRadius: 5))
+                                    .frame(width: 34, height: 34).clipShape(.rect(cornerRadius: 5, style: .continuous))
                                     VStack(alignment: .leading, spacing: 1) {
                                         Text(a.name).lineLimit(1)
                                         Text(a.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -139,19 +187,10 @@ struct SearchView: View {
                 }
                 if model.on(.soulseek) {
                     Button { model.findOnSoulseek("", q) } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: PluginID.soulseek.icon).font(.title2).foregroundStyle(PluginID.soulseek.tint)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Search Soulseek for “\(q)”").font(.headline)
-                                Text("Download it if you don't have it yet").font(.callout).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right").foregroundStyle(.tertiary)
-                        }
-                        .padding(14).contentShape(.rect)
+                        Label { Text("Search Soulseek for “\(q)”") } icon: { Image(systemName: PluginID.soulseek.icon).foregroundStyle(PluginID.soulseek.tint) }
                     }
-                    .buttonStyle(.plain)
-                    .glassEffect(.regular, in: .rect(cornerRadius: 14))
+                    .buttonStyle(.glass).buttonBorderShape(.capsule).controlSize(.large)
+                    .help("Download it if you don't have it yet")
                 }
             }
             .padding(28).padding(.bottom, 60)
@@ -163,6 +202,7 @@ struct SearchView: View {
             if !ui.q.isEmpty { try? await Task.sleep(for: .milliseconds(200)) }
             if !Task.isCancelled { ui.q = model.search }
         }
+        .task(id: ui.q) { await ui.lookUpArtists(ui.q, except: Set(model.artists.map { $0.name.lowercased() })) }
     }
 
     /// Every word of the query appears in one of the fields.

@@ -85,7 +85,7 @@ struct MissingAlbumsSheet: View {
                         HStack(spacing: 12) {
                             Toggle("", isOn: $r.include).labelsHidden().disabled(r.queued || s.finding)
                             CachedImage(url: model.artURL(r.album.artworkPath), seed: "Missing.swift:3")
-                                .frame(width: 40, height: 40).clipShape(.rect(cornerRadius: 6))
+                                .frame(width: 40, height: 40).clipShape(.rect(cornerRadius: 6, style: .continuous))
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(r.album.name).font(.headline).lineLimit(1)
                                 Text(r.album.artist + (r.album.year > 0 ? " · \(r.album.year)" : "")).font(.callout).foregroundStyle(.secondary).lineLimit(1)

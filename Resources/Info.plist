@@ -17,5 +17,13 @@
 	<key>NSRemindersFullAccessUsageDescription</key><string>Crate copies your open reminders to the iPod's To Do list when you turn that on.</string>
 	<key>NSLocalNetworkUsageDescription</key><string>Crate reads your OwnTone library on the local network.</string>
 	<key>NSPrincipalClass</key><string>NSApplication</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key><string>nl.jrvgr.crate.pinned-playlist</string>
+			<key>UTTypeDescription</key><string>Crate pinned playlist</string>
+			<key>UTTypeConformsTo</key><array><string>public.data</string></array>
+		</dict>
+	</array>
 </dict>
 </plist>

@@ -145,10 +145,109 @@ extension Model {
     }
 }
 
+/// Frogger's switches (its Settings rows), kept as bits of Apple's prefs flags word. Apple saves its
+/// prefs struct to iPod_Control/Device/Preferences from prefs+8, so the word (prefs+0xb04) is the
+/// little-endian u32 at file offset 0xafc (Frogger's docs/tcmd.md, "On the disk"). The iPod reads the
+/// file when it starts, so a change made here in disk mode applies from its next start.
+enum FroggerSwitch: Int, CaseIterable, Identifiable {
+    case coverPage, holdMenu, quickSettings, batteryPercent, pageSlide, jumpByLetter, resumeMixes, showHidden
+    var id: Int { rawValue }
+
+    var bit: UInt32 {
+        switch self {
+        case .showHidden: 16
+        case .jumpByLetter: 17
+        case .resumeMixes: 18
+        default: UInt32(19 + rawValue)            // FEATURE_COVER … FEATURE_SLIDE
+        }
+    }
+    /// Show Hidden's bit means On; the others' mean Off (they're on by default).
+    var setMeansOn: Bool { self == .showHidden }
+
+    var title: String {
+        switch self {
+        case .coverPage: "Cover Page"
+        case .holdMenu: "Hold Menu"
+        case .quickSettings: "Quick Settings"
+        case .batteryPercent: "Battery Percent"
+        case .pageSlide: "Page Slide"
+        case .jumpByLetter: "Jump by Letter"
+        case .resumeMixes: "Resume Mixes"
+        case .showHidden: "Show Hidden"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .coverPage: "Now Playing opens on a page with the cover and the progress bar"
+        case .holdMenu: "Hold Select on a song, album, artist or playlist: queue, play next, add to a playlist, hide"
+        case .quickSettings: "Hold Menu anywhere: Backlight, Shuffle, Repeat, Sleep"
+        case .batteryPercent: "The battery percentage in the title bar"
+        case .pageSlide: "The cover page slides to Apple's Now Playing and back"
+        case .jumpByLetter: "Spin the wheel fast in a long list to move a letter at a time"
+        case .resumeMixes: "Songs of 20 minutes or longer start where you left them"
+        case .showHidden: "Hidden songs show in Artists, Albums, Genres and Composers again"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .coverPage: "photo"
+        case .holdMenu: "hand.tap"
+        case .quickSettings: "slider.horizontal.3"
+        case .batteryPercent: "battery.75percent"
+        case .pageSlide: "rectangle.portrait.and.arrow.right"
+        case .jumpByLetter: "textformat.abc"
+        case .resumeMixes: "bookmark"
+        case .showHidden: "eye"
+        }
+    }
+
+    func isOn(_ flags: UInt32) -> Bool { (flags >> bit & 1 == 1) == setMeansOn }
+    func set(_ on: Bool, in flags: UInt32) -> UInt32 { on == setMeansOn ? flags | 1 << bit : flags & ~(1 << bit) }
+}
+
+enum FroggerPrefs {
+    static let offset = 0xafc
+    static let size = 2872                   // firmware 2.3's file; anything else isn't the layout we know
+
+    static func url(_ ipod: IPodInfo) -> URL { ipod.control.appendingPathComponent("Device/Preferences") }
+
+    static func flags(_ ipod: IPodInfo) -> UInt32? {
+        guard let d = try? Data(contentsOf: url(ipod)), d.count == size else { return nil }
+        return d[offset..<offset + 4].enumerated().reduce(0) { $0 | UInt32($1.element) << (8 * UInt32($1.offset)) }
+    }
+
+    /// Changes only the flags word; every other byte stays as the iPod wrote it.
+    static func write(_ flags: UInt32, to ipod: IPodInfo) throws {
+        var d = try Data(contentsOf: url(ipod))
+        guard d.count == size else { throw SyncError.missingSource("a Preferences file of the size Frogger's layout is known for") }
+        for i in 0..<4 { d[offset + i] = UInt8(flags >> (8 * UInt32(i)) & 0xff) }
+        try d.write(to: url(ipod))
+    }
+}
+
+@MainActor
+final class FroggerSwitchesUI: ObservableObject {
+    @Published var flags: UInt32?
+    @Published var error: String?
+    @Published var changed = false              // written since the iPod last started
+
+    func load(_ ipod: IPodInfo?, connected: Bool) {
+        flags = connected ? ipod.flatMap(FroggerPrefs.flags) : nil
+    }
+
+    func set(_ s: FroggerSwitch, _ on: Bool, ipod: IPodInfo) {
+        guard let f = flags else { return }
+        let new = s.set(on, in: f)
+        do { try FroggerPrefs.write(new, to: ipod); flags = new; changed = true; error = nil }
+        catch { self.error = "Couldn't change the iPod's settings: \(error.localizedDescription)" }
+    }
+}
+
 /// The Frogger card on the iPod page.
 struct FroggerSettings: View {
     @EnvironmentObject var model: Model      // @State can't be used (see README), so the question lives in the model
     @StateObject private var studio = CoverStudioUI()
+    @StateObject private var switches = FroggerSwitchesUI()
 
     var body: some View {
         let confirm = model.froggerConfirm
@@ -174,17 +273,6 @@ struct FroggerSettings: View {
                             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
                         }
                         .controlSize(.small)
-                    }
-                    if installed {
-                        HStack(spacing: 6) {
-                            ForEach([("eye.slash", "Hidden songs"), ("gearshape", "Show Hidden setting"),
-                                     ("photo", "Now Playing covers"), ("music.mic", "Album artists")], id: \.1) { icon, name in
-                                Label(name, systemImage: icon).font(.caption)
-                                    .padding(.horizontal, 7).padding(.vertical, 3)
-                                    .glassEffect(.regular, in: .capsule)
-                            }
-                        }
-                        .padding(.top, 3)
                     }
                 }
                 Spacer(minLength: 12)
@@ -244,7 +332,10 @@ struct FroggerSettings: View {
             SettingRow(icon: "photo", title: "Now Playing covers", detail: "How album covers look in four greys on Frogger's Now Playing page") {
                 Button("Cover Studio…") { studio.open = true }
             }
+            if installed { switchRows }
         }
+        .onAppear { switches.load(model.ipod, connected: model.connected) }
+        .onChange(of: model.connected) { _, on in switches.load(model.ipod, connected: on); if !on { switches.changed = false } }
         .sheet(isPresented: $studio.open) { CoverStudio(ui: studio).environmentObject(model) }
         .alert(title(confirm), isPresented: Binding(get: { model.froggerConfirm != nil }, set: { if !$0 { model.froggerConfirm = nil } })) {
             Button(confirm == .install ? "Install" : confirm == .remove ? "Remove" : "Restore") {
@@ -261,6 +352,32 @@ struct FroggerSettings: View {
                    + "unmounted for a moment, and Crate asks for your password. Hold Menu while the iPod starts to get Apple's "
                    + "firmware without Frogger. Restart the iPod afterwards (hold Menu + Play).")
         }
+    }
+
+    /// Frogger's Settings switches, the same as Frogger! › Settings on the iPod.
+    @ViewBuilder var switchRows: some View {
+        Divider().padding(.leading, 50)
+        HStack(spacing: 6) {
+            Text("On the iPod").font(.headline)
+            Spacer()
+            Text(!model.connected ? "Connect the iPod to change these"
+                 : switches.flags == nil ? "Can't read this iPod's settings"
+                 : switches.changed ? "Applies when the iPod restarts (eject it, then hold Menu and Play)"
+                 : "The same switches as Frogger! on the iPod; a change applies when it restarts")
+                .font(.caption).foregroundStyle(switches.changed ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+        }
+        .padding(.horizontal, 14).padding(.top, 11).padding(.bottom, 2)
+        ForEach(FroggerSwitch.allCases) { s in
+            SettingRow(icon: s.icon, title: s.title, detail: s.detail) {
+                Toggle(s.title, isOn: Binding(get: { switches.flags.map(s.isOn) ?? !s.setMeansOn },
+                                              set: { on in if let i = model.ipod { switches.set(s, on, ipod: i) } }))
+                    .labelsHidden().toggleStyle(.switch)
+                    .disabled(switches.flags == nil || model.syncing)
+            }
+        }
+        if let e = switches.error { Text(e).font(.caption).foregroundStyle(.red).padding(.horizontal, 14).padding(.bottom, 11) }
+        Text("An older Frogger on the iPod may not have every switch yet: Update puts the one you last built on it.")
+            .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.bottom, 11)
     }
 
     func title(_ a: Frogger.Action?) -> String {

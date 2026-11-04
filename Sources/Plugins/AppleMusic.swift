@@ -5,7 +5,7 @@ import Foundation
 // dictionary, then copied into OwnTone's folder by the Importer.
 
 struct AMTrack: Hashable {
-    var pid, name, artist, albumArtist, album, genre, cloud, location: String
+    var pid, title, artist, albumArtist, album, genre, cloud, location: String
     var year, trackNumber, discNumber: Int
     var seconds: Double
 }
@@ -85,7 +85,7 @@ enum AppleMusic {
         let location = Dictionary(zip(filePIDs, locs).map { ($0, $1) }, uniquingKeysWith: { a, _ in a })
         return (0..<n).map { i in
             let c = { (k: Int) in cols[k][i] }
-            return AMTrack(pid: c(0), name: c(1), artist: c(2), albumArtist: c(3), album: c(4), genre: c(5), cloud: c(6),
+            return AMTrack(pid: c(0), title: c(1), artist: c(2), albumArtist: c(3), album: c(4), genre: c(5), cloud: c(6),
                            location: location[c(0)] ?? "", year: Int(c(7)) ?? 0, trackNumber: Int(c(8)) ?? 0,
                            discNumber: Int(c(9)) ?? 0, seconds: Double(c(10).replacingOccurrences(of: ",", with: ".")) ?? 0)
         }
@@ -96,7 +96,7 @@ enum AppleMusic {
         return Dictionary(grouping: ts) { $0.album.lowercased() }.values.map { g in
             let artists = Set(g.map { $0.albumArtist.isEmpty ? $0.artist : $0.albumArtist })
             return AMAlbum(title: g[0].album, artist: artists.count == 1 ? artists.first! : "Various Artists",
-                           tracks: g.sorted { ($0.discNumber, $0.trackNumber, $0.name) < ($1.discNumber, $1.trackNumber, $1.name) })
+                           tracks: g.sorted { ($0.discNumber, $0.trackNumber, $0.title) < ($1.discNumber, $1.trackNumber, $1.title) })
         }.sorted { ($0.artist.lowercased(), $0.title.lowercased()) < ($1.artist.lowercased(), $1.title.lowercased()) }
     }
 

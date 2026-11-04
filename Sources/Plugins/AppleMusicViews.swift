@@ -43,7 +43,7 @@ struct AMAlbumView: View {
             VStack(alignment: .leading, spacing: 22) {
                 HStack(alignment: .bottom, spacing: 24) {
                     CachedImage(url: model.amArt[album.id], seed: album.id)
-                        .frame(width: 220, height: 220).clipShape(.rect(cornerRadius: 16))
+                        .frame(width: 220, height: 220).clipShape(.rect(cornerRadius: 16, style: .continuous))
                         .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
                     VStack(alignment: .leading, spacing: 6) {
                         Label("Apple Music", systemImage: "icloud").font(.caption.weight(.semibold)).foregroundStyle(PluginID.appleMusic.tint)
@@ -63,12 +63,12 @@ struct AMAlbumView: View {
                 }
                 VStack(spacing: 0) {
                     ForEach(Array(tracks.enumerated()), id: \.element.pid) { i, t in
-                        let inLib = have.contains(LinkMatch.loose(t.name))
+                        let inLib = have.contains(LinkMatch.loose(t.title))
                         HStack(spacing: 12) {
                             Text(discs ? "\(t.discNumber)-\(t.trackNumber)" : t.trackNumber > 0 ? "\(t.trackNumber)" : "")
                                 .monospacedDigit().foregroundStyle(.secondary).frame(width: 34, alignment: .trailing)
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(t.name).lineLimit(1)
+                                Text(t.title).lineLimit(1)
                                 if !t.artist.isEmpty && t.artist != album.artist { Text(t.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
                             }
                             Spacer()
@@ -138,7 +138,7 @@ struct AMAlbumList: View {
             .width(22)
             TableColumn("Album", value: \.title) { (r: AMRow) in
                 HStack(spacing: 8) {
-                    CachedImage(url: model.amArt[r.id], seed: r.id).frame(width: 28, height: 28).clipShape(.rect(cornerRadius: 4))
+                    CachedImage(url: model.amArt[r.id], seed: r.id).frame(width: 28, height: 28).clipShape(.rect(cornerRadius: 4, style: .continuous))
                     Text(r.title).lineLimit(1)
                 }
                 .task(id: r.id) { await model.loadAMArt(r.album) }

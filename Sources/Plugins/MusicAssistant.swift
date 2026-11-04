@@ -21,6 +21,10 @@ enum MAError: Error, LocalizedError {
 struct MAPlayer: Identifiable, Hashable {
     var id, name: String
     var group: Bool
+    var volume: Double?                         // nil: MA can't set its volume
+    var members: [String] = []                  // a group's or sync leader's players
+    var syncedTo: String?                       // the leader this one plays along with
+    var canGroupWith: [String] = []
 }
 
 @MainActor
@@ -81,7 +85,11 @@ final class MusicAssistant: ObservableObject {
         players = all.compactMap { p in
             guard let id = p["player_id"] as? String, p["available"] as? Bool ?? false, p["enabled"] as? Bool ?? true,
                   !(p["hide_in_ui"] as? Bool ?? false) else { return nil }
-            return MAPlayer(id: id, name: p["display_name"] as? String ?? p["name"] as? String ?? id, group: p["type"] as? String == "group")
+            let group = p["type"] as? String == "group"
+            let volume = (p["volume_control"] as? String == "none" ? nil : (group ? p["group_volume"] : p["volume_level"]) as? Int)
+            return MAPlayer(id: id, name: p["display_name"] as? String ?? p["name"] as? String ?? id, group: group,
+                            volume: volume.map { Double($0) / 100 }, members: (p["group_members"] as? [String] ?? []).filter { $0 != id },
+                            syncedTo: p["synced_to"] as? String, canGroupWith: p["can_group_with"] as? [String] ?? [])
         }.sorted { ($0.group ? 0 : 1, $0.name.lowercased()) < ($1.group ? 0 : 1, $1.name.lowercased()) }
     }
 
@@ -99,6 +107,30 @@ final class MusicAssistant: ObservableObject {
         catch { self.error = error.localizedDescription }
     }
 
+    /// Lets a speaker play along with `leader` (in sync), or stops it doing so.
+    func sync(_ id: String, with leader: String, _ on: Bool) async {
+        do {
+            try await call("players/cmd/set_members", ["target_player": leader, on ? "player_ids_to_add" : "player_ids_to_remove": [id]])
+            try await loadPlayers()
+        } catch { self.error = error.localizedDescription }
+    }
+
+    /// One speaker's volume, sent while a slider moves: at most every 150 ms, always ending on the last value.
+    func slide(_ v: Double, on id: String) {
+        if let i = players.firstIndex(where: { $0.id == id }) { players[i].volume = v }
+        pendingVolume[id] = v
+        guard volumeSends[id] == nil else { return }
+        volumeSends[id] = Task {
+            while let v = pendingVolume.removeValue(forKey: id) {
+                await setVolume(v, on: id)
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+            volumeSends[id] = nil
+        }
+    }
+    private var pendingVolume: [String: Double] = [:]
+    private var volumeSends: [String: Task<Void, Never>] = [:]
+
     func setVolume(_ v: Double, on id: String) async {
         let group = players.first { $0.id == id }?.group ?? false
         do { try await call(group ? "players/cmd/group_volume" : "players/cmd/volume_set", ["player_id": id, "volume_level": Int(v * 100)]) }
@@ -108,6 +140,7 @@ final class MusicAssistant: ObservableObject {
     struct QueueState {
         var index, items: Int; var elapsed, duration: Double; var playing: Bool; var volume: Double?
         var title = "", artist = "", album = ""          // what's playing, for a queue Crate didn't start
+        var image: URL?                                  // its cover (Spotify's, or through MA's image proxy)
     }
 
     func state(_ queue: String) async -> QueueState? {
@@ -123,7 +156,20 @@ final class MusicAssistant: ObservableObject {
                           duration: item?["duration"] as? Double ?? 0, playing: playing, volume: vol,
                           title: media?["name"] as? String ?? item?["name"] as? String ?? "",
                           artist: ((media?["artists"] as? [[String: Any]])?.first?["name"] as? String) ?? "",
-                          album: ((media?["album"] as? [String: Any])?["name"] as? String) ?? "")
+                          album: ((media?["album"] as? [String: Any])?["name"] as? String) ?? "",
+                          image: image(item, media))
+    }
+
+    /// The queue item's picture, else the song's or its album's first: a URL as it is when MA says it's
+    /// reachable from anywhere, else through MA's image proxy (a provider's local file, say).
+    func image(_ item: [String: Any]?, _ media: [String: Any]?) -> URL? {
+        let first = { (m: [String: Any]?) in ((m?["metadata"] as? [String: Any])?["images"] as? [[String: Any]])?.first }
+        let img = item?["image"] as? [String: Any] ?? media?["image"] as? [String: Any] ?? first(media) ?? first(media?["album"] as? [String: Any])
+        guard let path = img?["path"] as? String, !path.isEmpty else { return nil }
+        if img?["remotely_accessible"] as? Bool == true || path.hasPrefix("http") { return URL(string: path) }
+        var c = URLComponents(string: base + "/imageproxy")
+        c?.queryItems = [.init(name: "path", value: path), .init(name: "provider", value: img?["provider"] as? String ?? ""), .init(name: "size", value: "256")]
+        return c?.url
     }
 
     /// A library song as MA knows it: the Subsonic server's id, or its Spotify URI.
@@ -168,32 +214,102 @@ struct MusicAssistantSettings: View {
     }
 }
 
-/// The toolbar's speaker button: where Play sends music, like AirPlay in Music.
+/// The toolbar's speaker button: where Play sends music, like AirPlay in Music. A panel like the Mac's
+/// Sound menu: pick the speaker, set each one's volume, and let others play along with it in sync.
 struct PlayOnMenu: View {
+    @EnvironmentObject var model: Model
+    @ObservedObject var player: Player
+    @ObservedObject var ma: MusicAssistant
+    @StateObject private var shown = PopoverState()
+
+    var body: some View {
+        let remote = player.output != "mac"
+        Button { shown.on.toggle() } label: {
+            Label(remote ? model.remoteName ?? "Speaker" : "This Mac", systemImage: remote ? "hifispeaker.fill" : "hifispeaker")
+        }
+        .popover(isPresented: $shown.on, arrowEdge: .bottom) {
+            SpeakerPanel(player: player, ma: ma).environmentObject(model)
+                .task { if model.on(.musicAssistant), ma.configured { try? await ma.loadPlayers() } }
+        }
+        .help(remote ? "Playing on \(model.remoteName ?? "a speaker"); click to change" : "Play on this Mac or a speaker")
+        .task(id: model.on(.musicAssistant)) {
+            guard model.on(.musicAssistant), ma.configured else { return }
+            try? await ma.loadPlayers()
+            // music started on the speaker from elsewhere (Home Assistant, the MA app) shows up within a few seconds
+            while !Task.isCancelled {
+                player.pickUp()
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
+    }
+}
+
+@MainActor
+final class PopoverState: ObservableObject { @Published var on = false }
+
+struct SpeakerPanel: View {
     @EnvironmentObject var model: Model
     @ObservedObject var player: Player
     @ObservedObject var ma: MusicAssistant
 
     var body: some View {
-        let remote = player.output != "mac"
-        Menu {
-            Picker("Play On", selection: Binding(get: { player.output }, set: { player.move(to: $0) })) {
-                Label("This Mac", systemImage: "laptopcomputer").tag("mac")
-                if model.on(.musicAssistant) {
-                    ForEach(ma.players) { p in Label(p.name, systemImage: p.group ? "hifispeaker.2" : "hifispeaker").tag("ma:" + p.id) }
+        let leader = player.output.hasPrefix("ma:") ? String(player.output.dropFirst(3)) : nil
+        let lead = leader.flatMap { id in ma.players.first { $0.id == id } }
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Play On").font(.headline).padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 4)
+            row("This Mac", icon: "laptopcomputer", tag: "mac", volume: player.output == "mac" ? player.volume : nil) { player.setVolume($0) }
+            if model.on(.musicAssistant) {
+                ForEach(ma.players) { p in
+                    let picked = p.id == leader
+                    // others that can play along with the picked speaker: a checkbox, like the Mac's AirPlay list
+                    let along = lead.map { !picked && !$0.group && !p.group && $0.canGroupWith.contains(p.id) } ?? false
+                    let inSync = lead.map { $0.members.contains(p.id) || p.syncedTo == $0.id } ?? false
+                    row(p.name, icon: p.group ? "hifispeaker.2" : "hifispeaker", tag: "ma:" + p.id, volume: p.volume,
+                        sync: along ? (inSync, { on in _ = Task { await ma.sync(p.id, with: lead!.id, on) } }) : nil,
+                        moveHere: !picked && !inSync && player.canTransfer ? { player.transfer(to: "ma:" + p.id) } : nil) { ma.slide($0, on: p.id) }
                 }
-                if model.on(.ownTone) { Label("OwnTone's speakers", systemImage: "hifispeaker.2").tag("owntone") }
+                if ma.players.isEmpty { Text(ma.error ?? "No speakers found").font(.callout).foregroundStyle(.secondary).padding(.horizontal, 14) }
+                if let e = ma.error, !ma.players.isEmpty { Text(e).font(.caption).foregroundStyle(.red).padding(.horizontal, 14) }
             }
-            .pickerStyle(.inline)
-            if model.on(.musicAssistant), ma.players.isEmpty {
-                Text(ma.error ?? "No speakers found")
+            if model.on(.ownTone) { row("OwnTone's speakers", icon: "hifispeaker.2", tag: "owntone", volume: nil) { _ in } }
+        }
+        .padding(.bottom, 12)
+        .frame(width: 320)
+    }
+
+    /// A speaker: click to play on it; its volume under it; a checkbox when it can play along in sync.
+    func row(_ name: String, icon: String, tag: String, volume: Double?, sync: (Bool, (Bool) -> Void)? = nil,
+             moveHere: (() -> Void)? = nil, setVolume: @escaping (Double) -> Void) -> some View {
+        let picked = player.output == tag
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Image(systemName: icon).frame(width: 22).foregroundStyle(picked ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                Text(name).fontWeight(picked ? .semibold : .regular).lineLimit(1)
+                Spacer()
+                if let moveHere {
+                    // Music Assistant's queue transfer: the whole queue, Spotify songs too, from where it plays now
+                    Button("Move Here", systemImage: "arrow.turn.down.right", action: moveHere)
+                        .labelStyle(.iconOnly).buttonStyle(.borderless)
+                        .help("Move what's playing (the whole queue) to \(name)")
+                }
+                if let (on, set) = sync {
+                    Toggle("In sync", isOn: Binding(get: { on }, set: set)).toggleStyle(.checkbox).labelsHidden()
+                        .help(on ? "Playing along with the speaker you picked; uncheck to stop" : "Play along with the speaker you picked, in sync")
+                } else if picked { Image(systemName: "checkmark").foregroundStyle(.secondary) }
             }
-        } label: {
-            Label(remote ? model.remoteName ?? "Speaker" : "This Mac", systemImage: remote ? "hifispeaker.fill" : "hifispeaker")
+            .contentShape(.rect)
+            .onTapGesture { if !picked { player.move(to: tag) } }
+            if let v = volume {
+                HStack(spacing: 8) {
+                    Image(systemName: "speaker.fill").font(.caption2).foregroundStyle(.secondary)
+                    Slider(value: Binding(get: { v }, set: setVolume), in: 0...1).controlSize(.small)
+                    Image(systemName: "speaker.wave.3.fill").font(.caption2).foregroundStyle(.secondary)
+                }
+                .padding(.leading, 32)
+            }
         }
-        .help(remote ? "Playing on \(model.remoteName ?? "a speaker"); click to change" : "Play on this Mac or a speaker")
-        .task(id: model.on(.musicAssistant)) {
-            if model.on(.musicAssistant), ma.configured { try? await ma.loadPlayers(); player.pickUp() }
-        }
+        .padding(.horizontal, 14).padding(.vertical, 6)
+        .background(picked ? Color.primary.opacity(0.06) : .clear, in: .rect(cornerRadius: 8))
+        .padding(.horizontal, 6)
     }
 }

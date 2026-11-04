@@ -1,9 +1,11 @@
 import SwiftUI
+import AVFoundation
 
 // The YouTube plugin: searches YouTube and downloads with yt-dlp (from the nix profile or
 // Homebrew), preferring the AAC (m4a) stream so the iPod needs no conversion. Songs get proper
 // tags and the cover, then go through the Importer into the library. Also fetches Spotify albums
-// and the Spotify-only songs of a playlist song by song.
+// and the Spotify-only songs of a playlist song by song, and splits a compilation video (one
+// upload holding a whole album) into its songs by its chapters or the tracklist in its description.
 
 struct YTResult: Identifiable, Hashable {
     var id: String
@@ -18,6 +20,7 @@ struct YTItem: Identifiable, Hashable {
     var source: String                 // a URL or "ytsearch1:…"
     var title, artist, album, albumArtist: String
     var track = 0, trackCount = 0, year = 0
+    var start = 0.0, end = 0.0         // seconds: a slice of the video (one song of a compilation); end 0 = all of it
     var state = "Waiting", progress = 0.0
     var done = false, failed = false, cancelled = false
     var video = "", videoTitle = "", channel = ""   // what yt-dlp actually picked
@@ -170,13 +173,14 @@ final class YouTube: ObservableObject {
     }
 
     /// Songs known by artist/title/album (from Spotify): each one is the top YouTube search hit.
-    func fetch(_ songs: [OTTrack], album: String?, art: String, year: Int = 0) {
+    /// Songs from an album are numbered in order, or by `numbers` (of `total`) when only some of it is fetched.
+    func fetch(_ songs: [OTTrack], album: String?, art: String, year: Int = 0, numbers: [Int]? = nil, total: Int? = nil) {
         let items = songs.enumerated().map { n, t in
             YTItem(source: "ytsearch1:\(t.artist) - \(t.title) audio", title: t.title, artist: t.artist, album: t.album,
-                   albumArtist: t.albumArtist.isEmpty ? t.artist : t.albumArtist, track: album == nil ? 0 : n + 1,
-                   trackCount: album == nil ? 0 : songs.count, year: year)
+                   albumArtist: t.albumArtist.isEmpty ? t.artist : t.albumArtist, track: album == nil ? 0 : numbers?[n] ?? n + 1,
+                   trackCount: album == nil ? 0 : total ?? songs.count, year: year)
         }
-        add(YTJob(title: album ?? "\(songs.count) songs", subtitle: album == nil ? "from YouTube" : (songs.first?.albumArtist ?? ""), art: art, items: items))
+        add(YTJob(title: songs.count == 1 && numbers != nil ? songs[0].title : album ?? "\(songs.count) songs", subtitle: album == nil ? "from YouTube" : (songs.first?.albumArtist ?? ""), art: art, items: items))
     }
 
     private func add(_ j: YTJob) {
@@ -195,6 +199,7 @@ final class YouTube: ObservableObject {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let cover = await Self.coverData(job.art)
         var files: [URL] = []
+        var whole: [String: URL] = [:]      // source → its full download, for the songs that are slices of it
         for itemID in job.items.map(\.id) {
             func current() -> YTItem? { jobs.first { $0.id == id }?.items.first { $0.id == itemID } }
             guard let item = current(), !item.done, !item.failed else { continue }
@@ -202,8 +207,10 @@ final class YouTube: ObservableObject {
                 guard let j = jobs.firstIndex(where: { $0.id == id }), let i = jobs[j].items.firstIndex(where: { $0.id == itemID }) else { return }
                 f(&jobs[j].items[i])
             }
-            set { $0.state = "Downloading" }
             do {
+                var url: URL
+                if item.end > 0, let w = whole[item.source] { url = w } else {
+                set { $0.state = "Downloading" }
                 defer { procs[itemID] = nil }
                 let out = try await run(["-f", "bestaudio[ext=m4a]/bestaudio", "--no-playlist", "--newline", "--no-warnings", "--progress",
                                          "--progress-template", "download:%(progress._percent_str)s", "-o", dir.path + "/%(id)s.%(ext)s",
@@ -220,8 +227,14 @@ final class YouTube: ObservableObject {
                 }, started: { [weak self] p in self?.procs[itemID] = p })
                 guard current()?.cancelled != true else { continue }
                 guard let path = out.split(separator: "\n").last(where: { $0.hasPrefix("/") }).map(String.init) else { throw SyncError.missingSource("no file") }
-                var url = URL(fileURLWithPath: path)
+                url = URL(fileURLWithPath: path)
                 if url.pathExtension.lowercased() != "m4a" { set { $0.state = "Converting" }; url = try await convert(url) }
+                if item.end > 0 { whole[item.source] = url }
+                }
+                if item.end > 0 {
+                    set { $0.state = "Cutting" }
+                    url = try await Self.cut(url, from: item.start, to: item.end, into: dir.appendingPathComponent(itemID.uuidString + ".m4a"))
+                }
                 set { $0.state = "Tagging" }
                 let e = TagEdit(title: item.title, artist: item.artist, albumArtist: item.albumArtist, album: item.album,
                                 year: item.year > 0 ? item.year : nil, track: item.track > 0 ? item.track : nil,
@@ -257,9 +270,114 @@ final class YouTube: ObservableObject {
         return dst
     }
 
+    /// One song out of a compilation's download, copied as is (no re-encoding, so no ffmpeg needed).
+    static func cut(_ url: URL, from: Double, to: Double, into dst: URL) async throws -> URL {
+        guard let s = AVAssetExportSession(asset: AVURLAsset(url: url), presetName: AVAssetExportPresetPassthrough) else {
+            throw SyncError.conversionFailed(url.lastPathComponent)
+        }
+        s.timeRange = CMTimeRange(start: CMTime(seconds: from, preferredTimescale: 1000), end: CMTime(seconds: to, preferredTimescale: 1000))
+        try? FileManager.default.removeItem(at: dst)
+        try await s.export(to: dst, as: .m4a)
+        return dst
+    }
+
+    // MARK: compilations
+
+    struct Chapter: Hashable { var start: Double; var title: String }
+
+    /// A video's chapters (YouTube makes them from the description's timestamps), its description
+    /// for when there are none, and its length.
+    func info(_ r: YTResult) async throws -> (chapters: [Chapter], description: String, duration: Double, year: Int) {
+        let out = try await run(["-J", "--no-warnings", "--skip-download", "--no-playlist", r.url])
+        let j = (try? JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any]) ?? [:]
+        let chapters = ((j["chapters"] as? [[String: Any]]) ?? []).compactMap { c -> Chapter? in
+            guard let t = c["title"] as? String, let s = c["start_time"] as? Double else { return nil }
+            return Chapter(start: s, title: t)
+        }
+        let desc = j["description"] as? String ?? ""
+        return (chapters, desc, j["duration"] as? Double ?? Double(r.duration), j["release_year"] as? Int ?? Self.year(in: r.title + "\n" + desc))
+    }
+
+    /// The first plausible year ("Recorded during April 1996 …").
+    static func year(in text: String) -> Int {
+        guard let m = text.firstMatch(of: #/\b(19[5-9]\d|20[0-2]\d)\b/#) else { return 0 }
+        return Int(m.1) ?? 0
+    }
+
+    static func timestamp(_ s: Double) -> String {
+        let t = Int(s)
+        return t >= 3600 ? String(format: "%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60) : String(format: "%d:%02d", t / 60, t % 60)
+    }
+
+    /// Reads a tracklist: every line with a timestamp is a song ("0:00 Title", "1. Title (2:54)",
+    /// "[1:02:03] Title", "0:00 - 2:54 Title"). Needs at least two songs, in order.
+    static func tracklist(_ text: String) -> [Chapter] {
+        let stamp = #/(?:(\d{1,2}):)?(\d{1,2}):(\d{2})/#
+        var out: [Chapter] = []
+        for line in text.split(whereSeparator: \.isNewline) {
+            guard let m = line.firstMatch(of: stamp) else { continue }
+            let start = Double(Int(m.1 ?? "0")! * 3600 + Int(m.2)! * 60 + Int(m.3)!)
+            var t = String(line).replacing(stamp, with: "")
+            t = t.replacing(#/[\[\(]\s*[\-\x{2013}\x{2014}]?\s*[\]\)]/#, with: "")                  // the brackets the timestamp was in
+            t = t.trimmingCharacters(in: CharacterSet(charactersIn: "-–—|:•·~").union(.whitespaces))
+            t = t.replacing(#/^(?:\d{1,2}[.)]\s+|\d{1,2}\s+[\-\x{2013}\x{2014}]\s+)/#, with: "")     // "1. " / "01 - " numbering
+            t = t.trimmingCharacters(in: CharacterSet(charactersIn: "-–—|:•·~").union(.whitespaces))
+            guard !t.isEmpty, start >= (out.last?.start ?? -1) else { continue }
+            out.append(Chapter(start: start, title: t))
+        }
+        return out.count >= 2 ? out : []
+    }
+
+    /// Downloads a compilation once and cuts it into its songs. When every title reads
+    /// "Artist - Title" (a various-artists mix) the artists come from there.
+    func split(_ r: YTResult, songs: [Chapter], duration: Double, album: String, artist: String, year: Int) {
+        let various = songs.allSatisfy { t in [" - ", " – ", " — "].contains { t.title.contains($0) } }
+        let items = songs.enumerated().map { n, c -> YTItem in
+            let s = various ? Self.split(c.title, channel: artist) : (artist: artist, title: c.title)
+            return YTItem(source: r.url, title: s.title, artist: s.artist, album: album, albumArtist: various ? "Various Artists" : artist,
+                          track: n + 1, trackCount: songs.count, year: year,
+                          start: c.start, end: n + 1 < songs.count ? songs[n + 1].start : duration)
+        }
+        add(YTJob(title: album, subtitle: "\(items.count) songs from one video", art: r.thumb?.absoluteString ?? "", items: items))
+    }
+
+    /// The cover to tag with. A video thumbnail is the square cover letterboxed in 16:9, so it gets
+    /// the biggest size YouTube has (maxres 1280×720, missing on old videos) and is cut to its square.
     static func coverData(_ s: String) async -> Data? {
-        guard let u = URL(string: s), !s.isEmpty, let (d, _) = try? await URLSession.shared.data(from: u), NSImage(data: d) != nil else { return nil }
-        return d
+        var urls = [s]
+        if s.contains("i.ytimg.com"), let size = s.split(separator: "/").last {
+            urls = ["maxresdefault.jpg", "hqdefault.jpg"].map { s.replacingOccurrences(of: size, with: $0) } + urls
+        }
+        for s in urls {
+            guard let u = URL(string: s), !s.isEmpty, let (d, r) = try? await URLSession.shared.data(from: u),
+                  (r as? HTTPURLResponse)?.statusCode ?? 200 == 200, NSImage(data: d) != nil else { continue }
+            return square(d) ?? d
+        }
+        return nil
+    }
+
+    /// Trims dark bars off every side, then centre-crops what's left to a square (if it isn't one).
+    static func square(_ d: Data) -> Data? {
+        guard let src = CGImageSourceCreateWithData(d as CFData, nil), let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        let w = cg.width, h = cg.height
+        guard w != h, let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                          space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+              let px = ctx.data?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        // a row or column counts as bar when nearly all of it is near-black (JPEG noise allowed)
+        func dark(_ x: Int, _ y: Int) -> Bool { let p = (y * w + x) * 4; return max(px[p], px[p + 1], px[p + 2]) < 28 }
+        func barCol(_ x: Int) -> Bool { (0..<h).filter { dark(x, $0) }.count > h * 97 / 100 }
+        func barRow(_ y: Int) -> Bool { (0..<w).filter { dark($0, y) }.count > w * 97 / 100 }
+        var l = 0, r = w - 1, t = 0, b = h - 1
+        while l < r, barCol(l) { l += 1 }
+        while r > l, barCol(r) { r -= 1 }
+        // only trim rows when the picture isn't already taller than wide (dark covers have dark edges)
+        if r - l + 1 > h { while t < b, barRow(t) { t += 1 }; while b > t, barRow(b) { b -= 1 } }
+        var rect = CGRect(x: l, y: t, width: r - l + 1, height: b - t + 1)
+        let side = min(rect.width, rect.height)
+        rect = CGRect(x: rect.midX - side / 2, y: rect.midY - side / 2, width: side, height: side).integral
+        guard side >= 100, let sq = cg.cropping(to: rect) else { return nil }
+        return NSBitmapImageRep(cgImage: sq).representation(using: .jpeg, properties: [.compressionFactor: 0.92])
     }
 
     /// Stops a job (or one song of it): waiting songs are skipped and a running yt-dlp is killed.
@@ -292,9 +410,111 @@ extension SpotifyAPI {
     }
 }
 
+/// The split sheet's state: one compilation video and the tracklist it's cut by (free text, so
+/// a tracklist from anywhere can be pasted in).
+@MainActor
+final class SplitUI: ObservableObject {
+    @Published var video: YTResult?
+    @Published var loading = false
+    @Published var error: String?
+    @Published var text = ""
+    @Published var album = ""
+    @Published var artist = ""
+    @Published var year = ""
+    var duration = 0.0
+    var songs: [YouTube.Chapter] { YouTube.tracklist(text) }
+
+    func open(_ r: YTResult, _ yt: YouTube) async {
+        video = r; loading = true; error = nil; text = ""; duration = Double(r.duration)
+        let s = YouTube.split(r.title, channel: r.channel)
+        artist = s.artist; album = s.title; year = ""
+        defer { loading = false }
+        do {
+            let i = try await yt.info(r)
+            duration = i.duration
+            let chapters = i.chapters.count >= 2 ? i.chapters : YouTube.tracklist(i.description)
+            text = chapters.map { YouTube.timestamp($0.start) + " " + $0.title }.joined(separator: "\n")
+            if i.year > 0 { year = String(i.year) }
+        } catch { self.error = error.localizedDescription }
+    }
+}
+
+struct SplitSheet: View {
+    @ObservedObject var ui: SplitUI
+    @EnvironmentObject var model: Model
+    @EnvironmentObject var yt: YouTube
+    @Environment(\.dismiss) var dismiss
+
+    var body: some View {
+        let songs = ui.songs
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                CachedImage(url: ui.video?.thumb, seed: "YouTube.swift:9")
+                    .frame(width: 96, height: 54).clipShape(.rect(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Split into Songs").font(.title3.bold())
+                    Text(ui.video?.title ?? "").foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Form {
+                TextField("Album", text: $ui.album)
+                TextField("Artist", text: $ui.artist)
+                TextField("Year", text: $ui.year)
+            }
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Tracklist").font(.headline)
+                    Text("One song per line with its start time. Edit freely, or paste one from elsewhere.").font(.caption).foregroundStyle(.secondary)
+                    ZStack {
+                        TextEditor(text: $ui.text).font(.system(.body, design: .monospaced)).scrollContentBackground(.hidden)
+                            .padding(6).background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 8))
+                        if ui.loading { ProgressView() }
+                    }
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(songs.isEmpty ? "No songs yet" : "\(songs.count) songs").font(.headline)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(songs.enumerated()), id: \.offset) { n, c in
+                                let end = n + 1 < songs.count ? songs[n + 1].start : ui.duration
+                                HStack {
+                                    Text("\(n + 1)").monospacedDigit().foregroundStyle(.secondary).frame(width: 22, alignment: .trailing)
+                                    Text(c.title).lineLimit(1)
+                                    Spacer()
+                                    Text(YouTube.timestamp(max(0, end - c.start))).monospacedDigit().foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(width: 280)
+            }
+            .frame(maxHeight: .infinity)
+            if let e = ui.error { Text(e).font(.caption).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Download \(songs.count) Songs", systemImage: "scissors") {
+                    guard let v = ui.video else { return }
+                    let album = ui.album.trimmingCharacters(in: .whitespaces)
+                    yt.split(v, songs: songs, duration: ui.duration, album: album.isEmpty ? v.title : album,
+                             artist: ui.artist.trimmingCharacters(in: .whitespaces), year: Int(ui.year) ?? 0)
+                    model.notify("Downloading “\(album)” from YouTube")
+                    dismiss()
+                }
+                .buttonStyle(.glassProminent).keyboardShortcut(.defaultAction)
+                .disabled(songs.isEmpty || ui.loading || songs.last.map { $0.start >= ui.duration } == true)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 720, idealWidth: 780, minHeight: 520, idealHeight: 600)
+    }
+}
+
 struct YouTubeView: View {
     @EnvironmentObject var model: Model
     @EnvironmentObject var yt: YouTube
+    @StateObject private var split = SplitUI()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -353,6 +573,10 @@ struct YouTubeView: View {
                                     Text("Saved as “\(s.title)” by \(s.artist)").font(.caption).foregroundStyle(.tertiary).lineLimit(1)
                                 }
                                 Spacer()
+                                if r.duration == 0 || r.duration >= 600 {     // long enough to be a compilation
+                                    Button("Split", systemImage: "scissors") { Task { await split.open(r, yt) } }
+                                        .buttonStyle(.glass).help("Download as an album, cut into its songs by the tracklist")
+                                }
                                 Button("Download", systemImage: "arrow.down") { yt.download([r]); model.notify("Downloading “\(s.title)” from YouTube") }
                                     .buttonStyle(.glass)
                             }
@@ -366,6 +590,9 @@ struct YouTubeView: View {
             Spacer(minLength: 0)
         }
         .navigationTitle("YouTube")
+        .sheet(isPresented: Binding(get: { split.video != nil }, set: { if !$0 { split.video = nil } })) {
+            SplitSheet(ui: split).environmentObject(model).environmentObject(yt)
+        }
         .task { if yt.binary != nil, yt.version.isEmpty { await yt.update() } }
     }
 }

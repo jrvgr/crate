@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 // Every playlist on one page: Crate's own, smart ones, the ones only on the iPod and each server's.
 // The sidebar shows only the ones you pin, so a server with dozens doesn't fill it.
@@ -150,7 +151,7 @@ struct PlaylistCard: View {
         VStack(alignment: .leading, spacing: 6) {
             Color.clear.aspectRatio(1, contentMode: .fit)
                 .overlay { art }
-                .clipShape(.rect(cornerRadius: 14))
+                .clipShape(.rect(cornerRadius: 14, style: .continuous))
                 .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
                 .overlay(alignment: .topTrailing) {
                     // like an album's badge: click to queue for the iPod, unqueue or mark for removal
@@ -158,10 +159,11 @@ struct PlaylistCard: View {
                         if card.mark == .none {
                             Image(systemName: "plus").font(.system(size: 11, weight: .bold)).frame(width: 24, height: 24)
                                 .glassEffect(.clear, in: .circle).help("Add to the iPod")
-                        } else { MarkBadge(mark: card.mark, size: 24) }
+                        } else { MarkBadge(mark: card.mark, size: 24, help: card.mark == .onIPod ? Model.removeHint : nil) }
                     }
                     .buttonStyle(.plain).padding(7)
-                    .opacity(card.mark == .none && (!hover.on || model.ipod == nil) ? 0 : 1)
+                    // as on album tiles: on the iPod or not only on hover; queued and removing always show
+                    .opacity((card.mark == .none && model.ipod == nil) || ((card.mark == .none || card.mark == .onIPod) && !hover.on) ? 0 : 1)
                 }
                 .overlay(alignment: .bottomLeading) {
                     if model.pinned.contains(card.pane) {
@@ -192,7 +194,15 @@ struct PlaylistCard: View {
             } else {
                 ZStack {
                     Cover(image: nil, seed: card.name)
-                    Image(systemName: card.icon).font(.system(size: 40, weight: .light)).foregroundStyle(.white.opacity(0.85))
+                    // a rating playlist shows its stars, so "3 stars" and "2 stars" don't look the same
+                    if case .smart(let p) = card.kind, p.rules.count == 1, let r = p.rules.first, r.field == .rating, let n = Int(r.value), (1...5).contains(n) {
+                        HStack(spacing: 3) {
+                            ForEach(1...5, id: \.self) { i in Image(systemName: i <= n ? "star.fill" : "star").opacity(i <= n ? 0.9 : 0.4) }
+                        }
+                        .font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
+                    } else {
+                        Image(systemName: card.icon).font(.system(size: 40, weight: .light)).foregroundStyle(.white.opacity(0.85))
+                    }
                 }
             }
         }
@@ -246,7 +256,23 @@ enum PodDrop: Transferable {
 extension Pane {
     /// The playlists in a pinDraggable drag.
     static func dragged(_ items: [String]) -> [Pane] {
-        items.compactMap { $0.hasPrefix("crate-pin:") ? Pane(pinKey: String($0.dropFirst(10))) : nil }
+        items.compactMap { i in
+            ["crate-pin:", "crate-pinned:"].first(where: i.hasPrefix).flatMap { Pane(pinKey: String(i.dropFirst($0.count))) }
+        }
+    }
+    /// A pinned playlist dragged out of the sidebar: as text for the iPod card, and as its own type, which only the
+    /// window's unpin drop takes (so playlists dragged from the Playlists page don't light it up).
+    static let pinnedType = UTType(exportedAs: "nl.jrvgr.crate.pinned-playlist")
+    static func pinnedProvider(_ key: String) -> NSItemProvider {
+        let p = NSItemProvider(object: ("crate-pinned:" + key) as NSString)
+        p.registerDataRepresentation(forTypeIdentifier: pinnedType.identifier, visibility: .ownProcess) { done in
+            done(Data(key.utf8), nil); return nil
+        }
+        return p
+    }
+    /// Pinned playlists dragged out of the sidebar ("crate-pinned:"), as opposed to ones dragged from the Playlists page.
+    static func unpinned(_ items: [String]) -> [Pane] {
+        items.compactMap { $0.hasPrefix("crate-pinned:") ? Pane(pinKey: String($0.dropFirst(13))) : nil }
     }
 
     /// How a pinned playlist is remembered.
@@ -276,6 +302,7 @@ extension Pane {
 extension Model {
     /// A playlist card's badge: queue it for the iPod, unqueue it, or mark it for removal (and back).
     func cycle(_ c: PlaylistsPage.Card) {
+        if c.mark == .onIPod, !Self.removeClick { return }
         switch c.kind {
         case .crate(let p): if let i = cratePlaylist(p.id) { cratePlaylists[i].onIPod.toggle() }
         case .smart(let p): if let i = smartPlaylists.firstIndex(where: { $0.id == p.id }) { smartPlaylists[i].onIPod.toggle(); saveSmart() }
@@ -298,6 +325,13 @@ extension Model {
     func pinDropped(_ items: [String]) -> Bool {
         let panes = Pane.dragged(items)
         for p in panes where !pinned.contains(p) { pinned.append(p) }
+        return !panes.isEmpty
+    }
+
+    /// Pinned playlists dragged out of the sidebar onto the window: unpinned, like apps off the Dock.
+    func unpinDropped(_ items: [String]) -> Bool {
+        let panes = Pane.unpinned(items)
+        pinned.removeAll { panes.contains($0) }
         return !panes.isEmpty
     }
 

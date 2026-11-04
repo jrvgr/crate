@@ -89,15 +89,16 @@ struct AlbumsView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .help("Open \(group[0].artist)")
+                                    .padding(.top, 10)      // pinned, it keeps some air under the toolbar
                                 }
                                 .id("artist-" + key)
                             }
                         }
-                        .padding(24).padding(.trailing, marks.count > 3 ? 18 : 0)
+                        .padding(24).padding(.trailing, marks.count > 3 ? 30 : 0)
                         .padding(.bottom, 50)
                     } else {
                         tiles(list)
-                            .padding(24).padding(.trailing, marks.count > 3 ? 18 : 0)
+                            .padding(24).padding(.trailing, marks.count > 3 ? 30 : 0)
                             .padding(.bottom, 50)
                     }
                 }
@@ -235,13 +236,13 @@ struct AlbumList: View {
                     Image(systemName: m.icon.map { $0 == "checkmark" ? "checkmark.circle.fill" : $0 + ".circle.fill" } ?? "plus.circle")
                         .foregroundStyle(m == .none ? AnyShapeStyle(.tertiary) : AnyShapeStyle(m.tint))
                 }
-                .buttonStyle(.plain).help(m == .none ? "Add to the iPod" : m.help)
+                .buttonStyle(.plain).help(m == .none ? "Add to the iPod" : m == .onIPod ? Model.removeHint : m.help)
                 .disabled(model.isPodOnly(r.album) && m == .none)
             }
             .width(22)
             TableColumn("Album", value: \.title) { (r: AlbumRow) in
                 HStack(spacing: 8) {
-                    Cover(image: model.artwork[r.id], seed: r.id).frame(width: 28, height: 28).clipShape(.rect(cornerRadius: 4))
+                    Cover(image: model.artwork[r.id], seed: r.id).frame(width: 28, height: 28).clipShape(.rect(cornerRadius: 4, style: .continuous))
                     Text(r.title).lineLimit(1)
                     HiddenMark(album: r.album, compact: true).environmentObject(model)   // Table cells can lose the environment while scrolling
                 }
@@ -332,6 +333,7 @@ struct AlbumMenu: View {
             Button("Find Metadata…", systemImage: "sparkle.magnifyingglass") { model.lookupAlbum = album }
             Button("Edit Tags…", systemImage: "pencil") { model.editAlbum = album }
             Button("Organise Files…", systemImage: "folder.badge.gearshape") { model.organize = [album] }
+            Button("Find Duplicates…", systemImage: "square.on.square") { model.dedupeAlbum = album }
             Divider()
             Button("Delete from Library…", systemImage: "trash", role: .destructive) { model.confirmTrash = album.tracks }
             Button("Quick Look Cover", systemImage: "eye") { model.quickLookCover(album) }
@@ -360,11 +362,12 @@ struct AlbumTile: View {
         VStack(alignment: .leading, spacing: 6) {
             Color.clear.aspectRatio(1, contentMode: .fit)
                 .overlay { Cover(image: model.artwork[album.id], seed: album.id) }
-                .clipShape(.rect(cornerRadius: 14))
+                .clipShape(.rect(cornerRadius: 14, style: .continuous))
                 .coverDrop(album)
                 .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
+                .heroSource(.album(album))
                 .overlay {
-                    if m == .adding || m == .removing { RoundedRectangle(cornerRadius: 14).strokeBorder(m.tint, lineWidth: 3) }
+                    if m == .adding || m == .removing { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(m.tint, lineWidth: 3) }
                 }
                 .opacity(m == .removing ? 0.55 : 1)
                 .overlay(alignment: .bottomLeading) { HiddenMark(album: album).padding(8) }
@@ -372,7 +375,7 @@ struct AlbumTile: View {
                     Button { model.cycle(album) } label: {
                         if m == .none { Image(systemName: "plus").font(.system(size: 12, weight: .bold)).frame(width: 26, height: 26)
                                             .glassEffect(.clear, in: .circle).help("Add to the iPod") }
-                        else { MarkBadge(mark: m) }
+                        else { MarkBadge(mark: m, help: m == .onIPod ? Model.removeHint : nil) }
                     }
                     .buttonStyle(.plain)
                     .padding(8)
@@ -387,7 +390,7 @@ struct AlbumTile: View {
         .contentShape(.rect)
         .onHover { hover.on = $0 }
         .draggable(URL(fileURLWithPath: album.folder)) {
-            Cover(image: model.artwork[album.id], seed: album.id).frame(width: 90, height: 90).clipShape(.rect(cornerRadius: 10))
+            Cover(image: model.artwork[album.id], seed: album.id).frame(width: 90, height: 90).clipShape(.rect(cornerRadius: 10, style: .continuous))
         }
     }
 }
@@ -399,10 +402,28 @@ func totalDuration(_ ms: Int) -> String {
     return m >= 60 ? "\(m / 60) h \(m % 60) min" : "\(m) min"
 }
 
+/// The song or album a page lights up a moment (Model.highlight).
+@MainActor
+final class Flash: ObservableObject { @Published var id: String? }
+
+/// Scrolls to Model.highlight when it's one of `ids` and lights it up a moment, then lets it go.
+@MainActor
+func showHighlight(_ model: Model, ids: [String], proxy: ScrollViewProxy, flash: Flash) async {
+    guard let h = model.highlight, ids.contains(h) else { return }
+    model.highlight = nil
+    try? await Task.sleep(for: .milliseconds(350))           // the page is still coming in
+    withAnimation(.easeInOut(duration: 0.4)) { proxy.scrollTo(h, anchor: .center) }
+    withAnimation(.easeOut(duration: 0.2)) { flash.id = h }
+    try? await Task.sleep(for: .seconds(1.6))
+    withAnimation(.easeOut(duration: 0.8)) { flash.id = nil }
+}
+
 struct AlbumDetail: View {
     @EnvironmentObject var model: Model
     var album: Album
     @StateObject private var studio = CoverStudioUI()
+    @StateObject private var flash = Flash()
+    @StateObject private var hovered = Flash()       // the song row under the pointer
 
     var body: some View {
         let m = model.mark(album), keys = model.podKeys, podOnly = model.isPodOnly(album)
@@ -411,6 +432,7 @@ struct AlbumDetail: View {
         let genre = album.tracks.first { !$0.genre.isEmpty }?.genre ?? mb?.genre ?? ""
         let formats = Set(album.tracks.map { $0.ext.uppercased() }).sorted().joined(separator: "/")
         let editing = model.editAlbum?.id == album.id, finding = model.lookupAlbum?.id == album.id
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 if editing {
@@ -418,8 +440,9 @@ struct AlbumDetail: View {
                 } else {
                 HStack(alignment: .bottom, spacing: 24) {
                     IPodCover(image: model.artwork[album.id], seed: album.id)
-                        .frame(width: 220, height: 220).clipShape(.rect(cornerRadius: 16))
+                        .frame(width: 220, height: 220).clipShape(.rect(cornerRadius: 16, style: .continuous))
                         .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
+                        .heroTarget(.album(album))
                         .onTapGesture { model.quickLookCover(album) }
                         .coverDrop(album, corner: 16)
                         .help(model.artwork[album.id] == nil ? "Drop an image here to use it as the cover" : "Quick Look (⌘Y); drop an image to replace the cover")
@@ -451,42 +474,57 @@ struct AlbumDetail: View {
                                   : "\(hidden.hidden) of \(hidden.onIPod) songs hidden from Artists and Albums on the iPod", systemImage: "eye.slash")
                                 .font(.callout).foregroundStyle(.secondary)
                         }
+                        // like the artist page: Play, the iPod, and everything else named in the ⋯ menu
                         HStack(spacing: 10) {
-                            if !podOnly, m != .onIPod, m != .removing {
-                                Button(m == .adding ? "Don't Add" : m == .partial ? "Add Missing Songs" : "Add to iPod",
-                                       systemImage: m == .adding ? "xmark" : "plus") { model.toggleAdd(album) }
-                                    .buttonStyle(.glassProminent).disabled(model.ipod == nil)
-                            }
-                            if m == .onIPod || m == .partial || m == .removing {
-                                Button(m == .removing ? "Keep on iPod" : "Remove from iPod",
-                                       systemImage: m == .removing ? "arrow.uturn.backward" : "minus") { model.toggleRemove(album) }
-                                    .buttonStyle(.glass)
-                            }
                             if podOnly {
                                 Button("Copy to Library", systemImage: "square.and.arrow.down") { Task { await model.copyFromIPod([album]) } }
-                                    .buttonStyle(.glass).disabled(!model.connected).help("Copy these songs from the iPod into your library")
+                                    .buttonStyle(.glassProminent).disabled(!model.connected).help("Copy these songs from the iPod into your library")
+                            } else {
+                                Button("Play", systemImage: "play.fill") { Task { await model.play(album) } }.buttonStyle(.glassProminent)
+                            }
+                            if podOnly {
+                                if m == .onIPod || m == .partial || m == .removing {
+                                    Button(m == .removing ? "Keep on iPod" : "Remove from iPod",
+                                           systemImage: m == .removing ? "arrow.uturn.backward" : "minus") { model.toggleRemove(album) }
+                                }
+                            } else {
+                                // as on the artist page: where the album stands on the iPod, and changing it, in one menu
+                                GlassMenu {
+                                    if m == .none || m == .partial || m == .adding {
+                                        Button(m == .adding ? "Don't Add to iPod" : m == .partial ? "Add Missing Songs" : "Add to iPod",
+                                               systemImage: m == .adding ? "xmark" : "plus") { model.toggleAdd(album) }
+                                            .disabled(model.ipod == nil)
+                                    }
+                                    if m == .onIPod || m == .partial || m == .removing {
+                                        Button(m == .removing ? "Keep on iPod" : "Remove from iPod",
+                                               systemImage: m == .removing ? "arrow.uturn.backward" : "minus") { model.toggleRemove(album) }
+                                    }
+                                } label: {
+                                    HStack(spacing: 7) { Image(symbol: m == .none ? "plus" : "ipod"); Text(ipodTitle(m)) }
+                                }
+                                .help(m.help)
                             }
                             if !podOnly {
-                                Button("Play", systemImage: "play.fill") { Task { await model.play(album) } }.buttonStyle(.glass)
-                                Button { model.lookupAlbum = album } label: { Image(systemName: "sparkle.magnifyingglass") }
-                                    .buttonStyle(.glass).help("Find Metadata…")
-                                Button { model.editAlbum = album } label: { Image(systemName: "pencil") }
-                                    .buttonStyle(.glass).help("Edit Tags…")
-                                Button { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: album.folder) } label: { Image(systemName: "folder") }
-                                    .buttonStyle(.glass).help("Show in Finder")
-                                if model.froggerFeatures {
-                                    Button {
-                                        Task { studio.open = true; await studio.select(album, model: model) }
-                                    } label: { Image(systemName: "camera.filters") }
-                                        .buttonStyle(.glass).help("Cover Studio… (how this cover looks on Frogger's Now Playing page)")
-                                }
+                                GlassMenu {
+                                    Button("Find Metadata…", systemImage: "sparkle.magnifyingglass") { model.lookupAlbum = album }
+                                    Button("Edit Tags…", systemImage: "pencil") { model.editAlbum = album }
+                                    Button("Find Duplicates…", systemImage: "square.on.square") { model.dedupeAlbum = album }
+                                    if model.froggerFeatures {
+                                        Button("Cover Studio…", systemImage: "camera.filters") { Task { studio.open = true; await studio.select(album, model: model) } }
+                                    }
+                                    Divider()
+                                    Button("Show in Finder", systemImage: "folder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: album.folder) }
+                                } label: { MoreLabel() }
+                                    .help("More")
                             }
                         }
+                        .buttonStyle(.glass).buttonBorderShape(.capsule).controlSize(.large).menuStyle(.button).fixedSize()
                         .padding(.top, 8)
                     }
                     Spacer(minLength: 0)
                 }
                 if finding { LookupPanel(album: album) { model.lookupAlbum = nil } }
+                if model.dedupeAlbum?.id == album.id { DedupePanel(album: album) { model.dedupeAlbum = nil } }
                 VStack(spacing: 0) {
                     ForEach(Array(album.tracks.enumerated()), id: \.element.id) { i, t in
                         HStack(spacing: 12) {
@@ -505,13 +543,18 @@ struct AlbumDetail: View {
                                     .foregroundStyle(sm == .none ? AnyShapeStyle(.quaternary) : AnyShapeStyle(sm.tint))
                             }
                             .buttonStyle(.plain).help(sm == .none ? "Add this song to the iPod" : sm.help)
+                            // a song like the rest of the album says nothing the header doesn't: only on hover
+                            .opacity(m != .partial && sm == m && hovered.id != t.id ? 0 : 1)
                             if !podOnly { StarPicker(value: model.rating(t)) { model.rate(t, $0) } }
                             Text(t.lengthMs > 0 ? duration(t.lengthMs) : "").monospacedDigit().foregroundStyle(.secondary)
                                 .frame(width: 44, alignment: .trailing)
                         }
                         .padding(.horizontal, 14).padding(.vertical, 8)
-                        .background(model.player.current?.id == t.id ? Color.accentColor.opacity(0.15) : i % 2 == 1 ? Color.primary.opacity(0.04) : .clear)
+                        .background(flash.id == t.id ? Color.primary.opacity(0.2)
+                                    : model.player.current?.id == t.id ? Color.accentColor.opacity(0.15) : i % 2 == 1 ? Color.primary.opacity(0.04) : .clear)
+                        .id(t.id)
                         .contentShape(.rect)
+                        .onHover { on in if on { hovered.id = t.id } else if hovered.id == t.id { hovered.id = nil } }
                         .onTapGesture(count: 2) { Task { await model.play(album, from: i) } }
                         .contextMenu {
                             Button("Play", systemImage: "play.fill") { Task { await model.play(album, from: i) } }
@@ -529,18 +572,32 @@ struct AlbumDetail: View {
                 }
                 .clipShape(.rect(cornerRadius: 14))
                 .glassEffect(.regular, in: .rect(cornerRadius: 14))
+                if !podOnly { MissingSongs(album: album) }
                 }
             }
             .padding(28)
             .padding(.bottom, 50)
         }
+        .task(id: model.highlight) { await showHighlight(model, ids: album.tracks.map(\.id), proxy: proxy, flash: flash) }
+        }
         .onDisappear {
             if model.editAlbum?.id == album.id { model.editAlbum = nil }
             if model.lookupAlbum?.id == album.id { model.lookupAlbum = nil }
+            if model.dedupeAlbum?.id == album.id { model.dedupeAlbum = nil }
         }
         .background { Backdrop(image: model.artwork[album.id]) }
         .navigationTitle(album.title)
         .sheet(isPresented: $studio.open) { CoverStudio(ui: studio).environmentObject(model) }
+    }
+
+    func ipodTitle(_ m: SyncMark) -> String {
+        switch m {
+        case .none: "Add to iPod"
+        case .onIPod: "On iPod"
+        case .partial: "Partly on iPod"
+        case .adding: "Adding to iPod"
+        case .removing: "Removing from iPod"
+        }
     }
 }
 
@@ -571,7 +628,7 @@ struct PlaylistView: View {
                 HStack(alignment: .bottom, spacing: 24) {
                     Mosaic(paths: playlist.artwork.isEmpty ? Array(NSOrderedSet(array: all.map(\.artworkPath)).array.compactMap { $0 as? String }.prefix(4))
                                                            : [playlist.artwork])
-                        .frame(width: 200, height: 200).clipShape(.rect(cornerRadius: 16))
+                        .frame(width: 200, height: 200).clipShape(.rect(cornerRadius: 16, style: .continuous))
                         .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
                     VStack(alignment: .leading, spacing: 6) {
                         Text(playlist.spotifyID != nil ? "Spotify Playlist" : playlist.subsonicID != nil ? "Subsonic Playlist" : "Playlist").font(.caption.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
@@ -662,7 +719,7 @@ struct TrackRow: View {
     var body: some View {
         HStack(spacing: 12) {
             CachedImage(url: model.artURL(track.artworkPath), seed: "LibraryViews.swift:5")
-                .frame(width: 34, height: 34).clipShape(.rect(cornerRadius: 5))
+                .frame(width: 34, height: 34).clipShape(.rect(cornerRadius: 5, style: .continuous))
             VStack(alignment: .leading, spacing: 1) {
                 Text(track.title).lineLimit(1)
                 Text("\(track.artist) — \(track.album)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -677,7 +734,7 @@ struct TrackRow: View {
             switch availability {
             case .onIPod: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).help("On the iPod")
             case .file: Image(systemName: "music.note").foregroundStyle(.tint).help("You have the file; goes to the iPod with the playlist")
-            case .streamOnly: Image(systemName: "dot.radiowaves.left.and.right").foregroundStyle(.secondary).help("Only on Spotify")
+            case .streamOnly: SpotifyMark().frame(width: 14, height: 14).help("Only on Spotify")
             }
             Text(track.lengthMs > 0 ? duration(track.lengthMs) : "").monospacedDigit().foregroundStyle(.secondary)
                 .frame(width: 44, alignment: .trailing)
@@ -801,25 +858,33 @@ struct Cover: View {
     var image: NSImage?
     var seed: String
     var body: some View {
-        if let image {
-            Image(nsImage: image).resizable().scaledToFill()
-        } else {
-            // a muted colour of its own per album (the same every launch) with a faint record
-            let h = Double(seed.unicodeScalars.reduce(UInt32(5381)) { ($0 &* 33) &+ $1.value } % 360) / 360
-            GeometryReader { g in
-                let d = min(g.size.width, g.size.height)
-                ZStack {
-                    LinearGradient(colors: [Color(hue: h, saturation: 0.22, brightness: 0.36), Color(hue: h, saturation: 0.28, brightness: 0.2)],
-                                   startPoint: .topLeading, endPoint: .bottomTrailing)
-                    ForEach(0..<4) { i in
-                        Circle().strokeBorder(.white.opacity(0.07), lineWidth: max(0.5, d * 0.006))
-                            .frame(width: d * (0.72 - CGFloat(i) * 0.12), height: d * (0.72 - CGFloat(i) * 0.12))
-                    }
-                    Circle().fill(Color(hue: h, saturation: 0.35, brightness: 0.55).opacity(0.5)).frame(width: d * 0.22, height: d * 0.22)
-                    Circle().fill(.black.opacity(0.35)).frame(width: d * 0.03, height: d * 0.03)
-                }
-                .frame(width: g.size.width, height: g.size.height)
+        // a cover that arrives later (a download, an artist's discography) fades in over its placeholder
+        ZStack {
+            if let image {
+                Image(nsImage: image).resizable().scaledToFill().transition(.opacity)
+            } else {
+                placeholder.transition(.opacity)
             }
+        }
+        .animation(.easeOut(duration: 0.35), value: image != nil)
+    }
+
+    /// A muted colour of its own per album (the same every launch) with a faint record.
+    private var placeholder: some View {
+        let h = Double(seed.unicodeScalars.reduce(UInt32(5381)) { ($0 &* 33) &+ $1.value } % 360) / 360
+        return GeometryReader { g in
+            let d = min(g.size.width, g.size.height)
+            ZStack {
+                LinearGradient(colors: [Color(hue: h, saturation: 0.22, brightness: 0.36), Color(hue: h, saturation: 0.28, brightness: 0.2)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                ForEach(0..<4) { i in
+                    Circle().strokeBorder(.white.opacity(0.07), lineWidth: max(0.5, d * 0.006))
+                        .frame(width: d * (0.72 - CGFloat(i) * 0.12), height: d * (0.72 - CGFloat(i) * 0.12))
+                }
+                Circle().fill(Color(hue: h, saturation: 0.35, brightness: 0.55).opacity(0.5)).frame(width: d * 0.22, height: d * 0.22)
+                Circle().fill(.black.opacity(0.35)).frame(width: d * 0.03, height: d * 0.03)
+            }
+            .frame(width: g.size.width, height: g.size.height)
         }
     }
 }
@@ -866,7 +931,7 @@ struct SpotifyGrid: View {
                             VStack(alignment: .leading, spacing: 6) {
                                 Color.clear.aspectRatio(1, contentMode: .fit)
                                     .overlay { CachedImage(url: model.artURL(p.artwork), seed: p.uri) }
-                                    .clipShape(.rect(cornerRadius: 12))
+                                    .clipShape(.rect(cornerRadius: 12, style: .continuous))
                                     .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
                                     .overlay(alignment: .topTrailing) { MarkBadge(mark: model.mark(p), size: 24).padding(7) }
                                 Text(p.name).font(.headline).lineLimit(1)
@@ -903,7 +968,7 @@ struct SpotifyGrid: View {
                             .overlay {
                                 CachedImage(url: model.artURL(a.artworkPath), seed: a.uri)
                             }
-                            .clipShape(.rect(cornerRadius: 12))
+                            .clipShape(.rect(cornerRadius: 12, style: .continuous))
                             .overlay(alignment: .topTrailing) {
                                 // streaming is the norm on this page; only the albums you also have files for are marked
                                 if model.hasFiles(a) {
@@ -1015,7 +1080,7 @@ struct SpotifyAlbumList: View {
             .width(22)
             TableColumn("Album", value: \.name) { (a: SpotifyAlbum) in
                 HStack(spacing: 8) {
-                    CachedImage(url: model.artURL(a.artworkPath), seed: a.uri).frame(width: 28, height: 28).clipShape(.rect(cornerRadius: 4))
+                    CachedImage(url: model.artURL(a.artworkPath), seed: a.uri).frame(width: 28, height: 28).clipShape(.rect(cornerRadius: 4, style: .continuous))
                     Text(a.name).lineLimit(1)
                 }
             }
@@ -1085,6 +1150,7 @@ struct ArtistsView: View {
                                 .overlay { ArtistImage(artist: a) }
                                 .clipShape(.circle)
                                 .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
+                                .heroSource(.artist(a.name))
                                 .overlay(alignment: .bottomTrailing) { MarkBadge(mark: model.artistMark(a)).padding(4) }
                             Text(a.name).font(.headline).lineLimit(1)
                             Text("\(a.albums.count) album\(a.albums.count == 1 ? "" : "s")").font(.subheadline).foregroundStyle(.secondary)
@@ -1439,12 +1505,12 @@ struct AMTile: View {
                 .overlay {
                     CachedImage(url: model.amArt[album.id], seed: "LibraryViews.swift:8")
                 }
-                .clipShape(.rect(cornerRadius: 14))
+                .clipShape(.rect(cornerRadius: 14, style: .continuous))
                 .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
                 .overlay {
                     if let busy {
                         ZStack {
-                            RoundedRectangle(cornerRadius: 14).fill(.black.opacity(0.45))
+                            RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.black.opacity(0.45))
                             VStack(spacing: 8) {
                                 if job?.state == .queued { Image(systemName: "clock").font(.title3) }
                                 else if let p = job?.progress { ProgressView(value: p).frame(width: 90).tint(.white) }
@@ -1488,6 +1554,10 @@ struct AMTile: View {
 
 final class LetterIndexUI: ObservableObject {
     @Published var current: String?
+    @Published var pointer: CGFloat = 0         // the pointer's last height over the index
+    @Published var strength: CGFloat = 0        // 1 while the pointer is over it; eases back to 0 when it leaves
+    var pending: String?                        // the letter to scroll to next
+    var scrolling = false                       // a scroll was just sent: the next one waits a moment
 }
 
 /// The A–Z strip down the right of a long grid, like the iPod touch's: tap a letter, or drag along
@@ -1496,7 +1566,31 @@ struct LetterIndex: View {
     var letters: [String]
     var jump: (String) -> Void
     @StateObject private var ui = LetterIndexUI()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let row: CGFloat = 15, inset: CGFloat = 8
+
+    /// Scrolling the list loads covers and holds up drawing: at most one scroll every 60 ms, always to the
+    /// latest letter, so the index keeps up while the list catches up behind it.
+    private func scroll(to l: String) {
+        ui.pending = l
+        guard !ui.scrolling else { return }
+        ui.scrolling = true
+        Task { @MainActor in
+            while let next = ui.pending {
+                ui.pending = nil
+                withAnimation(reduceMotion ? nil : .smooth(duration: 0.18)) { jump(next) }
+                try? await Task.sleep(for: .milliseconds(60))
+            }
+            ui.scrolling = false
+        }
+    }
+
+    /// Like the Dock: the letter under the pointer grows most, its neighbours less, about three rows out.
+    private func magnification(_ i: Int) -> CGFloat {
+        guard !reduceMotion else { return 1 }
+        let d = (ui.pointer - inset) / row - (CGFloat(i) + 0.5)
+        return 1 + 0.9 * ui.strength * exp(-d * d / 3)
+    }
 
     static let all = ["#"] + (UnicodeScalar("A").value...UnicodeScalar("Z").value).map { String(UnicodeScalar($0)!) }
 
@@ -1508,25 +1602,40 @@ struct LetterIndex: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ForEach(letters, id: \.self) { l in
-                Text(l).font(.caption2.bold())
-                    .foregroundStyle(ui.current == l ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
-                    .scaleEffect(ui.current == l ? 1.35 : 1)
+            ForEach(Array(letters.enumerated()), id: \.element) { i, l in
+                let m = max(magnification(i), ui.current == l ? 1.35 : 1)
+                // drawn at twice the size and scaled down, so a grown letter stays sharp
+                Text(l).font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(ui.current == l || m > 1.5 ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                    .fixedSize()
+                    // scaled around its centre, so at rest it sits in the middle of the pill; a grown letter
+                    // moves out toward the grid, the way the Dock's icons grow away from the screen's edge
+                    .scaleEffect(m * 0.5)
+                    .offset(x: -(m - 1) * 8)
                     .frame(width: 18, height: row)
             }
         }
         .padding(.vertical, inset).padding(.horizontal, 2)
         .contentShape(.rect)
+        .onContinuousHover { phase in
+            switch phase {
+            // a short spring between pointer events, so the letters glide instead of stepping
+            case .active(let p): withAnimation(.interactiveSpring(response: 0.18, dampingFraction: 0.86)) { ui.pointer = p.y; ui.strength = 1 }
+            case .ended: withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { ui.strength = 0 }
+            }
+        }
         .gesture(DragGesture(minimumDistance: 0)
             .onChanged { g in
+                // no hover events while the button is down: the drag moves the magnification
+                withAnimation(.interactiveSpring(response: 0.18, dampingFraction: 0.86)) { ui.pointer = g.location.y; ui.strength = 1 }
                 let i = Int(((g.location.y - inset) / row).rounded(.down))
                 let l = letters[max(0, min(letters.count - 1, i))]
-                if l != ui.current { ui.current = l; jump(l) }
+                if l != ui.current { ui.current = l; scroll(to: l) }
             }
             .onEnded { _ in ui.current = nil })
         .animation(.snappy(duration: 0.15), value: ui.current)
         .glassEffect(.regular, in: .capsule)
-        .padding(.trailing, 6)
+        .padding(.trailing, 18)      // clear of the scroll bar, which sits at the very edge
         .help("Jump to a letter (drag to scrub)")
     }
 }

@@ -11,9 +11,10 @@ enum Pane: Hashable {
 
 /// Pages pushed on top of a pane.
 /// Where the window is: a page and what's open on it. Back and forward go through these.
-struct Place: Equatable { var pane: Pane?; var path: [Route] }
+/// A page in the back/forward history; the search it was opened from too, so going back returns to the results.
+struct Place: Equatable { var pane: Pane?; var path: [Route]; var search = "" }
 
-enum Route: Hashable { case album(Album), artist(String), spotifyAlbum(SpotifyAlbum), amAlbum(AMAlbum) }
+enum Route: Hashable { case album(Album), artist(String), spotifyAlbum(SpotifyAlbum), amAlbum(AMAlbum), release(ReleaseGroup, artist: String) }
 
 /// An album artist with their albums (compilations under "Various Artists").
 struct Artist: Identifiable, Hashable {
@@ -183,6 +184,8 @@ final class Model: ObservableObject {
 
     // sync
     @Published var showSync = false
+    /// The iPod is out on its own page or in the sync panel: the sidebar shows neither its iPod nor the remote.
+    var ipodAway: Bool { (pane == .ipod && search.isEmpty && path.isEmpty) || showSync }
     @Published var plan: SyncPlan?
     @Published var syncing = false
     @Published var syncPhase = ""
@@ -194,6 +197,8 @@ final class Model: ObservableObject {
     // navigation
     @Published var pane: Pane? = .albums { didSet { if pane != oldValue { path = [] } } }
     @Published var path: [Route] = []
+    /// A song or album (its id) the next page scrolls to and lights up a moment: the remote's Now Playing lines go there.
+    @Published var highlight: String?
     @Published var search = ""
     @Published var back: [Place] = []         // the toolbar's back and forward, across pages
     @Published var forward: [Place] = []
@@ -204,6 +209,7 @@ final class Model: ObservableObject {
     @AppStorage("albumView") var albumView = "grid"          // "grid", "flow" or "list"
     @AppStorage("albumsByArtist") var albumsByArtist = false  // the library grid in a section per artist
     @Published var lookupAlbum: Album?
+    @Published var dedupeAlbum: Album?           // its page shows the Duplicates panel
     @Published var editAlbum: Album?
     @Published var batchAlbums: [Album]?
     @Published var showMissing = false
@@ -212,6 +218,7 @@ final class Model: ObservableObject {
     @Published var confirmTrash: [LibTrack]?
     @Published var artistInfo: [String: ArtistInfo] = ArtistLookup.load()
     @Published var artistLoading: Set<String> = []
+    @Published var artistFailed: Set<String> = []        // MusicBrainz didn't answer (or doesn't know them), this run
     @Published var quickLook: URL?
     @Published var flowAlbum: Album?          // the album in the middle of Cover Flow
     @Published var focusSearch = 0
@@ -240,7 +247,8 @@ final class Model: ObservableObject {
     private var messageTask: Task<Void, Never>?
 
     @Published var dropTarget: DropTarget?
-    enum DropTarget { case library, ipod }
+    private var unchecked: Set<Album.ID> = []               // covers shown from the cache before loadArtwork checked them
+    enum DropTarget { case library, ipod, unpin }
 
     private var observers: [NSObjectProtocol] = []
     private var index: [String: (album: Album, track: LibTrack)] = [:]
@@ -266,6 +274,10 @@ final class Model: ObservableObject {
         }
         player.remoteURI = { [weak self] t in MusicAssistant.uri(subsonicID: self?.subsonic.song(for: t)?.id, uri: t.uri) }
         player.onRemoteError = { [weak self] in self?.notify($0) }
+        player.local = { [weak self] t in
+            guard let self, let m = self.index[t.key] ?? self.index["~" + Self.loose(t.album) + "|" + Self.loose(t.title)] else { return nil }
+            return (m.album.tracks, m.album.tracks.firstIndex { $0.id == m.track.id } ?? 0)
+        }
         if on(.musicAssistant) { Task { try? await ma.loadPlayers() } }
         yt.onFiles = { [weak self] files, id in
             guard let self, let j = self.yt.jobs.first(where: { $0.id == id }) else { return }
@@ -476,11 +488,23 @@ final class Model: ObservableObject {
             updateJob(job) { $0.detail = "Scanning \((f as NSString).lastPathComponent)" }
             tracks += await LibraryLoader.scan(f, skipping: Set(tracks.map(\.path)))
         }
-        // a server song only in the download cache that also turned up as a file here is the same song: the file wins
-        let scanned = Set(tracks[fromServer...].map(\.key))
-        tracks.removeAll { scanned.contains($0.key) && subsonic.needsDownload($0.path) }
+        // a server song that also turned up as a file here is the same song: the file and its tags win, and the
+        // server's copy stays linked to it (for streaming and Music Assistant). Matched without the album: Navidrome
+        // adds an album version to the name ("… (remastered)"), which made the same songs a second album
+        var files: [String: [LibTrack]] = [:]                   // identity → the scanned files
+        for t in tracks[fromServer...] { files[Self.songIdentity(t), default: []].append(t) }
+        var linked: [String: String] = [:]                      // the file's path → the server copy's
+        tracks = tracks.enumerated().filter { i, t in
+            guard i < fromServer, subsonic.songs[t.path] != nil,
+                  let file = files[Self.songIdentity(t)]?.first(where: { abs($0.lengthMs - t.lengthMs) <= 3000 }), file.path != t.path
+            else { return true }
+            linked[file.path] = t.path
+            return false
+        }.map(\.element)
+        subsonic.link(linked)
         libTracks = tracks
         rebuild()
+        await showCachedArtwork()
         playlistTracks = [:]
         var lists: [OTPlaylist] = on(.ownTone) ? ((try? await OwnTonePlaylists.all(ownToneURL)) ?? []) : []
         if on(.subsonic), !serverFailed { lists += (try? await subsonic.playlists()) ?? [] }
@@ -510,23 +534,30 @@ final class Model: ObservableObject {
         await loadArtwork()
     }
 
+    /// Covers this Mac already has, shown as soon as the albums are known: only the local cache is read, not the
+    /// shares. loadArtwork checks them against the folders afterwards and replaces any that changed.
+    private func showCachedArtwork() async {
+        let quick = await Task.detached { [albums] in
+            albums.compactMap { a in ArtCache.image("album:" + a.folder).map { (a.id, $0) } }
+        }.value
+        let fresh = quick.filter { artwork[$0.0] == nil }
+        artwork.merge(fresh, uniquingKeysWith: { a, _ in a })
+        unchecked.formUnion(fresh.map(\.0))
+    }
+
     private func loadArtwork() async {
         // all file reading and image decoding happens off the main thread (the files live on shares). Covers are
         // handed to the views in batches: one assignment per cover redrew everything thousands of times
         var batch = ArtBatch()
-        for ar in artists where artistArt[ar.id] == nil {
-            if let img = await Task.detached(operation: { LibraryLoader.artistImage(ar).flatMap { NSImage(data: $0) } }).value {
-                batch.artists[ar.id] = img
-                if batch.due { flush(&batch) }
-            }
-        }
-        flush(&batch)
-        // cached copies first (quick), then whatever is still missing from the files themselves
+        // cached copies that still match their folder's cover file (quick), then whatever is missing from the files themselves
         let cached = await Task.detached { [albums] in
             albums.compactMap { a in ArtCache.albumImage(a.folder).map { (a.id, $0) } }
         }.value
-        artwork.merge(cached.filter { artwork[$0.0] == nil }, uniquingKeysWith: { a, _ in a })
-        for a in albums where artwork[a.id] == nil {
+        let checked = Set(cached.map(\.0))
+        artwork.merge(cached.filter { artwork[$0.0] == nil || unchecked.contains($0.0) }, uniquingKeysWith: { _, new in new })
+        let stale = unchecked.subtracting(checked)               // shown from the cache, but the folder's cover changed
+        unchecked = []
+        for a in albums where artwork[a.id] == nil || stale.contains(a.id) {
             var data = await LibraryLoader.artwork(for: a)
             let first = a.tracks[0].path
             if data == nil, subsonic.songs[first] != nil, !(await Task.detached { FileManager.default.fileExists(atPath: first) }.value) {
@@ -535,6 +566,14 @@ final class Model: ObservableObject {
             if let d = data,
                let img = await Task.detached(operation: { ArtCache.storeAlbum(d, folder: a.folder) ?? NSImage(data: d) }).value {
                 batch.albums[a.id] = img
+                if batch.due { flush(&batch) }
+            }
+        }
+        flush(&batch)
+        // artists' photos after the covers: they're read from the shares one by one
+        for ar in artists where artistArt[ar.id] == nil {
+            if let img = await Task.detached(operation: { LibraryLoader.artistImage(ar).flatMap { NSImage(data: $0) } }).value {
+                batch.artists[ar.id] = img
                 if batch.due { flush(&batch) }
             }
         }
@@ -652,6 +691,8 @@ final class Model: ObservableObject {
     func refreshFiles(_ paths: [String], cover: Data? = nil, oldID: Album.ID? = nil, rescan: Bool = true) async {
         var fresh: [String: LibTrack] = [:]
         for p in paths {
+            // a missing file would get its tags guessed from its path ("Subsonic/<album id>/<song id>"): keep what we had
+            guard await Task.detached(operation: { FileManager.default.fileExists(atPath: p) }).value else { continue }
             let parts = p.split(separator: "/").suffix(3).joined(separator: "/")
             var t = await LibraryLoader.track(p, relative: parts)
             if let old = libTracks.first(where: { $0.path == p }) {
@@ -946,12 +987,34 @@ final class Model: ObservableObject {
     }
 
     /// Goes to an album's page, unless it's already showing.
+    /// The same recording whatever album name it's under: artist, title, disc and track (lengths are compared
+    /// apart, within 3 s: the server and the file's own tags round them differently).
+    nonisolated static func songIdentity(_ t: LibTrack) -> String {
+        [Dedupe.loose(t.trackArtist.isEmpty ? t.artist : t.trackArtist), Dedupe.loose(t.title), "\(t.discNumber)", "\(t.trackNumber)"]
+            .joined(separator: "|")
+    }
+
     func showAlbumPage(_ a: Album?) {
         guard let a else { return }
         if case .album(let shown)? = path.last, shown.id == a.id { return }
         search = ""
         path.append(.album(a))
     }
+
+    /// A song's album page when the album isn't in the library: the saved Spotify album, else the artist's
+    /// MusicBrainz release (whose page finds it on Spotify); nil when neither knows it.
+    func outsideAlbum(_ title: String, artist: String) async -> Route? {
+        let t = Release.loose(title), a = artist.lowercased()
+        guard !t.isEmpty else { return nil }
+        if on(.spotify), let s = spotify.first(where: { Release.loose($0.name) == t && $0.artist.lowercased() == a })
+            ?? spotify.first(where: { Release.loose($0.name) == t }) { return .spotifyAlbum(s) }
+        await loadArtistInfo(artist)
+        if let g = artistInfo[a]?.releases.first(where: { Release.loose($0.title) == t }) { return .release(g, artist: artist) }
+        return nil
+    }
+
+    /// An album on its artist's page, for Model.highlight: the page's releases go by title.
+    static func releaseHighlight(_ title: String) -> String { "release:" + Release.loose(title) }
 
     /// Shows an album's cover in Quick Look (the cover file, or the embedded art saved to a temp file).
     func quickLookCover(_ a: Album) {
@@ -1057,8 +1120,9 @@ final class Model: ObservableObject {
     // MARK: Hidden songs (Frogger's hide flag)
     //
     // A song is hidden from the iPod's Artists/Albums when you hid it yourself, or when it's only
-    // in playlists you marked as hidden ("~Name" or "Name ~" on the iPod). Showing a song yourself wins
-    // over the playlists. Your choices are kept in `hides`; the flags are written on Sync.
+    // in playlists you marked as hidden. Showing a song yourself wins over the playlists. Your choices are
+    // kept in `hides`; the flags are written on Sync, so the playlists keep their own names. Older versions
+    // marked them "~Name" or "Name ~": those still count as hidden and lose the mark at the next sync.
 
     static let hideMark = "~"
 
@@ -1074,14 +1138,9 @@ final class Model: ObservableObject {
     /// A playlist you marked, or one already named with the mark (in Spotify, say) that you didn't unmark.
     func isHiddenPlaylist(_ name: String) -> Bool { podSettings.hiddenPlaylists[baseName(name)] ?? (baseName(name) != name) }
 
-    /// The name a playlist gets on the iPod: Crate adds or removes the mark only on playlists you chose.
+    /// The name a playlist gets on the iPod: without an old mark on the playlists you chose, as they were otherwise.
     func podName(forPlaylist name: String) -> String {
-        let base = baseName(name)
-        switch podSettings.hiddenPlaylists[base] {
-        case true?: return podSettings.hideMarkAtEnd ? base + " " + Self.hideMark : Self.hideMark + base
-        case false?: return base
-        case nil: return name
-        }
+        podSettings.hiddenPlaylists[baseName(name)] == nil ? name : baseName(name)
     }
 
     func toggleHiddenPlaylist(_ name: String) {
@@ -1568,13 +1627,18 @@ final class Model: ObservableObject {
             }
         }
         guard let d = coverData, let img = NSImage(data: d) else { return "no cover found" }
-        guard !isPodOnly(album) else { artwork[album.id] = img; return nil }
+        // shown right away, whether or not the file can be written
+        artwork[album.id] = ArtCache.storeAlbum(d, folder: album.folder) ?? img
+        guard !isPodOnly(album) else { return nil }
+        // songs that are only on the server (not on the share, not downloaded) have no folder here to put it in
+        var dir: ObjCBool = false
+        guard fm.fileExists(atPath: album.folder, isDirectory: &dir), dir.boolValue else { return "cover shown in Crate (the files are only on the server)" }
         for n in existing where n != "cover.jpg" {       // the old image would otherwise still be picked first by some readers
             try? fm.moveItem(atPath: album.folder + "/" + n, toPath: album.folder + "/" + n + ".old")
         }
         try? fm.removeItem(atPath: album.folder + "/cover.jpg")
-        guard fm.createFile(atPath: album.folder + "/cover.jpg", contents: d) else { return "couldn't write cover.jpg" }
-        artwork[album.id] = ArtCache.storeAlbum(d, folder: album.folder) ?? img
+        guard fm.createFile(atPath: album.folder + "/cover.jpg", contents: d) else { return "couldn't write cover.jpg (shown in Crate only)" }
+        ArtCache.storeAlbum(d, folder: album.folder)     // again, now that the folder's cover.jpg is this one
         if on(.ownTone) || on(.subsonic) { step("Asking the server to rescan"); await rescanServers() }
         return existing.isEmpty ? "cover saved" : "cover replaced"
     }
@@ -1820,13 +1884,37 @@ final class Model: ObservableObject {
         } catch { notify(error.localizedDescription) }
     }
 
+    /// One song of an album you have no files for, from Soulseek: the best single file that passes the
+    /// quality rules (with its folder's cover), imported when it's done. Whether one was queued.
+    func songFromSoulseek(_ t: OTTrack, artist: String, album: String) async -> Bool {
+        guard on(.soulseek) else { notify("Turn on the Soulseek plugin in Settings to download songs"); return false }
+        do {
+            let q = (artist == "Various Artists" ? t.artist : artist) + " " + t.title
+            guard let (folder, file) = slsk.bestSong(try await slsk.find(q), title: t.title, album: album) else {
+                notify("“\(t.title)” isn't on Soulseek in a format that passes your rules"); return false
+            }
+            try await slsk.download(folder, only: file)
+            notify("Downloading “\(t.title)” from Soulseek")
+            return true
+        } catch { notify(error.localizedDescription); return false }
+    }
+
+    /// One song of an album, from YouTube, tagged with its place on the album.
+    func songFromYouTube(_ t: OTTrack, number: Int, of total: Int, artist: String, album: String, art: String, year: Int) {
+        guard on(.youtube) else { notify("Turn on the YouTube plugin in Settings to download songs"); return }
+        var t = t; t.album = album; t.albumArtist = artist
+        yt.fetch([t], album: album, art: art, year: year, numbers: [number], total: total)
+        notify("Fetching “\(t.title)” from YouTube")
+    }
+
     /// Looks the album up on Soulseek (the Soulseek pane, search started).
     func findOnSoulseek(_ artist: String, _ album: String, songs: Int = 0) {
         guard on(.soulseek) else { notify("Turn on the Soulseek plugin in Settings to download albums"); return }
         search = ""
         pane = .soulseek
+        path = []            // the album page it was asked from would stay on top of the Soulseek page
         slsk.wantSongs = songs
-        slsk.search((artist == "Various Artists" ? "" : artist + " ") + album)
+        slsk.search([artist == "Various Artists" ? "" : artist, album].filter { !$0.isEmpty }.joined(separator: " "))
     }
 
     /// How many songs the full album has, when the library copy has fewer: gaps in the track
@@ -1842,11 +1930,12 @@ final class Model: ObservableObject {
 // MARK: back and forward
 
 extension Model {
-    var place: Place { Place(pane: pane, path: path) }
+    var place: Place { Place(pane: pane, path: path, search: search) }
 
-    /// Called when the page or what's open on it changes; going back or forward isn't a new visit.
+    /// Called when the page or what's open on it changes; going back or forward isn't a new visit, and nor is typing a search.
     func visited(from old: Place) {
         if travelling { travelling = false; return }
+        guard old.pane != pane || old.path != path else { return }
         back.append(old); if back.count > 100 { back.removeFirst() }
         forward = []
     }
@@ -1855,10 +1944,9 @@ extension Model {
     func goForward() { guard let p = forward.popLast() else { return }; back.append(place); travel(to: p) }
 
     private func travel(to p: Place) {
-        search = ""
         guard p != place else { return }
         travelling = true
-        pane = p.pane; path = p.path
+        search = p.search; pane = p.pane; path = p.path
     }
 }
 

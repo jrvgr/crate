@@ -132,7 +132,7 @@ enum Main {
             print("set:", Keychain.set("crate-test", "dummy"), "get:", Keychain.get("crate-test") == "dummy")
             Keychain.set("crate-test", ""); return
         }
-        if args.contains("--subsonic-check") { subsonicCheck(); return }
+        if let i = args.firstIndex(of: "--subsonic-check") { subsonicCheck(args.count > i + 1 ? args[i + 1] : nil); return }
         if let i = args.firstIndex(of: "--ma-check"), args.count > i + 2 { maCheck(player: args[i + 1], album: args[i + 2]); return }
         if let i = args.firstIndex(of: "--slskd-check") { slskdCheck(args.count > i + 1 ? args[i + 1] : ""); return }
         if let i = args.firstIndex(of: "--import"), args.count > i + 2 { importFiles(Array(args[(i + 2)...]), into: args[i + 1]); return }
@@ -611,7 +611,8 @@ enum Main {
     }
 
     /// Logs in to the Subsonic server (ping) and reads its library and playlists; no downloads, no scrobbles.
-    static func subsonicCheck() {
+    /// `filter`: also lists every song whose album contains it, with the path it resolved to.
+    static func subsonicCheck(_ filter: String? = nil) {
         Task { @MainActor in
             let s = Subsonic()
             await s.check()
@@ -626,6 +627,17 @@ enum Main {
                     let dup = Dictionary(grouping: songs.filter { !s.needsDownload($0.path) }, by: \.path).filter { $0.value.count > 1 }
                     print("\(dup.count) files used by more than one song")
                     dup.prefix(8).forEach { print("  \($0.key): " + $0.value.map(\.title).joined(separator: " / ")) }
+                    if let f = filter {
+                        let files = await LibraryLoader.scan(s.musicFolder).filter { $0.album.localizedCaseInsensitiveContains(f) }
+                        let ids = Dictionary(grouping: files, by: Model.songIdentity)
+                        print("\(files.count) files with it in their album:")
+                        files.prefix(4).forEach { print("  file id \(Model.songIdentity($0)) | \($0.album) | \($0.path)") }
+                        for t in songs where t.album.localizedCaseInsensitiveContains(f) {
+                            let hit = ids[Model.songIdentity(t)]?.first { abs($0.lengthMs - t.lengthMs) <= 3000 }
+                            print("  server id \(Model.songIdentity(t)) \(t.lengthMs) ms matches a file: \(hit.map { "\($0.lengthMs) ms" } ?? "no")")
+                            print("  [\(s.needsDownload(t.path) ? "download" : "file")] \(t.album) – \(t.discNumber)-\(t.trackNumber) \(t.title) \(t.lengthMs) ms | \(t.path)")
+                        }
+                    }
                     let lists = try await s.playlists()
                     print("\(lists.count) playlists", lists.prefix(5).map(\.name).joined(separator: ", "))
                 } catch { print("library:", error.localizedDescription) }

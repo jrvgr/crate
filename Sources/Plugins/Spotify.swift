@@ -124,6 +124,46 @@ final class SpotifyAPI: ObservableObject {
         return (imgs.first { ($0["width"] as? Int ?? 0) <= 640 && ($0["width"] as? Int ?? 0) >= 250 } ?? imgs.first)?["url"] as? String ?? ""
     }
 
+    /// The releases with a song matching `song` by `artist`, from Spotify's search (its first 30 songs).
+    func albums(withSong song: String, by artist: String) async throws -> [String] {
+        var names: [String] = []
+        for offset in [0, 10, 20] {
+            var c = URLComponents(string: "https://api.spotify.com/v1/search")!
+            c.queryItems = [.init(name: "q", value: "track:\(song) artist:\(artist)"), .init(name: "type", value: "track"),
+                            .init(name: "limit", value: "10"), .init(name: "offset", value: "\(offset)")]
+            let j = try await get(c.url!.absoluteString) as? [String: Any]
+            let items = ((j?["tracks"] as? [String: Any])?["items"] as? [[String: Any]]) ?? []
+            names += items.compactMap { ($0["album"] as? [String: Any])?["name"] as? String }
+            if items.count < 10 { break }
+        }
+        return names
+    }
+
+    /// A release's Spotify URI from its title and artist, when Spotify has it.
+    func albumURI(_ title: String, by artist: String) async -> String? {
+        var c = URLComponents(string: "https://api.spotify.com/v1/search")!
+        c.queryItems = [.init(name: "q", value: "album:\(title) artist:\(artist)"), .init(name: "type", value: "album"), .init(name: "limit", value: "10")]
+        guard let j = try? await get(c.url!.absoluteString) as? [String: Any] else { return nil }
+        let loose = { (s: String) in s.lowercased().filter { $0.isLetter || $0.isNumber } }
+        let items = ((j["albums"] as? [String: Any])?["items"] as? [[String: Any]]) ?? []
+        return items.first { loose($0["name"] as? String ?? "") == loose(title) }?["uri"] as? String
+    }
+
+    /// An album as a library folder names it ("Humanz [Deluxe], Disc 1"): the same title, else the edition's
+    /// (without the disc), else the plain title ("Humanz").
+    func albumURI(loosely title: String, by artist: String) async -> String? {
+        let edition = AlbumTitle.withoutDisc(title), base = AlbumTitle.base(title)
+        var c = URLComponents(string: "https://api.spotify.com/v1/search")!
+        c.queryItems = [.init(name: "q", value: "album:\(base) artist:\(artist)"), .init(name: "type", value: "album"), .init(name: "limit", value: "20")]
+        guard let j = try? await get(c.url!.absoluteString) as? [String: Any] else { return nil }
+        let items = ((j["albums"] as? [String: Any])?["items"] as? [[String: Any]]) ?? []
+        let names = items.map { Release.loose($0["name"] as? String ?? "") }
+        for want in [title, edition, base].map(Release.loose) where !want.isEmpty {
+            if let i = names.firstIndex(of: want) { return items[i]["uri"] as? String }
+        }
+        return nil
+    }
+
     func savedAlbums() async throws -> [SpotifyAlbum] {
         try await all("/me/albums?limit=50").compactMap { i in
             guard let a = i["album"] as? [String: Any] else { return nil }
@@ -236,33 +276,207 @@ final class SpotifyAlbumState: ObservableObject {
     @Published var year = 0
     @Published var loading = true
     @Published var error: String?
+    @Published var found: SpotifyAlbum?              // a MusicBrainz release that Spotify has too
+    @Published var searching: Set<Int> = []           // songs (by place) being looked up on Soulseek
+    @Published var getting: Set<Int> = []             // … and the ones queued, from either
 }
 
-/// A saved Spotify album: its songs (and which you have as files), play, and ways to get it.
-struct SpotifyAlbumView: View {
+/// Library folder names for an album against the release's title.
+enum AlbumTitle {
+    /// "Humanz [Deluxe], Disc 1" → "Humanz [Deluxe]"
+    static func withoutDisc(_ t: String) -> String {
+        t.replacingOccurrences(of: #"[,:\- ]*[\(\[]?\b(disc|cd|disk)\s*\d+[\)\]]?\s*$"#, with: "", options: [.regularExpression, .caseInsensitive])
+            .trimmingCharacters(in: .whitespaces)
+    }
+    /// "Humanz [Deluxe], Disc 1" → "Humanz"
+    static func base(_ t: String) -> String {
+        withoutDisc(t).replacingOccurrences(of: #"\s*[\(\[][^\)\]]*[\)\]]"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+    }
+}
+
+/// Where a song you have no file for is put when it's fetched on its own: the album (as it's tagged), its
+/// artist, the song's number and the album's song count, cover and year.
+struct SongTarget {
+    var album, artist, art: String
+    var total, year: Int
+}
+
+/// A song you have no file for: get it on its own, from Soulseek or YouTube (whichever are on; a menu when both are).
+struct GetSongButton: View {
+    @EnvironmentObject var model: Model
+    @ObservedObject var s: SpotifyAlbumState
+    var track: OTTrack
+    var number: Int                                   // its place on the album, from 1
+    var to: SongTarget
+
+    var body: some View {
+        let soulseek = model.on(.soulseek), youtube = model.on(.youtube)
+        if s.searching.contains(number) {
+            ProgressView().controlSize(.small).frame(width: 18).help("Looking for “\(track.title)” on Soulseek…")
+        } else if s.getting.contains(number) {
+            Image(systemName: "arrow.down.circle.fill").foregroundStyle(.secondary).help("Downloading; it shows up in the library when it's done")
+        } else if soulseek && youtube {
+            Menu { GetSongItems(s: s, track: track, number: number, to: to) } label: { Image(systemName: "arrow.down.circle") }
+                .menuStyle(.button).menuIndicator(.hidden).buttonStyle(.plain).fixedSize().help("Get this song")
+        } else if soulseek || youtube {
+            Button { GetSongItems.get(model, s, track, number, to, soulseek: soulseek) } label: { Image(systemName: "arrow.down.circle") }
+                .buttonStyle(.plain).help(soulseek ? "Get this song from Soulseek" : "Get this song from YouTube")
+        }
+    }
+}
+
+/// The menu items for getting a song, for the button's menu and the row's context menu.
+struct GetSongItems: View {
+    @EnvironmentObject var model: Model
+    @ObservedObject var s: SpotifyAlbumState
+    var track: OTTrack
+    var number: Int
+    var to: SongTarget
+
+    var body: some View {
+        if model.on(.soulseek) { Button("Get Song from Soulseek", systemImage: "arrow.down.circle") { Self.get(model, s, track, number, to, soulseek: true) } }
+        if model.on(.youtube) { Button("Get Song from YouTube", systemImage: "play.rectangle") { Self.get(model, s, track, number, to, soulseek: false) } }
+    }
+
+    @MainActor
+    static func get(_ model: Model, _ s: SpotifyAlbumState, _ t: OTTrack, _ n: Int, _ to: SongTarget, soulseek: Bool) {
+        guard !s.searching.contains(n), !s.getting.contains(n) else { return }
+        if !soulseek {
+            model.songFromYouTube(t, number: n, of: to.total, artist: to.artist, album: to.album, art: to.art, year: to.year)
+            s.getting.insert(n); return
+        }
+        s.searching.insert(n)
+        Task {
+            let ok = await model.songFromSoulseek(t, artist: to.artist, album: to.album)
+            s.searching.remove(n)
+            if ok { s.getting.insert(n) }
+        }
+    }
+}
+
+/// The songs of a library album you have no files for (it came in a song at a time, or is incomplete): the
+/// whole album from Spotify, else MusicBrainz, less the ones in the library, each to get on its own.
+struct MissingSongs: View {
     @EnvironmentObject var model: Model
     @EnvironmentObject var spot: SpotifyAPI
-    var album: SpotifyAlbum
+    var album: Album
     @StateObject private var s = SpotifyAlbumState()
 
     var body: some View {
-        let lib = model.albums.first { $0.id == album.name.lowercased() }
+        let have = Set(album.tracks.map { Release.loose($0.title) })
+        let missing = s.tracks.enumerated().filter { !have.contains(Release.loose($0.element.title)) && model.libraryTrack(for: $0.element) == nil }
+        let to = SongTarget(album: album.title, artist: album.artist, art: s.found?.artworkPath ?? "", total: s.tracks.count, year: album.year > 0 ? album.year : s.year)
+        Group {
+            if s.loading {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(model.artistLoading.contains(album.artist.lowercased()) ? "Looking up \(album.artist)'s releases on MusicBrainz…"
+                         : "Looking for the rest of the album…")
+                }
+                .foregroundStyle(.secondary)
+            } else if !missing.isEmpty, model.on(.soulseek) || model.on(.youtube) || model.on(.spotify) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("Not downloaded").font(.title3.bold())
+                        Text("\(missing.count) of \(s.tracks.count) songs" + (s.found != nil ? " · from Spotify" : " · from MusicBrainz")).foregroundStyle(.secondary)
+                    }
+                    VStack(spacing: 0) {
+                        ForEach(Array(missing.enumerated()), id: \.element.offset) { row, m in
+                            let t = m.element, n = m.offset + 1
+                            HStack(spacing: 12) {
+                                Text("\(n)").monospacedDigit().foregroundStyle(.secondary).frame(width: 26, alignment: .trailing)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(t.title).lineLimit(1)
+                                    if t.artist != album.artist { Text(t.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+                                }
+                                Spacer()
+                                GetSongButton(s: s, track: t, number: n, to: to)
+                                Text(t.lengthMs > 0 ? duration(t.lengthMs) : "").monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
+                            }
+                            .padding(.horizontal, 14).padding(.vertical, 7)
+                            .background(row % 2 == 1 ? Color.primary.opacity(0.04) : .clear)
+                            .opacity(0.75)
+                            .contextMenu {
+                                GetSongItems(s: s, track: t, number: n, to: to)
+                                if !t.uri.isEmpty { LinkMenu(track: t) }
+                            }
+                        }
+                    }
+                    .clipShape(.rect(cornerRadius: 14))
+                    .glassEffect(.regular, in: .rect(cornerRadius: 14))
+                }
+            }
+        }
+        .task(id: album.id) {
+            s.tracks = []; s.found = nil; s.loading = true
+            defer { s.loading = false }
+            if model.on(.spotify), spot.direct, spot.connected, let uri = await spot.albumURI(loosely: album.title, by: album.artist),
+               let r = try? await spot.album(uri) {
+                s.tracks = r.tracks; s.year = r.year
+                s.found = SpotifyAlbum(name: album.title, artist: album.artist, uri: uri, artworkPath: r.art, trackCount: r.tracks.count, year: r.year)
+                return
+            }
+            await model.loadArtistInfo(album.artist)
+            let releases = model.artistInfo[album.artist.lowercased()]?.releases ?? []
+            let wants = [album.title, AlbumTitle.withoutDisc(album.title), AlbumTitle.base(album.title)].map(Release.loose)
+            guard let g = wants.lazy.compactMap({ w in releases.first { Release.loose($0.title) == w } }).first,
+                  let list = await ArtistLookup.tracks(g.id) else { return }
+            s.tracks = list.map { OTTrack(id: $0.number, title: $0.title, artist: album.artist, album: album.title, albumArtist: album.artist,
+                                          dataKind: "", uri: "", artworkPath: "", lengthMs: $0.lengthMs) }
+        }
+    }
+}
+
+/// An album you have no files for: a saved Spotify album, or a release from an artist's MusicBrainz discography.
+/// Its songs (and which you have), play it, and ways to get it.
+struct SpotifyAlbumView: View {
+    enum Source { case spotify(SpotifyAlbum), release(ReleaseGroup, artist: String) }
+    @EnvironmentObject var model: Model
+    @EnvironmentObject var spot: SpotifyAPI
+    var source: Source
+    @StateObject private var s = SpotifyAlbumState()
+
+    init(album: SpotifyAlbum) { source = .spotify(album) }
+    init(release: ReleaseGroup, artist: String) { source = .release(release, artist: artist) }
+
+    private var name: String { switch source { case .spotify(let a): a.name; case .release(let g, _): g.title } }
+    private var artist: String { switch source { case .spotify(let a): a.artist; case .release(_, let a): a } }
+    private var id: String { switch source { case .spotify(let a): a.uri; case .release(let g, _): g.id } }
+    private var spotifyAlbum: SpotifyAlbum? { if case .spotify(let a) = source { a } else { s.found } }
+
+    var body: some View {
+        let lib = model.albums.first { $0.id == name.lowercased() }
+        let loose = { (t: String) in t.lowercased().filter { $0.isLetter || $0.isNumber } }
+        let songs = Set((model.libraryArtist(artist)?.albums ?? []).flatMap(\.tracks).map { loose($0.title) })
+        let fromSpotify: Bool = { if case .spotify = source { true } else { false } }()
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 HStack(alignment: .bottom, spacing: 24) {
-                    CachedImage(url: model.artURL(album.artworkPath), seed: album.uri)
-                        .frame(width: 220, height: 220).clipShape(.rect(cornerRadius: 16))
-                        .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
+                    Group {
+                        switch source {
+                        case .spotify(let a): CachedImage(url: model.artURL(a.artworkPath), seed: a.uri)
+                        case .release(let g, _): CachedImage(url: URL(string: "https://coverartarchive.org/release-group/\(g.id)/front-500"), seed: g.id)
+                        }
+                    }
+                    .frame(width: 220, height: 220).clipShape(.rect(cornerRadius: 16, style: .continuous))
+                    .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
                     VStack(alignment: .leading, spacing: 6) {
-                        Label("Spotify", systemImage: PluginID.spotify.icon).font(.caption.weight(.semibold)).foregroundStyle(PluginID.spotify.tint)
-                        Text(album.name).font(.largeTitle.bold()).lineLimit(2)
-                        Button { model.path.append(.artist(album.artist)) } label: {
-                            Text(album.artist).font(.title2).foregroundStyle(.secondary)
+                        if fromSpotify {
+                            Label { Text("Spotify") } icon: { SpotifyMark().frame(width: 14, height: 14) }
+                                .font(.caption.weight(.semibold)).foregroundStyle(PluginID.spotify.tint)
+                        } else {
+                            Text("Not in your library").font(.caption.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
+                        }
+                        Text(name).font(.largeTitle.bold()).lineLimit(2)
+                        Button { model.path.append(.artist(artist)) } label: {
+                            Text(artist).font(.title2).foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain).help("Go to artist")
-                        let year = album.year > 0 ? album.year : s.year
-                        Text([year > 0 ? "\(year)" : "", s.tracks.isEmpty ? "" : "\(s.tracks.count) songs",
-                              s.tracks.isEmpty ? "" : totalDuration(s.tracks.map(\.lengthMs).reduce(0, +)),
+                        let year: Int = { switch source { case .spotify(let a): a.year > 0 ? a.year : s.year; case .release(let g, _): g.year } }()
+                        let kind: String = { if case .release(let g, _) = source { g.type } else { "" } }()
+                        Text([year > 0 ? String(year) : "", kind, s.tracks.isEmpty ? "" : "\(s.tracks.count) songs",
+                              s.tracks.contains { $0.lengthMs > 0 } ? totalDuration(s.tracks.map(\.lengthMs).reduce(0, +)) : "",
                               lib != nil ? "in your library" : "no files yet"].filter { !$0.isEmpty }.joined(separator: " · "))
                             .foregroundStyle(.secondary)
                         HStack(spacing: 10) {
@@ -270,16 +484,18 @@ struct SpotifyAlbumView: View {
                                 Button("Go to Album", systemImage: "square.stack") { model.path.append(.album(lib)) }.buttonStyle(.glassProminent)
                             } else {
                                 if model.on(.soulseek) {
-                                    Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(album.artist, album.name, songs: s.tracks.count) }
+                                    Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(artist, name, songs: s.tracks.count) }
                                         .buttonStyle(.glassProminent)
                                 }
-                                if model.on(.youtube), spot.direct {
-                                    Button("Get from YouTube", systemImage: "play.rectangle") { Task { await model.albumFromYouTube(album) } }.buttonStyle(.glass)
+                                if model.on(.youtube), spot.direct, let a = spotifyAlbum {
+                                    Button("Get from YouTube", systemImage: "play.rectangle") { Task { await model.albumFromYouTube(a) } }
                                 }
                             }
-                            Button(model.remoteName == nil ? "Open in Spotify" : "Play", systemImage: "play.fill") { Task { await model.playURIs([album.uri]) } }
-                                .buttonStyle(.glass)
+                            if let a = spotifyAlbum {
+                                Button(model.remoteName == nil ? "Open in Spotify" : "Play", systemImage: "play.fill") { Task { await model.playURIs([a.uri]) } }
+                            }
                         }
+                        .buttonStyle(.glass).buttonBorderShape(.capsule).controlSize(.large).fixedSize()
                         .padding(.top, 8)
                     }
                     Spacer(minLength: 0)
@@ -289,23 +505,29 @@ struct SpotifyAlbumView: View {
                 else {
                     VStack(spacing: 0) {
                         ForEach(Array(s.tracks.enumerated()), id: \.offset) { i, t in
-                            let have = model.libraryTrack(for: t) != nil
+                            let have = model.libraryTrack(for: t) != nil || songs.contains(loose(t.title))
                             HStack(spacing: 12) {
                                 Text("\(i + 1)").monospacedDigit().foregroundStyle(.secondary).frame(width: 26, alignment: .trailing)
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(t.title).lineLimit(1)
-                                    if t.artist != album.artist { Text(t.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+                                    if t.artist != artist { Text(t.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
                                 }
                                 Spacer()
-                                Image(systemName: have ? "music.note" : "dot.radiowaves.left.and.right")
-                                    .foregroundStyle(have ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
-                                    .help(have ? "You have this song as a file" : "Only on Spotify")
+                                if !have { GetSongButton(s: s, track: t, number: i + 1, to: target) }
+                                Group {
+                                    if have { Image(systemName: "music.note").foregroundStyle(.tint) }
+                                    else if fromSpotify { SpotifyMark().frame(width: 14, height: 14) }
+                                }
+                                .help(have ? "You have this song as a file" : "Only on Spotify")
                                 Text(t.lengthMs > 0 ? duration(t.lengthMs) : "").monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
                             }
                             .padding(.horizontal, 14).padding(.vertical, 7)
                             .background(i % 2 == 1 ? Color.primary.opacity(0.04) : .clear)
                             .opacity(have ? 1 : 0.75)
-                            .contextMenu { LinkMenu(track: t) }
+                            .contextMenu {
+                                if !have { GetSongItems(s: s, track: t, number: i + 1, to: target) }
+                                if fromSpotify { LinkMenu(track: t) }
+                            }
                         }
                     }
                     .clipShape(.rect(cornerRadius: 14))
@@ -314,12 +536,33 @@ struct SpotifyAlbumView: View {
             }
             .padding(28).padding(.bottom, 60)
         }
-        .navigationTitle(album.name)
-        .task(id: album.uri) {
+        .navigationTitle(name)
+        .task(id: id) {
             defer { s.loading = false }
-            guard spot.direct, spot.connected else { s.error = "Connect your Spotify account (Settings › Plugins) to see the songs"; return }
-            do { let r = try await spot.album(album.uri); s.tracks = r.tracks; s.year = r.year }
-            catch { s.error = error.localizedDescription }
+            switch source {
+            case .spotify(let a):
+                guard spot.direct, spot.connected else { s.error = "Connect your Spotify account (Settings › Plugins) to see the songs"; return }
+                do { let r = try await spot.album(a.uri); s.tracks = r.tracks; s.year = r.year }
+                catch { s.error = error.localizedDescription }
+            case .release(let g, let artist):
+                async let list = ArtistLookup.tracks(g.id)
+                if model.on(.spotify), spot.direct, spot.connected, let uri = await spot.albumURI(g.title, by: artist) {
+                    s.found = SpotifyAlbum(name: g.title, artist: artist, uri: uri, artworkPath: "", trackCount: 0, year: g.year)
+                }
+                let t = await list ?? []
+                s.tracks = t.map { OTTrack(id: $0.number, title: $0.title, artist: artist, album: g.title, albumArtist: artist,
+                                           dataKind: "", uri: "", artworkPath: "", lengthMs: $0.lengthMs) }
+                if t.isEmpty { s.error = "MusicBrainz has no song list for this release" }
+            }
         }
     }
+
+    private var year: Int { switch source { case .spotify(let a): a.year > 0 ? a.year : s.year; case .release(let g, _): g.year } }
+    private var art: String {
+        switch source {
+        case .spotify(let a): model.artURL(a.artworkPath)?.absoluteString ?? ""
+        case .release(let g, _): "https://coverartarchive.org/release-group/\(g.id)/front-500"
+        }
+    }
+    private var target: SongTarget { SongTarget(album: name, artist: artist, art: art, total: s.tracks.count, year: year) }
 }

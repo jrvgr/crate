@@ -19,10 +19,12 @@ enum MusicBrainz {
         var r = URLRequest(url: url); r.setValue(agent, forHTTPHeaderField: "User-Agent")
         for attempt in 0..<3 {   // MusicBrainz allows one request per second and answers 503 beyond that
             let (d, resp) = try await URLSession.shared.data(for: r)
-            if (resp as? HTTPURLResponse)?.statusCode == 503, attempt < 2 { try await Task.sleep(for: .seconds(1.2)); continue }
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 503, attempt < 2 { try await Task.sleep(for: .seconds(2 * Double(attempt + 1))); continue }
+            guard code == 200 else { throw URLError(.badServerResponse) }
             return (try JSONSerialization.jsonObject(with: d) as? [String: Any]) ?? [:]
         }
-        return [:]
+        throw URLError(.badServerResponse)
     }
 
     static func search(album: String, artist: String) async throws -> [MBRelease] {
@@ -188,7 +190,7 @@ struct LookupPanel: View {
                             HStack(spacing: 12) {
                                 AsyncImage(url: MusicBrainz.coverURL(r, size: 250)) { $0.resizable().scaledToFill() }
                                     placeholder: { Color.secondary.opacity(0.15).overlay { Image(systemName: "photo").foregroundStyle(.tertiary) } }
-                                    .frame(width: 64, height: 64).clipShape(.rect(cornerRadius: 8))
+                                    .frame(width: 64, height: 64).clipShape(.rect(cornerRadius: 8, style: .continuous))
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(r.title).font(.headline).lineLimit(1)
                                     Text(r.artist).foregroundStyle(.secondary).lineLimit(1)
@@ -227,7 +229,7 @@ struct LookupPanel: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 14) {
                 CachedImage(url: MusicBrainz.coverURL(r, size: 500), seed: "Metadata.swift:1")
-                    .frame(width: 120, height: 120).clipShape(.rect(cornerRadius: 12))
+                    .frame(width: 120, height: 120).clipShape(.rect(cornerRadius: 12, style: .continuous))
                 VStack(alignment: .leading, spacing: 3) {
                     Text(r.title).font(.title3.bold())
                     Text(r.artist).foregroundStyle(.secondary)

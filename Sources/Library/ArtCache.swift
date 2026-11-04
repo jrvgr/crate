@@ -76,11 +76,18 @@ enum ArtCache {
         try? FileManager.default.removeItem(at: file(key))
     }
 
-    /// Downloads a remote image once.
+    /// Downloads a remote image once. One that isn't there (most releases in the Cover Art Archive have none,
+    /// and each miss is a slow redirect) is remembered for a week instead of asked for on every visit.
     static func fetch(_ url: URL) async -> NSImage? {
         let key = url.absoluteString
         if let i = image(key) { return i }
-        guard let (d, resp) = try? await URLSession.shared.data(from: url), (resp as? HTTPURLResponse)?.statusCode ?? 200 < 400 else { return nil }
+        let missing = file(key).appendingPathExtension("missing")
+        if let d = (try? FileManager.default.attributesOfItem(atPath: missing.path))?[.modificationDate] as? Date,
+           Date().timeIntervalSince(d) < 7 * 86400 { return nil }
+        guard let (d, resp) = try? await URLSession.shared.data(from: url) else { return nil }     // offline: try again next time
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
+        if code == 404 || code == 410 { FileManager.default.createFile(atPath: missing.path, contents: nil); return nil }
+        guard code < 400 else { return nil }
         return store(d, for: key)
     }
 

@@ -511,7 +511,7 @@ struct CratePlaylistView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     HStack(alignment: .bottom, spacing: 24) {
                         AlbumMosaic(albums: Array(covers))
-                            .frame(width: 200, height: 200).clipShape(.rect(cornerRadius: 16))
+                            .frame(width: 200, height: 200).clipShape(.rect(cornerRadius: 16, style: .continuous))
                             .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Playlist").font(.caption.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
