@@ -4,15 +4,16 @@ import AVFoundation
 import CryptoKit
 
 // Cover art for Frogger's Now Playing page on the iPod (the frogger repo: docs/nowplaying.md,
-// payload/nowplaying.h). iPod_Control/iTunes/FroggerArt holds one small 4-grey picture per album,
-// indexed by each track's position in the iTunesDB, so it's written after the database at the end
-// of a sync, and deleted whenever the database is written (Syncer.write): its positions are only
-// right for the database it was made with. The firmware checks the track count too.
+// docs/file-formats.md). iPod_Control/iTunes/FroggerArt holds one small 4-grey picture per album and
+// names each song that has one by its track key (FroggerFiles.swift), so it's written after the database
+// at the end of a sync and stays right for the songs that remain after any later sync.
 //
-// Layout, little-endian: a 24-byte header ("FRGA", version 1 and the picture size as halfwords,
-// then track count, image count, bytes per image, 0), a halfword per track (its image, or 0xffff),
-// padded to 4 bytes, then the images: 2-bit pixels in the firmware's BMap rows (3 = black, the
-// leftmost pixel in the top bits, rows padded to 4 bytes).
+// Layout (version 2), little-endian: a 24-byte header ("FRGA", version 2 and the picture size as
+// halfwords, then entry count, image count, bytes per image, 0), 24 bytes per song with a cover (its
+// key, its image as a halfword, 2 bytes padding), then the images: 2-bit pixels in the firmware's BMap
+// rows (3 = black, the leftmost pixel in the top bits, rows padded to 4 bytes). Version 1, which Crate
+// wrote before, had a halfword per track position instead (padded to 4 bytes): only right for the
+// database it was made with, so it's deleted whenever the database is written (Syncer.write).
 
 enum FroggerArt {
     static let size = 72                                     // payload/nowplaying.h NP_ART_SIZE
@@ -22,9 +23,50 @@ enum FroggerArt {
 
     static func url(_ ipod: IPodInfo) -> URL { ipod.dbURL.deletingLastPathComponent().appendingPathComponent("FroggerArt") }
 
-    /// The database changed, so the positions in the file don't match any more.
+    static let version = 2
+
+    /// The database changed: a version 1 file's positions don't match any more (a version 2 file stays right).
     static func invalidate(_ ipod: IPodInfo) {
-        try? FileManager.default.removeItem(at: url(ipod))
+        guard let h = try? FileHandle(forReadingFrom: url(ipod)) else { return }
+        let head = (try? h.read(upToCount: 6)) ?? Data()
+        try? h.close()
+        if head.count < 6 || [UInt8](head)[4] == 1 && [UInt8](head)[5] == 0 { try? FileManager.default.removeItem(at: url(ipod)) }
+    }
+
+    /// The file: `entries` (a song's key and its image) and the images.
+    static func encode(_ entries: [(key: FroggerKey, image: UInt16)], images: [Data]) -> Data {
+        var out = Array("FRGA".utf8) + FroggerFile.le16(version) + FroggerFile.le16(size) + FroggerFile.le32(entries.count)
+        out += FroggerFile.le32(images.count) + FroggerFile.le32(imageBytes) + FroggerFile.le32(0)
+        for e in entries { out += e.key.bytes + FroggerFile.le16(Int(e.image)) + [0, 0] }
+        return Data(out) + images.reduce(Data(), +)
+    }
+
+    /// What a file gives the songs of `db`: track index → its image, and the images; nil when broken.
+    /// Version 1 only for the database it was made for (the same track count).
+    static func parse(_ data: Data, db: ITunesDB) -> (covers: [Int: Int], images: [Data])? {
+        let d = [UInt8](data)
+        guard d.count >= 24, d[0..<4].elementsEqual("FRGA".utf8), FroggerFile.u16(d, 6) == size,
+              FroggerFile.u32(d, 16) == imageBytes else { return nil }
+        let n = FroggerFile.u32(d, 8), count = FroggerFile.u32(d, 12)
+        var covers: [Int: Int] = [:], start: Int
+        switch FroggerFile.u16(d, 4) {
+        case 2:
+            start = 24 + 24 * n
+            guard start <= d.count else { return nil }
+            let keys = FroggerKeys(db)
+            for k in 0..<n {
+                let o = 24 + 24 * k, image = FroggerFile.u16(d, o + 20)
+                if image != Int(none), let i = keys.index(FroggerKey(d, at: o)), covers[i] == nil { covers[i] = image }
+            }
+        case 1:
+            start = (24 + 2 * n + 3) & ~3
+            guard start <= d.count, n == db.tracks.count else { return nil }
+            for i in 0..<n where FroggerFile.u16(d, 24 + 2 * i) != Int(none) { covers[i] = FroggerFile.u16(d, 24 + 2 * i) }
+        default: return nil
+        }
+        guard start + count * imageBytes <= d.count else { return nil }
+        covers = covers.filter { $0.value < count }
+        return (covers, (0..<count).map { Data(d[start + $0 * imageBytes..<start + ($0 + 1) * imageBytes]) })
     }
 
     /// Writes the file for this database (to `dst`, the iPod's FroggerArt by default); returns how
@@ -33,7 +75,7 @@ enum FroggerArt {
     static func write(_ db: ITunesDB, to ipod: IPodInfo, albums: [Album], dst: URL? = nil,
                       progress: @MainActor (Int, Int, String) -> Void = { _, _, _ in }) async -> Int {
         let tracks = db.tracks.filter { $0.raw != nil }          // what serialize() puts in the mhlt, in order
-        var imageOf: [String: UInt16] = [:], images: [Data] = [], table: [UInt16] = []
+        var imageOf: [String: UInt16] = [:], images: [Data] = [], entries: [(key: FroggerKey, image: UInt16)] = []
         var same: [Data: UInt16] = [:]                            // identical pictures (singles of one release) are stored once
         let look = Look.saved
         for (n, t) in tracks.enumerated() {
@@ -46,17 +88,10 @@ enum FroggerArt {
                 }
                 imageOf[key] = image
             }
-            table.append(imageOf[key] ?? none)
+            if let image = imageOf[key], image != none { entries.append((FroggerKey(t), image)) }   // only songs with a cover
         }
-        var out = Data()
-        func le32(_ v: Int) { withUnsafeBytes(of: UInt32(v).littleEndian) { out.append(contentsOf: $0) } }
-        func le16(_ v: Int) { withUnsafeBytes(of: UInt16(v).littleEndian) { out.append(contentsOf: $0) } }
-        out.append(contentsOf: Array("FRGA".utf8))
-        le16(1); le16(size); le32(tracks.count); le32(images.count); le32(imageBytes); le32(0)
-        table.forEach { le16(Int($0)) }
         await progress(tracks.count, tracks.count, "")
-        out.append(Data(count: (4 - out.count % 4) % 4))
-        images.forEach { out.append($0) }
+        let out = encode(entries, images: images)
         let dst = dst ?? url(ipod), tmp = dst.appendingPathExtension("new")
         do {
             try out.write(to: tmp)

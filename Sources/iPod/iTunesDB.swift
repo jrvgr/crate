@@ -105,6 +105,7 @@ struct ITunesDB {
     var name: String              // master playlist name = iPod name
     var playlists: [PodPlaylist] = []
     var master: [UInt32] = []     // the master playlist's track ids as read (written afresh from `tracks`)
+    var masterID: UInt64 = 0      // the master playlist's persistent id as read, kept (0: a new one)
 
     /// The library in the iPod's own order (2.3's sort order 0x26), which song references in the playlist
     /// files it writes count in: the master playlist's order, without ids it has no track for.
@@ -164,6 +165,7 @@ struct ITunesDB {
                     }
                     if master {
                         if !name.isEmpty { db.name = name }
+                        if hl >= 36 { db.masterID = UInt64(u32(pl + 28)) | UInt64(u32(pl + 32)) << 32 }
                         for _ in 0..<u32(pl + 16) where q + 28 <= d.count && tag(q) == "mhip" {
                             db.master.append(UInt32(u32(q + 24))); q += u32(q + 8)
                         }
@@ -210,7 +212,9 @@ struct ITunesDB {
         return block("mhod", 0x18, le32(type) + le32(0) + le32(0), le32(1) + le32(s.count) + le32(0) + le32(0) + s)
     }
 
-    static func mhit(id: UInt32, _ t: NewTrack, now: Int) -> Data {
+    /// A new song's record; `dbid` is its persistent id (mhit +0x70), which Frogger's files name it by, so it
+    /// should be unique (`newDBID`) and is kept from then on (the record is kept byte for byte).
+    static func mhit(id: UInt32, _ t: NewTrack, now: Int, dbid: UInt64 = UInt64.random(in: 1...UInt64.max)) -> Data {
         var mhods = [mhodString(1, t.title), mhodString(2, t.location),
                      mhodString(6, t.isAAC ? "AAC audio file" : "MPEG audio file")]
         if !t.album.isEmpty { mhods.append(mhodString(3, t.album)) }
@@ -221,7 +225,7 @@ struct ITunesDB {
         f += t.isAAC ? Array(" A4M".utf8) + [0, 0, 0, 0] : Array(" 3PM".utf8) + [0, 1, 0, 0]
         for v in [now, t.size, t.lengthMs, t.trackNumber, t.trackCount, t.year, t.bitrateKbps, t.sampleRate << 16, 0,
                   0, 0, 0, 0, 0, 0, t.discNumber, 0, 0, now, 0] { f += le32(v) }
-        f += le64(UInt64.random(in: 1...UInt64.max))
+        f += le64(dbid)                                 // +0x70
         // iTunes 7 header size; later fields stay zero
         return Data(block("mhit", 0x184, f, mhods.flatMap { $0 }))
     }
@@ -251,7 +255,7 @@ struct ITunesDB {
         let mhits = tracks.compactMap { $0.raw }.flatMap { [UInt8]($0) }
         let mhlt = Self.list("mhlt", tracks.count, mhits)
         let onPod = Set(tracks.map(\.id))
-        let master = Self.mhyp(name, master: true, id: UInt64.random(in: 1...UInt64.max), items: tracks.map(\.id), now: now)
+        let master = Self.mhyp(name, master: true, id: masterID != 0 ? masterID : UInt64.random(in: 1...UInt64.max), items: tracks.map(\.id), now: now)
         let mhlp = Self.list("mhlp", 1 + playlists.count, master + playlists.flatMap { playlistRecord($0, onPod: onPod, now: now) })
         let sections = Self.block("mhsd", 0x60, Self.le32(1), mhlt) + Self.block("mhsd", 0x60, Self.le32(3), mhlp)
                      + Self.block("mhsd", 0x60, Self.le32(2), mhlp)
