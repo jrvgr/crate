@@ -132,8 +132,11 @@ struct TagEditor: View {
     }
 
     func setCover(_ url: URL?) {
-        guard let url, let d = try? Data(contentsOf: url), let img = NSImage(data: d) else { return }
-        s.coverData = d; s.cover = img
+        guard let url else { return }
+        Task {
+            guard let d = await offMain({ try? Data(contentsOf: url) }), let img = NSImage(data: d) else { return }
+            s.coverData = d; s.cover = img
+        }
     }
 
     func save() async {
@@ -147,15 +150,7 @@ struct TagEditor: View {
             if let r { failed.append(r) }
             s.done += 1
         }
-        if let d = s.coverData {
-            let dst = album.folder + "/cover.jpg"
-            let fm = FileManager.default
-            for n in ["folder.jpg", "cover.png", "folder.png", "front.jpg"] where fm.fileExists(atPath: album.folder + "/" + n) {
-                try? fm.moveItem(atPath: album.folder + "/" + n, toPath: album.folder + "/" + n + ".old")
-            }
-            try? fm.removeItem(atPath: dst)
-            if !fm.createFile(atPath: dst, contents: d) { failed.append("couldn't write cover.jpg") }
-        }
+        if let d = s.coverData, !(await Model.writeCover(d, in: album.folder)) { failed.append("couldn't write cover.jpg") }
         await model.refreshFiles(album.tracks.map(\.path), cover: s.coverData, oldID: album.id)
         s.saving = false
         if failed.isEmpty { close() } else { s.error = "\(failed.count) failed: \(failed[0])" }

@@ -8,10 +8,10 @@ extension Model {
 
     /// To the Trash; on network shares (which have none) into a hidden .crate-trash folder in the
     /// same music folder, kept by date, so it can still be put back.
-    func discard(_ path: String) -> Bool {
+    nonisolated static func discard(_ path: String, roots: [String]) -> Bool {
         let url = URL(fileURLWithPath: path)
         if (try? FileManager.default.trashItem(at: url, resultingItemURL: nil)) != nil { return true }
-        let root = Organizer.root(of: path, roots: trashRoots) ?? (path as NSString).deletingLastPathComponent
+        let root = Organizer.root(of: path, roots: roots) ?? (path as NSString).deletingLastPathComponent
         let day = Date().formatted(.iso8601.year().month().day())
         let rel = path.hasPrefix(root + "/") ? String(path.dropFirst(root.count + 1)) : (path as NSString).lastPathComponent
         let dst = root + "/.crate-trash/" + day + "/" + rel
@@ -22,17 +22,19 @@ extension Model {
 
     func trash(_ tracks: [LibTrack]) async {
         let paths = tracks.map(\.path)
-        var failed = 0
-        let folders = Set(paths.map { ($0 as NSString).deletingLastPathComponent })
-        for p in paths where !discard(p) { failed += 1 }
-        // album folders left with only covers or nothing go too
-        for f in folders {
-            let left = ((try? FileManager.default.contentsOfDirectory(atPath: f)) ?? []).filter { $0 != ".DS_Store" }
-            if !left.contains(where: { LibraryLoader.audioExts.contains(($0 as NSString).pathExtension.lowercased()) }) {
-                _ = discard(f)
+        let folders = Set(paths.map { ($0 as NSString).deletingLastPathComponent }), roots = trashRoots
+        let (failed, gone) = await offMain { () -> (Int, Set<String>) in
+            var failed = 0
+            for p in paths where !Model.discard(p, roots: roots) { failed += 1 }
+            // album folders left with only covers or nothing go too
+            for f in folders {
+                let left = ((try? FileManager.default.contentsOfDirectory(atPath: f)) ?? []).filter { $0 != ".DS_Store" }
+                if !left.contains(where: { LibraryLoader.audioExts.contains(($0 as NSString).pathExtension.lowercased()) }) {
+                    _ = Model.discard(f, roots: roots)
+                }
             }
+            return (failed, Set(paths.filter { !FileManager.default.fileExists(atPath: $0) }))
         }
-        let gone = Set(paths.filter { !FileManager.default.fileExists(atPath: $0) })
         // their copies on the iPod go at the next sync too
         let fromPod = tracks.filter { gone.contains($0.path) && podKeys.contains($0.key) }
         songsToRemove.formUnion(fromPod.map { podKey($0.key) })
@@ -47,17 +49,30 @@ extension Model {
     }
 
     /// The .crate-trash folders on the shares: their size, and emptying them for good.
-    var crateTrash: [String] { Set(trashRoots).map { $0 + "/.crate-trash" }.filter { FileManager.default.fileExists(atPath: $0) } }
-    func crateTrashSize() -> Int64 {
-        crateTrash.reduce(Int64(0)) { sum, dir in
-            var n = Int64(0)
-            for case let rel as String in FileManager.default.enumerator(atPath: dir) ?? .init() {
-                n += Int64((try? FileManager.default.attributesOfItem(atPath: dir + "/" + rel))?[.size] as? Int ?? 0)
+    /// All on the shares, so all off the main thread.
+    nonisolated static func crateTrash(_ roots: [String]) -> [String] {
+        Set(roots).map { $0 + "/.crate-trash" }.filter { FileManager.default.fileExists(atPath: $0) }
+    }
+    func crateTrashSize() async -> Int64 {
+        let roots = trashRoots
+        return await offMain {
+            Model.crateTrash(roots).reduce(Int64(0)) { sum, dir in
+                var n = Int64(0)
+                for case let rel as String in FileManager.default.enumerator(atPath: dir) ?? .init() {
+                    n += Int64((try? FileManager.default.attributesOfItem(atPath: dir + "/" + rel))?[.size] as? Int ?? 0)
+                }
+                return sum + n
             }
-            return sum + n
         }
     }
-    func emptyCrateTrash() { crateTrash.forEach { try? FileManager.default.removeItem(atPath: $0) } }
+    func emptyCrateTrash() async {
+        let roots = trashRoots
+        await offMain { Model.crateTrash(roots).forEach { try? FileManager.default.removeItem(atPath: $0) } }
+    }
+    func showCrateTrash() async {
+        let roots = trashRoots
+        if let dir = await offMain({ Model.crateTrash(roots).first }) { NSWorkspace.shared.open(URL(fileURLWithPath: dir)) }
+    }
 }
 
 @MainActor
@@ -197,7 +212,7 @@ struct CoverDrop: ViewModifier {
                     }
                     guard let u = urls.first(where: { !$0.isFileURL || Self.images.contains($0.pathExtension.lowercased()) }) else { return false }
                     Task {
-                        let data = u.isFileURL ? try? Data(contentsOf: u) : (try? await URLSession.shared.data(from: u))?.0
+                        let data = u.isFileURL ? await offMain({ try? Data(contentsOf: u) }) : (try? await URLSession.shared.data(from: u))?.0
                         if let data { await model.setCover(data, for: album) }
                     }
                     return true

@@ -357,7 +357,7 @@ struct AlbumMenu: View {
             Button("Find Duplicates…", systemImage: "square.on.square") { model.dedupeAlbum = album }
             Divider()
             Button("Delete from Library…", systemImage: "trash", role: .destructive) { model.confirmTrash = album.tracks }
-            Button("Quick Look Cover", systemImage: "eye") { model.quickLookCover(album) }
+            Button("Quick Look Cover", systemImage: "eye") { Task { await model.quickLookCover(album) } }
             Menu("Merge With", systemImage: "arrow.triangle.merge") {
                 let same = model.albums.filter { $0.id != album.id && ($0.artist == album.artist || Model.looseMatch($0.title, album.title)) }
                 ForEach(same.prefix(20)) { other in Button(other.title + " – " + other.artist) { model.merge = [album, other] } }
@@ -548,7 +548,7 @@ struct AlbumDetail: View {
                         .frame(width: 220, height: 220).clipShape(.rect(cornerRadius: 16, style: .continuous))
                         .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
                         .heroTarget(.album(album))
-                        .onTapGesture { model.quickLookCover(album) }
+                        .onTapGesture { Task { await model.quickLookCover(album) } }
                         .coverDrop(album, corner: 16)
                         .help(model.artwork[album.id] == nil ? "Drop an image here to use it as the cover" : "Quick Look (⌘Y); drop an image to replace the cover")
                     VStack(alignment: .leading, spacing: 6) {

@@ -134,13 +134,13 @@ struct ContentView: View {
                             isPresented: Binding(get: { model.albumOnAlbum != nil }, set: { if !$0 { model.albumOnAlbum = nil } }),
                             presenting: model.albumOnAlbum) { pair in
             Button("Use “\(pair.dragged.title)”'s Cover for “\(pair.target.title)”") {
-                if let d = model.coverData(pair.dragged) { Task { await model.setCover(d, for: pair.target) } }
+                Task { if let d = await model.coverData(pair.dragged) { await model.setCover(d, for: pair.target) } }
             }
-            .disabled(model.coverData(pair.dragged) == nil)
+            .disabled(model.artwork[pair.dragged.id] == nil)      // the shown cover: reading the files here ran on every redraw
             Button("Use “\(pair.target.title)”'s Cover for “\(pair.dragged.title)”") {
-                if let d = model.coverData(pair.target) { Task { await model.setCover(d, for: pair.dragged) } }
+                Task { if let d = await model.coverData(pair.target) { await model.setCover(d, for: pair.dragged) } }
             }
-            .disabled(model.coverData(pair.target) == nil)
+            .disabled(model.artwork[pair.target.id] == nil)
             Button("Merge the Two Albums…") { model.merge = [pair.target, pair.dragged] }
             Button("Cancel", role: .cancel) {}
         } message: { pair in

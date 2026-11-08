@@ -181,6 +181,8 @@ final class Model: ObservableObject {
     @Published var onTheGo: [OnTheGo] = [] { didSet { invalidateSyncCache() } }
     @Published var orphans: [URL]?
     @Published var podCheck: PodCheck?
+    @Published var strayBytes: Int64 = 0            // the stray files' size, read with the check
+    @Published private var backupOnPod = false      // iTunesDB.crate-backup is there, read when the iPod loads
     @Published var history: [PodSample] = []
 
     // sync
@@ -642,23 +644,28 @@ final class Model: ObservableObject {
         // AAC copies in a layout the iPod can't read (MP4Layout.swift): rearranged where they are, audio untouched
         syncPhase = "Fixing song files"; syncTotal = 0; syncDone = 0
         let file = { (t: PodTrack) in ipod.mount.appendingPathComponent(t.relativePath) }
-        let unreadable = db.tracks.indices.filter {
-            !db.tracks[$0].isLossless && db.tracks[$0].relativePath.lowercased().hasSuffix(".m4a") && !MP4Layout.iPodReady(file(db.tracks[$0]).path)
-        }
+        let aacs = db.tracks.indices.filter { !db.tracks[$0].isLossless && db.tracks[$0].relativePath.lowercased().hasSuffix(".m4a") }
+            .map { ($0, file(db.tracks[$0]).path) }
+        let unreadable = await offMain { aacs.filter { !MP4Layout.iPodReady($0.1) }.map(\.0) }
         if !unreadable.isEmpty { syncTotal = unreadable.count }
         for i in unreadable {
             let t = db.tracks[i], dst = file(t)
             syncCurrent = "Rearranging \(t.artist) – \(t.title)"
             let staged = dst.deletingLastPathComponent().appendingPathComponent(".crate-new-" + dst.lastPathComponent)
             do {
-                try? FileManager.default.removeItem(at: staged)
-                try await Task.detached { try MP4Layout.remux(dst.path, to: staged) }.value
-                _ = try FileManager.default.replaceItemAt(dst, withItemAt: staged)
-                let size = (try? FileManager.default.attributesOfItem(atPath: dst.path)[.size] as? Int) ?? 0
+                let size = try await offMain { () throws -> Int in
+                    try? FileManager.default.removeItem(at: staged)
+                    try MP4Layout.remux(dst.path, to: staged)
+                    _ = try FileManager.default.replaceItemAt(dst, withItemAt: staged)
+                    return (try? FileManager.default.attributesOfItem(atPath: dst.path)[.size] as? Int) ?? 0
+                }
                 let info = await Syncer.audioInfo(dst)
                 db.replaceFile(i, size: size, kbps: info.kbps, ms: info.ms)
                 rep.replaced += 1
-            } catch { try? FileManager.default.removeItem(at: staged); rep.failures.append("\(t.title): \(error.localizedDescription)") }
+            } catch {
+                await offMain { try? FileManager.default.removeItem(at: staged) }
+                rep.failures.append("\(t.title): \(error.localizedDescription)")
+            }
             syncDone += 1
         }
         let todo = db.tracks.indices.filter { db.tracks[$0].isLossless && source(db.tracks[$0]) != nil }
@@ -693,11 +700,14 @@ final class Model: ObservableObject {
                 converted[n] = nil
                 let info = await Syncer.audioInfo(aac)
                 let staged = dst.deletingLastPathComponent().appendingPathComponent(".crate-new-" + dst.lastPathComponent)
-                try? FileManager.default.removeItem(at: staged)
-                try FileManager.default.copyItem(at: aac, to: staged)
-                _ = try FileManager.default.replaceItemAt(dst, withItemAt: staged)
-                try? FileManager.default.removeItem(at: aac)
-                let size = (try? FileManager.default.attributesOfItem(atPath: dst.path)[.size] as? Int) ?? 0
+                let size = try await offMain { () throws -> Int in
+                    let fm = FileManager.default
+                    try? fm.removeItem(at: staged)
+                    try fm.copyItem(at: aac, to: staged)
+                    _ = try fm.replaceItemAt(dst, withItemAt: staged)
+                    try? fm.removeItem(at: aac)
+                    return (try? fm.attributesOfItem(atPath: dst.path)[.size] as? Int) ?? 0
+                }
                 db.replaceFile(i, size: size, kbps: info.kbps, ms: info.ms)
                 rep.replaced += 1
                 if rep.replaced % 10 == 0 { try? await Syncer.save(db, to: ipod) }    // the records follow the replaced files
@@ -931,6 +941,7 @@ final class Model: ObservableObject {
             }
             onTheGo = otg
             if !loading { Task { await loadPodArtwork() } }
+            Task { await refreshBackup() }
             history = hist
             refreshSmartPending()
         case let .cached(c, cachedDB, hist):
@@ -1038,23 +1049,43 @@ final class Model: ObservableObject {
 
     /// Shows an album's cover in Quick Look (the cover file, or the embedded art saved to a temp file).
     /// An album's cover as image data: its cover file, else the artwork Crate shows for it.
-    func coverData(_ a: Album) -> Data? {
-        let fm = FileManager.default
-        if let n = ["cover.jpg", "folder.jpg", "cover.png", "folder.png", "front.jpg"].first(where: { fm.fileExists(atPath: a.folder + "/" + $0) }),
-           let d = try? Data(contentsOf: URL(fileURLWithPath: a.folder + "/" + n)) { return d }
-        guard let img = artwork[a.id], let tiff = img.tiffRepresentation else { return nil }
-        return NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+    func coverData(_ a: Album) async -> Data? {
+        let folder = a.folder, img = artwork[a.id]
+        return await offMain {
+            if let d = Model.coverFile(in: folder).flatMap({ try? Data(contentsOf: URL(fileURLWithPath: $0)) }) { return d }
+            guard let tiff = img?.tiffRepresentation else { return nil }
+            return NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+        }
     }
 
-    func quickLookCover(_ a: Album) {
-        let fm = FileManager.default
-        if let n = ["cover.jpg", "folder.jpg", "cover.png", "folder.png", "front.jpg"].first(where: { fm.fileExists(atPath: a.folder + "/" + $0) }) {
-            quickLook = URL(fileURLWithPath: a.folder + "/" + n); return
+    /// The album folder's cover image file, the one readers pick first.
+    nonisolated static func coverFile(in folder: String) -> String? {
+        ["cover.jpg", "folder.jpg", "cover.png", "folder.png", "front.jpg"].lazy.map { folder + "/" + $0 }
+            .first { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    /// Makes `data` the folder's cover.jpg; the other cover images get .old, as some readers would still pick them first.
+    nonisolated static func writeCover(_ data: Data, in folder: String) async -> Bool {
+        await offMain {
+            let fm = FileManager.default
+            for n in ["folder.jpg", "cover.png", "folder.png", "front.jpg"] where fm.fileExists(atPath: folder + "/" + n) {
+                try? fm.moveItem(atPath: folder + "/" + n, toPath: folder + "/" + n + ".old")
+            }
+            try? fm.removeItem(atPath: folder + "/cover.jpg")
+            return fm.createFile(atPath: folder + "/cover.jpg", contents: data)
         }
-        guard let img = artwork[a.id], let tiff = img.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
-        let url = fm.temporaryDirectory.appendingPathComponent(Organizer.clean(a.title) + ".png")
-        try? png.write(to: url)
-        quickLook = url
+    }
+
+    func quickLookCover(_ a: Album) async {
+        let folder = a.folder, img = artwork[a.id], name = Organizer.clean(a.title)
+        let url = await offMain { () -> URL? in
+            if let p = Model.coverFile(in: folder) { return URL(fileURLWithPath: p) }
+            guard let tiff = img?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return nil }
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(name + ".png")
+            try? png.write(to: url)
+            return url
+        }
+        if let url { quickLook = url }
     }
 
     func deleteSmart(_ p: SmartPlaylist) {
@@ -1069,44 +1100,61 @@ final class Model: ObservableObject {
 
     func scanOrphans() async {
         guard let ipod, let db, connected else { return }
-        let c = await Task.detached { Syncer.check(ipod, db: db) }.value
+        let c = await offMain { Syncer.check(ipod, db: db) }
+        let stray = c.stray
+        strayBytes = await offMain {
+            Int64(stray.compactMap { (try? FileManager.default.attributesOfItem(atPath: $0.path))?[.size] as? Int }.reduce(0, +))
+        }
         podCheck = c; orphans = c.stray
     }
 
     /// Takes songs whose file is gone out of the iPod's database (read fresh, written right away).
-    func removeMissing() {
-        guard let ipod, connected, let gone = podCheck?.missing, !gone.isEmpty,
-              var fresh = (try? Data(contentsOf: ipod.dbURL)).flatMap({ try? ITunesDB.read($0) }) else { return }
+    func removeMissing() async {
+        guard let ipod, connected, let gone = podCheck?.missing, !gone.isEmpty else { return }
         let ids = Set(gone.map(\.id))
-        fresh.tracks.removeAll { ids.contains($0.id) }
-        do { try Syncer.write(fresh, to: ipod); notify("Removed \(gone.count) songs without a file from the iPod's list") }
-        catch { notify("Writing the database failed: \(error.localizedDescription)") }
+        let said = await offMain { () -> String? in
+            guard var fresh = (try? Data(contentsOf: ipod.dbURL)).flatMap({ try? ITunesDB.read($0) }) else { return nil }
+            fresh.tracks.removeAll { ids.contains($0.id) }
+            do { try Syncer.write(fresh, to: ipod); return "Removed \(gone.count) songs without a file from the iPod's list" }
+            catch { return "Writing the database failed: \(error.localizedDescription)" }
+        }
+        guard let said else { return }
+        notify(said)
         podCheck?.missing = []
         loadIPod()
     }
 
-    func deleteOrphans() {
-        let n = orphans?.count ?? 0
-        orphans?.forEach { try? FileManager.default.removeItem(at: $0) }
-        orphans = []
+    func deleteOrphans() async {
+        let gone = orphans ?? []
+        await offMain { gone.forEach { try? FileManager.default.removeItem(at: $0) } }
+        orphans = []; strayBytes = 0
         loadIPod()
-        notify("Removed \(n) stray files from the iPod")
+        notify("Removed \(gone.count) stray files from the iPod")
     }
 
-    var hasBackup: Bool { connected && (ipod.map { FileManager.default.fileExists(atPath: $0.backupURL.path) } ?? false) }
+    var hasBackup: Bool { connected && backupOnPod }
+
+    func refreshBackup() async {
+        guard let p = ipod?.backupURL.path else { backupOnPod = false; return }
+        backupOnPod = await offMain { FileManager.default.fileExists(atPath: p) }
+    }
 
     /// Puts iTunesDB.crate-backup back (the database from before the last Crate write).
-    func restoreBackup() {
+    func restoreBackup() async {
         guard let i = ipod, connected else { return }
-        do {
-            _ = try ITunesDB.read(Data(contentsOf: i.backupURL))
-            let tmp = i.dbURL.appendingPathExtension("restore")
-            try? FileManager.default.removeItem(at: tmp)
-            try FileManager.default.copyItem(at: i.backupURL, to: tmp)
-            _ = try FileManager.default.replaceItemAt(i.dbURL, withItemAt: tmp)
-            loadIPod()
-            notify("Restored the previous iPod database")
-        } catch { notify("Restore failed: \(error.localizedDescription)") }
+        let failed = await offMain { () -> String? in
+            do {
+                _ = try ITunesDB.read(Data(contentsOf: i.backupURL))
+                let tmp = i.dbURL.appendingPathExtension("restore")
+                try? FileManager.default.removeItem(at: tmp)
+                try FileManager.default.copyItem(at: i.backupURL, to: tmp)
+                _ = try FileManager.default.replaceItemAt(i.dbURL, withItemAt: tmp)
+                return nil
+            } catch { return error.localizedDescription }
+        }
+        if let failed { notify("Restore failed: \(failed)"); return }
+        loadIPod()
+        notify("Restored the previous iPod database")
     }
 
     // MARK: sync
@@ -1405,13 +1453,12 @@ final class Model: ObservableObject {
         if !otg.isEmpty || rep.removed > 0 || pendingName != nil || playCountsMerged || !podHides.isEmpty || !podSkips.isEmpty {
             do {
                 try await Syncer.save(db, to: ipod)
-                otg.forEach { try? FileManager.default.removeItem(at: $0.url) }
-                if !podHides.isEmpty { try? FileManager.default.removeItem(at: PodHides.url(ipod)) }
-                if !podSkips.isEmpty {      // (a file left behind is stale now: the database's stamp moved on)
-                    try? FileManager.default.removeItem(at: PodSkips.url(ipod))
-                    skips = PodSkips.add(podSkips, to: skips)
-                }
-                if playCountsMerged { try? FileManager.default.removeItem(at: PlayCounts.url(ipod)); unmergedPlays = nil }
+                // (a skips file left behind is stale now: the database's stamp moved on)
+                let used = otg.map(\.url) + (podHides.isEmpty ? [] : [PodHides.url(ipod)]) + (podSkips.isEmpty ? [] : [PodSkips.url(ipod)])
+                    + (playCountsMerged ? [PlayCounts.url(ipod)] : [])
+                await offMain { used.forEach { try? FileManager.default.removeItem(at: $0) } }
+                if !podSkips.isEmpty { skips = PodSkips.add(podSkips, to: skips) }
+                if playCountsMerged { unmergedPlays = nil }
             } catch { rep.error = "Writing the database failed: \(error.localizedDescription)"; return }
             if !plays.isEmpty {
                 syncPhase = "Sending plays to Subsonic"
@@ -1630,22 +1677,18 @@ final class Model: ObservableObject {
     /// Uses an image you dropped on an album's cover as its cover.jpg.
     func setCover(_ data: Data, for album: Album) async {
         guard NSImage(data: data) != nil, !isPodOnly(album) else { notify("That isn't an image"); return }
-        let fm = FileManager.default
-        for n in ["folder.jpg", "cover.png", "folder.png", "front.jpg"] where fm.fileExists(atPath: album.folder + "/" + n) {
-            try? fm.moveItem(atPath: album.folder + "/" + n, toPath: album.folder + "/" + n + ".old")
-        }
-        try? fm.removeItem(atPath: album.folder + "/cover.jpg")
-        guard fm.createFile(atPath: album.folder + "/cover.jpg", contents: data) else { notify("Couldn't write cover.jpg in \(album.folder)"); return }
-        artwork[album.id] = ArtCache.storeAlbum(data, folder: album.folder) ?? NSImage(data: data)
+        let folder = album.folder
+        guard await Self.writeCover(data, in: folder) else { notify("Couldn't write cover.jpg in \(folder)"); return }
+        artwork[album.id] = await offMain { ArtCache.storeAlbum(data, folder: folder) ?? NSImage(data: data) }
         await rescanServers()
         notify("New cover for \(album.title)")
     }
 
     /// Saves the release's cover as cover.jpg (replacing folder.jpg/cover.png too, so it wins).
     func saveCover(_ r: MBRelease, to album: Album, replace: Bool, step: (String) -> Void) async -> String? {
-        let fm = FileManager.default
+        let folder = album.folder
         let names = ["cover.jpg", "folder.jpg", "cover.png", "folder.png", "front.jpg"]
-        let existing = names.filter { fm.fileExists(atPath: album.folder + "/" + $0) }
+        let existing = await offMain { names.filter { FileManager.default.fileExists(atPath: folder + "/" + $0) } }
         guard existing.isEmpty || replace else { return nil }
         step("Downloading the cover")
         var coverData = r.source == "MusicBrainz" ? await MusicBrainz.cover(r.id)
@@ -1659,24 +1702,24 @@ final class Model: ObservableObject {
         }
         guard let d = coverData, let img = NSImage(data: d) else { return "no cover found" }
         // shown right away, whether or not the file can be written
-        artwork[album.id] = ArtCache.storeAlbum(d, folder: album.folder) ?? img
+        artwork[album.id] = await offMain { ArtCache.storeAlbum(d, folder: folder) } ?? img
         guard !isPodOnly(album) else { return nil }
         // songs that are only on the server (not on the share, not downloaded) have no folder here to put it in
-        var dir: ObjCBool = false
-        guard fm.fileExists(atPath: album.folder, isDirectory: &dir), dir.boolValue else { return "cover shown in Crate (the files are only on the server)" }
-        for n in existing where n != "cover.jpg" {       // the old image would otherwise still be picked first by some readers
-            try? fm.moveItem(atPath: album.folder + "/" + n, toPath: album.folder + "/" + n + ".old")
+        let isDir = await offMain { () -> Bool in
+            var dir: ObjCBool = false
+            return FileManager.default.fileExists(atPath: folder, isDirectory: &dir) && dir.boolValue
         }
-        try? fm.removeItem(atPath: album.folder + "/cover.jpg")
-        guard fm.createFile(atPath: album.folder + "/cover.jpg", contents: d) else { return "couldn't write cover.jpg (shown in Crate only)" }
-        ArtCache.storeAlbum(d, folder: album.folder)     // again, now that the folder's cover.jpg is this one
+        guard isDir else { return "cover shown in Crate (the files are only on the server)" }
+        guard await Self.writeCover(d, in: folder) else { return "couldn't write cover.jpg (shown in Crate only)" }
+        await offMain { _ = ArtCache.storeAlbum(d, folder: folder) }     // again, now that the folder's cover.jpg is this one
         if on(.ownTone) || on(.subsonic) { step("Asking the server to rescan"); await rescanServers() }
         return existing.isEmpty ? "cover saved" : "cover replaced"
     }
 
     /// Writes year/genre into the album's FLAC and MP3 files (off the main thread).
     func writeTags(_ album: Album, year: Int, genre: String) async -> (files: Int, error: String?) {
-        let paths = album.tracks.map(\.path).filter { TagWriter.canWrite($0) && FileManager.default.fileExists(atPath: $0) }
+        let all = album.tracks.map(\.path)
+        let paths = await offMain { all.filter { TagWriter.canWrite($0) && FileManager.default.fileExists(atPath: $0) } }
         guard !paths.isEmpty, year > 0 || !genre.isEmpty else { return (0, nil) }
         let result = await Task.detached { () -> (Int, String?) in
             var n = 0, err: String?
@@ -1829,7 +1872,7 @@ final class Model: ObservableObject {
     /// A finished Soulseek download: copy its folder into the library.
     func importDownloaded(_ job: SlskJob, folder: String) async {
         guard !slsk.downloadsFolder.isEmpty else { notify("Set slskd's downloads folder in Settings › Plugins › Soulseek to import downloads"); return }
-        guard FileManager.default.fileExists(atPath: folder) else {
+        guard await offMain({ FileManager.default.fileExists(atPath: folder) }) else {
             notify("Can't find \(folder) – is the share with slskd's downloads mounted?")
             return
         }
@@ -1887,14 +1930,14 @@ final class Model: ObservableObject {
 
     /// Puts the iTunes Store cover (1200 px) next to an imported album when it has no cover file.
     func saveAppleMusicCover(_ a: AMAlbum, into lib: Album) async {
-        let fm = FileManager.default
-        guard !["cover.jpg", "folder.jpg", "cover.png", "folder.png"].contains(where: { fm.fileExists(atPath: lib.folder + "/" + $0) }) else { return }
+        let folder = lib.folder
+        guard await offMain({ Model.coverFile(in: folder) == nil }) else { return }
         var url = amArt[a.id]
         if url == nil { url = await AppleMusic.artworkURL(a) }
         guard let u = url.flatMap({ URL(string: $0.absoluteString.replacingOccurrences(of: "600x600bb", with: "1200x1200bb")) }),
               let (d, _) = try? await URLSession.shared.data(from: u), let img = NSImage(data: d) else { return }
-        if fm.createFile(atPath: lib.folder + "/cover.jpg", contents: d) {
-            artwork[lib.id] = ArtCache.storeAlbum(d, folder: lib.folder) ?? img
+        if await offMain({ FileManager.default.createFile(atPath: folder + "/cover.jpg", contents: d) }) {
+            artwork[lib.id] = await offMain { ArtCache.storeAlbum(d, folder: folder) } ?? img
             await rescanServers()
         }
     }
