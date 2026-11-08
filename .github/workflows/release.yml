@@ -7,7 +7,7 @@ name: Release
 #
 # Secrets:
 #   SPARKLE_PRIVATE_KEY   Sparkle's EdDSA private key (generate_keys -x), signs the update
-#   TAP_GITHUB_TOKEN      a token that can push to jrvgr/homebrew-crate (skipped with a warning when missing)
+#   TAP_DEPLOY_KEY        the private half of a write deploy key on jrvgr/homebrew-crate (skipped with a warning when missing)
 
 on:
   push:
@@ -81,11 +81,14 @@ jobs:
 
       - name: Update the Homebrew cask
         env:
-          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
         run: |
-          [ -n "$TAP_GITHUB_TOKEN" ] || { echo "::warning::TAP_GITHUB_TOKEN isn't set; update jrvgr/homebrew-crate by hand"; exit 0; }
+          [ -n "$TAP_DEPLOY_KEY" ] || { echo "::warning::TAP_DEPLOY_KEY isn't set; update jrvgr/homebrew-crate by hand"; exit 0; }
           SHA=$(shasum -a 256 "$DMG" | awk '{print $1}')
-          git clone "https://x-access-token:$TAP_GITHUB_TOKEN@github.com/jrvgr/homebrew-crate.git" tap
+          KEY="$RUNNER_TEMP/tap-key"
+          printf '%s\n' "$TAP_DEPLOY_KEY" > "$KEY" && chmod 600 "$KEY"
+          export GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone git@github.com:jrvgr/homebrew-crate.git tap
           cd tap
           sed -i '' -e "s/version \".*\"/version \"$VERSION\"/" -e "s/sha256 \".*\"/sha256 \"$SHA\"/" Casks/crate.rb
           git -c user.name=github-actions -c user.email=actions@github.com commit -am "Crate $VERSION"
