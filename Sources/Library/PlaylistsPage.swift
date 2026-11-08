@@ -47,6 +47,20 @@ struct PlaylistsPage: View {
         return out.filter { !$0.1.isEmpty }
     }
 
+    /// The Show tabs as icons, like the Albums page's view switcher (the name is the tooltip).
+    static func tabIcon(_ tab: String) -> Image {
+        switch tab {
+        case "All": Image(systemName: "square.grid.2x2")
+        case "Crate": Image(systemName: "music.note.list")
+        case "Smart": Image(systemName: "wand.and.stars")
+        case "On iPod": Image(systemName: "ipod")
+        case "Spotify": Image(nsImage: SpotifyMark.template)
+        case "OwnTone": Image(systemName: "hifispeaker")
+        case "Subsonic": Image(systemName: "server.rack")
+        default: Image(systemName: "music.note.list")
+        }
+    }
+
     var body: some View {
         let all = groups
         let tabs = ["All"] + all.map(\.title)
@@ -57,21 +71,6 @@ struct PlaylistsPage: View {
             .filter { !$0.cards.isEmpty }
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
-                HStack(spacing: 12) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                        TextField("Filter playlists", text: $ui.query).textFieldStyle(.plain)
-                        if !ui.query.isEmpty { Button { ui.query = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(.secondary) }
-                    }
-                    .padding(.horizontal, 12).padding(.vertical, 7)
-                    .glassEffect(.regular, in: .capsule)
-                    .frame(maxWidth: 280)
-                    Picker("Show", selection: Binding(get: { tab }, set: { ui.tab = $0 })) {
-                        ForEach(tabs, id: \.self) { Text($0).tag($0) }
-                    }
-                    .pickerStyle(.segmented).labelsHidden().fixedSize()
-                    Spacer()
-                }
                 if all.isEmpty {
                     ContentUnavailableView("No playlists yet", systemImage: "music.note.list",
                                            description: Text("Make one with New, or turn on a plugin that brings its own.")).padding(.top, 60)
@@ -99,8 +98,13 @@ struct PlaylistsPage: View {
             }
             .padding(24).padding(.bottom, 50)
         }
-        .navigationTitle("Playlists")
-        .navigationSubtitle("\(model.playlistCount) playlists")
+        .pageTitle("Playlists", subtitle: "\(model.playlistCount) playlists")
+        .filtersInToolbar(search: "Filter \(model.playlistCount) playlists", text: $ui.query) {
+            Picker("Show", selection: Binding(get: { tab }, set: { ui.tab = $0 })) {
+                ForEach(tabs, id: \.self) { t in Self.tabIcon(t).help(t == "All" ? "All playlists" : t).tag(t) }
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+        }
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Menu {

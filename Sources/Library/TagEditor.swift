@@ -80,7 +80,7 @@ struct TagEditor: View {
                 }
                 Form {
                     TextField("Album", text: $s.album)
-                    TextField("Album Artist", text: $s.albumArtist)
+                    ArtistsField(label: "Album Artist", credit: $s.albumArtist, known: model.artists.map(\.name))
                     HStack {
                         TextField("Year", text: $s.year).frame(width: 140)
                         TextField("Genre", text: $s.genre)
@@ -98,7 +98,7 @@ struct TagEditor: View {
                         Text("Disc").frame(width: 34, alignment: .leading)
                         Text("Track").frame(width: 38, alignment: .leading)
                         Text("Title").frame(maxWidth: .infinity, alignment: .leading)
-                        Text("Artist").frame(width: 170, alignment: .leading)
+                        Text("Artists").frame(width: 260, alignment: .leading)
                     }
                     .font(.caption).foregroundStyle(.secondary)
                     .padding(.bottom, 2)
@@ -107,7 +107,7 @@ struct TagEditor: View {
                             TextField("1", value: $r.disc, format: .number).frame(width: 34).help("Disc number")
                             TextField("#", value: $r.track, format: .number).frame(width: 38).help("Track number")
                             TextField("Title", text: $r.title)
-                            TextField("Artist", text: $r.artist).frame(width: 170)
+                            ArtistsField(label: "Artist", credit: $r.artist, known: model.artists.map(\.name)).frame(width: 260)
                         }
                         .textFieldStyle(.roundedBorder)
                         .padding(.vertical, 3)
@@ -161,3 +161,114 @@ struct TagEditor: View {
         if failed.isEmpty { close() } else { s.error = "\(failed.count) failed: \(failed[0])" }
     }
 }
+
+/// A credit ("A, B & C", "A feat. B") as its artists, one chip each, plus a field to add one (suggesting the
+/// library's artists). The files and the iPod keep one credit string, so the chips are joined back into one:
+/// "A & B", "A, B & C", or "A feat. B & C" when the credit had a featured guest (Crate files those under A).
+struct ArtistsField: View {
+    var label: String
+    @Binding var credit: String
+    var known: [String]
+    @StateObject private var ui = ArtistsFieldUI()
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let names = ArtistsField.split(credit, known: known)
+        let q = ui.new.trimmingCharacters(in: .whitespaces).lowercased()
+        let suggestions = q.isEmpty ? [] : known.filter { $0.lowercased().contains(q) && !names.contains($0) }.prefix(6)
+        ScrollView(.horizontal) {
+            HStack(spacing: 4) {
+                ForEach(Array(names.enumerated()), id: \.offset) { i, n in
+                    HStack(spacing: 3) {
+                        Text(n).lineLimit(1)
+                        Button { set(names.enumerated().filter { $0.offset != i }.map(\.element)) } label: {
+                            Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                        }
+                        .buttonStyle(.plain).foregroundStyle(.secondary).help("Remove \(n)")
+                    }
+                    .padding(.leading, 7).padding(.trailing, 5).padding(.vertical, 2)
+                    .background(.primary.opacity(0.08), in: .capsule)
+                    .contextMenu {
+                        if i > 0 { Button("Make Main Artist") { var m = names; m.insert(m.remove(at: i), at: 0); set(m) } }
+                        Button("Remove") { set(names.enumerated().filter { $0.offset != i }.map(\.element)) }
+                    }
+                }
+                TextField(names.isEmpty ? label : "Add artist", text: $ui.new)
+                    .textFieldStyle(.plain).frame(minWidth: 70)
+                    .focused($focused)
+                    .onSubmit { add(ui.new, to: names) }
+                    .popover(isPresented: Binding(get: { !suggestions.isEmpty && focused }, set: { _ in }), arrowEdge: .bottom) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(suggestions), id: \.self) { n in
+                                Button { add(n, to: names) } label: { Text(n).frame(maxWidth: .infinity, alignment: .leading).contentShape(.rect) }
+                                    .buttonStyle(.plain).padding(.horizontal, 10).padding(.vertical, 4)
+                            }
+                        }
+                        .padding(.vertical, 6).frame(minWidth: 180)
+                    }
+            }
+            .padding(.horizontal, 5).padding(.vertical, 3)
+        }
+        .scrollIndicators(.never)
+        .background(.background, in: .rect(cornerRadius: 6))
+        .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(.primary.opacity(0.15), lineWidth: 1) }
+        .help("Each artist a chip: type a name and press Return to add one, right-click to make one the main artist")
+    }
+
+    func add(_ name: String, to names: [String]) {
+        let n = name.trimmingCharacters(in: .whitespaces)
+        ui.new = ""
+        guard !n.isEmpty, !names.contains(where: { $0.caseInsensitiveCompare(n) == .orderedSame }) else { return }
+        set(names + [n])
+    }
+
+    func set(_ names: [String]) {
+        credit = ArtistsField.join(names, featuring: ArtistsField.featuring(credit))
+    }
+
+    private static let seps = [" feat. ", " ft. ", " featuring ", " Feat. ", " Ft. ", ", ", " & ", " / ", " x ", " X ", " with "]
+
+    static func featuring(_ credit: String) -> Bool {
+        credit.range(of: #"\s\(?(feat\.?|ft\.?|featuring)\s"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    /// The artists in a credit. Split at every joiner, then pieces put back together where the joined name is one of
+    /// the library's artists ("Roni Size & Reprazent", "Tyler, The Creator").
+    static func split(_ credit: String, known: [String]) -> [String] {
+        let c = credit.trimmingCharacters(in: .whitespaces)
+        guard !c.isEmpty else { return [] }
+        let lower = Set(known.map { $0.lowercased() })
+        if lower.contains(c.lowercased()) { return [c] }
+        // pieces and the joiner after each
+        var parts: [(String, String)] = [], rest = Substring(c)
+        while let r = seps.compactMap({ rest.range(of: $0) }).min(by: { $0.lowerBound < $1.lowerBound }) {
+            parts.append((String(rest[..<r.lowerBound]), String(rest[r])))
+            rest = rest[r.upperBound...]
+        }
+        parts.append((String(rest), ""))
+        var out: [String] = [], i = 0
+        while i < parts.count {
+            var name = parts[i].0, j = i
+            // the longest run from here that is a known artist
+            var k = i, joined = name
+            while k + 1 < parts.count {
+                joined += parts[k].1 + parts[k + 1].0
+                k += 1
+                if lower.contains(joined.lowercased()) { name = joined; j = k }
+            }
+            out.append(name.trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: "()"))))
+            i = j + 1
+        }
+        return out.filter { !$0.isEmpty }
+    }
+
+    static func join(_ names: [String], featuring: Bool) -> String {
+        func list(_ n: [String]) -> String { n.count <= 1 ? n.joined() : n.dropLast().joined(separator: ", ") + " & " + n.last! }
+        guard let first = names.first else { return "" }
+        if featuring && names.count > 1 { return first + " feat. " + list(Array(names.dropFirst())) }
+        return list(names)
+    }
+}
+
+@MainActor
+final class ArtistsFieldUI: ObservableObject { @Published var new = "" }

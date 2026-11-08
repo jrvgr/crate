@@ -224,3 +224,4 @@ private struct HeroTarget: ViewModifier {
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { hero.target(art, at: $0) }
     }
 }
+

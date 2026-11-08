@@ -536,7 +536,7 @@ struct SpotifyAlbumView: View {
             }
             .padding(28).padding(.bottom, 60)
         }
-        .navigationTitle(name)
+        .pageTitle(name)
         .task(id: id) {
             defer { s.loading = false }
             switch source {

@@ -36,12 +36,14 @@ struct ArtistPortrait: View {
     }
 }
 
-/// Spotify's mark (a green disc with three arcs), for what's only on Spotify; the radio waves didn't say Spotify.
+/// Spotify's mark (a disc with three arcs cut out), for what's only on Spotify; the radio waves didn't say Spotify.
+/// Monotone in the secondary colour, like the other marks around it: the green logo shouted everywhere.
 struct SpotifyMark: View {
     var body: some View {
         Canvas { ctx, size in
             let w = size.width
-            ctx.fill(Path(ellipseIn: CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.12, green: 0.84, blue: 0.38)))
+            ctx.fill(Path(ellipseIn: CGRect(origin: .zero, size: size)), with: .style(.secondary))
+            ctx.blendMode = .clear
             for (p, line) in Self.arcs(w) { ctx.stroke(p, with: .color(.black), style: StrokeStyle(lineWidth: line, lineCap: .round)) }
         }
         .aspectRatio(1, contentMode: .fit)
@@ -190,14 +192,14 @@ struct ArtistDetail: View {
                 await filter.lookUp(display, mbid: mbid?.isEmpty == false ? mbid : nil, spotify: api)
             }
             .background { Backdrop(image: lib.flatMap { a in model.artistArt[a.id] ?? a.albums.lazy.compactMap { model.artwork[$0.id] }.first }) }
-            .navigationTitle(display)
+            .pageTitle(display)
         }
     }
 
     @ViewBuilder func tile(_ r: Release, artist: String) -> some View {
         switch r.source {
         case .library(let al):
-            NavigationLink(value: Route.album(al)) { AlbumTile(album: al) }.buttonStyle(.plain).contextMenu { AlbumMenu(album: al) }
+            AlbumTile(album: al).albumLink(al).contextMenu { AlbumMenu(album: al) }
         case .spotify(let a): NavigationLink(value: Route.spotifyAlbum(a)) { SpotifyTile(album: a) }.buttonStyle(.plain)
         case .apple(let a): AMTile(album: a)
         case .missing: EmptyView()
@@ -271,7 +273,7 @@ struct ArtistDetail: View {
                             }
                         } label: {
                             // the ipod glyph is narrow, so Label's own gap reads as cramped
-                            HStack(spacing: 7) { Image(symbol: kept ? "pin.fill" : m == .none ? "plus" : "ipod"); Text(ipodTitle(m, kept: kept)) }
+                            HStack(spacing: 7) { PodStateIcon(mark: m, pinned: kept); Text(ipodTitle(m, kept: kept)) }
                         }
                         .help(kept ? "Every album by \(lib.name) goes to the iPod, also ones you add later" : "Put \(lib.name) on the iPod")
                         GlassMenu {

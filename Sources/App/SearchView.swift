@@ -112,8 +112,7 @@ struct SearchView: View {
                     ResultSection(title: "Albums", count: albums.count) {
                         LazyVGrid(columns: grid, spacing: 22) {
                             ForEach(albums.prefix(30)) { a in
-                                NavigationLink(value: Route.album(a)) { AlbumTile(album: a) }
-                                    .buttonStyle(.plain).contextMenu { AlbumMenu(album: a) }
+                                AlbumTile(album: a).albumLink(a).contextMenu { AlbumMenu(album: a) }
                             }
                         }
                     }
@@ -195,8 +194,7 @@ struct SearchView: View {
             }
             .padding(28).padding(.bottom, 60)
         }
-        .navigationTitle("Search")
-        .navigationSubtitle("“\(q)”")
+        .pageTitle("Search", subtitle: "“\(q)”")
         .task(id: model.search) {
             // the first query right away, then once typing pauses
             if !ui.q.isEmpty { try? await Task.sleep(for: .milliseconds(200)) }

@@ -235,7 +235,7 @@ struct SmartPlaylistView: View {
                 }
                 .padding(28).padding(.bottom, 60)
             }
-            .navigationTitle(p.name)
+            .pageTitle(p.name)
             .contextMenu { Button("Delete Smart Playlist", role: .destructive) { model.deleteSmart(p) } }
         } else {
             ContentUnavailableView("Smart playlist not found", systemImage: "gearshape.2")
@@ -427,7 +427,7 @@ struct YearInReview: View {
                         ScrollView(.horizontal) {
                             LazyHStack(spacing: 16) {
                                 ForEach(added.sorted { $0.added! > $1.added! }) { a in
-                                    NavigationLink(value: Route.album(a)) { AlbumTile(album: a).frame(width: 140) }.buttonStyle(.plain)
+                                    AlbumTile(album: a).frame(width: 140).albumLink(a)
                                 }
                             }
                         }
@@ -437,7 +437,7 @@ struct YearInReview: View {
             }
             .padding(28).padding(.bottom, 60)
         }
-        .navigationTitle("Year in Review")
+        .pageTitle("Year in Review")
     }
 
     func ranking(_ title: String, _ rows: [(String, String)]) -> some View {

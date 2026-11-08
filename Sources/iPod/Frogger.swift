@@ -150,14 +150,17 @@ extension Model {
 /// little-endian u32 at file offset 0xafc (Frogger's docs/tcmd.md, "On the disk"). The iPod reads the
 /// file when it starts, so a change made here in disk mode applies from its next start.
 enum FroggerSwitch: Int, CaseIterable, Identifiable {
-    case coverPage, holdMenu, quickSettings, batteryPercent, pageSlide, jumpByLetter, resumeMixes, showHidden
+    case coverPage, holdMenu, quickSettings, batteryPercent, pageSlide, lockCover, jumpByLetter, resumeMixes, showHidden
     var id: Int { rawValue }
 
+    /// Frogger's payload/settings.h: FROGGER_PREF_FEATURE(f) is bit 19 + f for the first five switches, 27 for
+    /// the sixth (24-26 hold the backlight timer, 28-29 Flash Storage).
     var bit: UInt32 {
         switch self {
         case .showHidden: 16
         case .jumpByLetter: 17
         case .resumeMixes: 18
+        case .lockCover: 27                       // FEATURE_LOCK
         default: UInt32(19 + rawValue)            // FEATURE_COVER … FEATURE_SLIDE
         }
     }
@@ -171,6 +174,7 @@ enum FroggerSwitch: Int, CaseIterable, Identifiable {
         case .quickSettings: "Quick Settings"
         case .batteryPercent: "Battery Percent"
         case .pageSlide: "Page Slide"
+        case .lockCover: "Lock Cover"
         case .jumpByLetter: "Jump by Letter"
         case .resumeMixes: "Resume Mixes"
         case .showHidden: "Show Hidden"
@@ -183,6 +187,7 @@ enum FroggerSwitch: Int, CaseIterable, Identifiable {
         case .quickSettings: "Hold Menu anywhere: Backlight, Shuffle, Repeat, Sleep"
         case .batteryPercent: "The battery percentage in the title bar"
         case .pageSlide: "The cover page slides to Apple's Now Playing and back"
+        case .lockCover: "With Hold on while a song plays or is paused: its cover large, the title and the progress bar"
         case .jumpByLetter: "Spin the wheel fast in a long list to move a letter at a time"
         case .resumeMixes: "Songs of 20 minutes or longer start where you left them"
         case .showHidden: "Hidden songs show in Artists, Albums, Genres and Composers again"
@@ -195,6 +200,7 @@ enum FroggerSwitch: Int, CaseIterable, Identifiable {
         case .quickSettings: "slider.horizontal.3"
         case .batteryPercent: "battery.75percent"
         case .pageSlide: "rectangle.portrait.and.arrow.right"
+        case .lockCover: "lock"
         case .jumpByLetter: "textformat.abc"
         case .resumeMixes: "bookmark"
         case .showHidden: "eye"
@@ -203,6 +209,44 @@ enum FroggerSwitch: Int, CaseIterable, Identifiable {
 
     func isOn(_ flags: UInt32) -> Bool { (flags >> bit & 1 == 1) == setMeansOn }
     func set(_ on: Bool, in flags: UInt32) -> UInt32 { on == setMeansOn ? flags | 1 << bit : flags & ~(1 << bit) }
+}
+
+/// Frogger's Flash Storage (after the switches in its Settings): a flash mod's disk goes to standby 1 s after its
+/// last use instead of Apple's 2-15 s. Auto does that only when the drive says it's flash. Prefs bits 28-29.
+enum FroggerFlash: UInt32, CaseIterable, Identifiable {
+    case off = 0, auto = 1, on = 2
+    var id: UInt32 { rawValue }
+    var title: String { switch self { case .off: "Off"; case .auto: "Auto"; case .on: "On" } }
+    static let shift: UInt32 = 28
+    static func get(_ flags: UInt32) -> FroggerFlash { FroggerFlash(rawValue: flags >> shift & 3) ?? .off }
+    func set(in flags: UInt32) -> UInt32 { flags & ~(3 << Self.shift) | rawValue << Self.shift }
+}
+
+/// The click wheel's click: Apple's Clicker (prefs bit 0, set: On) and, when on, where Frogger plays it, bits 30-31
+/// (FROGGER_PREF_CLICK_IN: 0 Speaker, 1 Headphones, 2 Both). Off is only bit 0 clear; where it played is kept.
+enum FroggerClicker: Int, CaseIterable, Identifiable {
+    case off, speaker, headphones, both
+    var id: Int { rawValue }
+    var title: String { switch self { case .off: "Off"; case .speaker: "Speaker"; case .headphones: "Headphones"; case .both: "Both" } }
+    static let shift: UInt32 = 30
+    static func get(_ flags: UInt32) -> FroggerClicker {
+        guard flags & 1 == 1 else { return .off }
+        return FroggerClicker(rawValue: Int(flags >> shift & 3) + 1) ?? .speaker
+    }
+    func set(in flags: UInt32) -> UInt32 {
+        if self == .off { return flags & ~1 }
+        return flags & ~(3 << Self.shift) | UInt32(rawValue - 1) << Self.shift | 1
+    }
+}
+
+/// Frogger's Click Volume: how loud the click is in the headphones. Prefs bits 14-15 (FROGGER_PREF_CLICK_VOL).
+enum FroggerClickVolume: UInt32, CaseIterable, Identifiable {
+    case quiet = 0, medium = 1, loud = 2
+    var id: UInt32 { rawValue }
+    var title: String { switch self { case .quiet: "Quiet"; case .medium: "Medium"; case .loud: "Loud" } }
+    static let shift: UInt32 = 14
+    static func get(_ flags: UInt32) -> FroggerClickVolume { FroggerClickVolume(rawValue: flags >> shift & 3) ?? .quiet }
+    func set(in flags: UInt32) -> UInt32 { flags & ~(3 << Self.shift) | rawValue << Self.shift }
 }
 
 enum FroggerPrefs {
@@ -237,7 +281,25 @@ final class FroggerSwitchesUI: ObservableObject {
 
     func set(_ s: FroggerSwitch, _ on: Bool, ipod: IPodInfo) {
         guard let f = flags else { return }
-        let new = s.set(on, in: f)
+        write(s.set(on, in: f), ipod: ipod)
+    }
+
+    func set(_ flash: FroggerFlash, ipod: IPodInfo) {
+        guard let f = flags else { return }
+        write(flash.set(in: f), ipod: ipod)
+    }
+
+    func set(_ click: FroggerClicker, ipod: IPodInfo) {
+        guard let f = flags else { return }
+        write(click.set(in: f), ipod: ipod)
+    }
+
+    func set(_ volume: FroggerClickVolume, ipod: IPodInfo) {
+        guard let f = flags else { return }
+        write(volume.set(in: f), ipod: ipod)
+    }
+
+    private func write(_ new: UInt32, ipod: IPodInfo) {
         do { try FroggerPrefs.write(new, to: ipod); flags = new; changed = true; error = nil }
         catch { self.error = "Couldn't change the iPod's settings: \(error.localizedDescription)" }
     }
@@ -375,6 +437,34 @@ struct FroggerSettings: View {
                     .disabled(switches.flags == nil || model.syncing)
             }
         }
+        SettingRow(icon: "memorychip", title: "Flash Storage",
+                   detail: "With a flash mod the disk sleeps 1 s after its last use instead of 2–15 s. Auto: only when the drive says it's flash") {
+            Picker("Flash Storage", selection: Binding(get: { switches.flags.map(FroggerFlash.get) ?? .off },
+                                                       set: { f in if let i = model.ipod { switches.set(f, ipod: i) } })) {
+                ForEach(FroggerFlash.allCases) { Text($0.title).tag($0) }
+            }
+            .labelsHidden().pickerStyle(.segmented).fixedSize()
+            .disabled(switches.flags == nil || model.syncing)
+        }
+        let clicker = switches.flags.map(FroggerClicker.get) ?? .speaker
+        SettingRow(icon: "speaker.wave.2", title: "Clicker",
+                   detail: "Where the click wheel's click plays. With nothing playing, the headphone click comes from the speaker.") {
+            Picker("Clicker", selection: Binding(get: { clicker }, set: { c in if let i = model.ipod { switches.set(c, ipod: i) } })) {
+                ForEach(FroggerClicker.allCases) { Text($0.title).tag($0) }
+            }
+            .labelsHidden().pickerStyle(.segmented).fixedSize()
+            .disabled(switches.flags == nil || model.syncing)
+        }
+        SettingRow(icon: "headphones", title: "Click Volume",
+                   detail: "How loud the click is in the headphones (it follows the volume too). The speaker click stays as it is.") {
+            Picker("Click Volume", selection: Binding(get: { switches.flags.map(FroggerClickVolume.get) ?? .quiet },
+                                                      set: { v in if let i = model.ipod { switches.set(v, ipod: i) } })) {
+                ForEach(FroggerClickVolume.allCases) { Text($0.title).tag($0) }
+            }
+            .labelsHidden().pickerStyle(.segmented).fixedSize()
+            .disabled(switches.flags == nil || model.syncing || clicker == .off || clicker == .speaker)     // only the headphones click has a volume
+        }
+        .opacity(clicker == .off || clicker == .speaker ? 0.5 : 1)
         if let e = switches.error { Text(e).font(.caption).foregroundStyle(.red).padding(.horizontal, 14).padding(.bottom, 11) }
         Text("An older Frogger on the iPod may not have every switch yet: Update puts the one you last built on it.")
             .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.bottom, 11)
