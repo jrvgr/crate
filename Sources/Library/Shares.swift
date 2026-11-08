@@ -1,8 +1,7 @@
 import SwiftUI
 import NetFS
 
-// The library lives on network shares (/Volumes/share, /Volumes/media from Home Assistant). When
-// one isn't mounted, the sidebar says so and a Connect button mounts it the way Finder would
+// Music folders on network shares (under /Volumes). When one isn't mounted, the sidebar says so and a Connect button mounts it the way Finder would
 // (the keychain's password, or macOS asks), then reloads the library.
 
 extension Model {

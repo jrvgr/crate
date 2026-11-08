@@ -151,13 +151,13 @@ struct MissingRow: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            if model.on(.soulseek) { Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(artist, release.title) } }
+            GetAlbumItems(artist: artist, album: release.title, mbid: release.id)
         }
     }
 }
 
 /// A song on a MusicBrainz release.
-struct ReleaseTrack: Identifiable {
+struct ReleaseTrack: Identifiable, Codable {
     var id: String
     var number: Int
     var title: String
@@ -167,6 +167,10 @@ struct ReleaseTrack: Identifiable {
 extension ArtistLookup {
     /// The songs of a release group's earliest official edition (one request: its editions with their recordings).
     static func tracks(_ group: String) async -> [ReleaseTrack]? {
+        await LookupCache.cached(LookupCache.key("tracks", group), ttl: LookupCache.tracksTTL) { await fetchTracks(group) }
+    }
+
+    private static func fetchTracks(_ group: String) async -> [ReleaseTrack]? {
         guard let j = try? await MusicBrainz.get(URL(string: "https://musicbrainz.org/ws/2/release?release-group=\(group)&inc=recordings&limit=25&fmt=json")!) else { return nil }
         let editions = (j["releases"] as? [[String: Any]]) ?? []
         let date = { (r: [String: Any]) in (r["date"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "9999" }

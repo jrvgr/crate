@@ -43,7 +43,8 @@ extension Model {
     func downloadEntries(_ slsk: Slskd) -> [DownloadEntry] {
         var out: [DownloadEntry] = []
         if on(.soulseek) {
-            for j in slsk.jobs {
+            let lidarrs = lidarrSlskJobs
+            for j in slsk.jobs where !lidarrs.contains(j.id) {
                 let lib = albums.first { Self.looseMatch($0.title, j.name) }
                 out.append(DownloadEntry(
                     id: "slsk:" + j.id, source: .soulseek, title: lib?.title ?? Self.folderTitle(j.name),
@@ -77,6 +78,7 @@ extension Model {
                     remove: j.finished ? { [weak self] in self?.yt.remove(j.id) } : nil))
             }
         }
+        out += lidarrEntries()
         for j in jobs where j.source == .appleMusic {
             let failed: Bool = { if case .failed = j.state { return true }; return false }()
             out.append(DownloadEntry(
@@ -110,7 +112,7 @@ struct DownloadsView: View {
     @EnvironmentObject var slsk: Slskd
     @StateObject private var ui = DownloadsUI()
 
-    var sources: [PluginID] { [.soulseek, .appleMusic, .youtube].filter { model.on($0) } }
+    var sources: [PluginID] { [.lidarr, .soulseek, .appleMusic, .youtube].filter { model.on($0) } }
 
     var body: some View {
         let all = model.downloadEntries(slsk)
@@ -123,8 +125,8 @@ struct DownloadsView: View {
                 header(all)
                 if shown.isEmpty {
                     ContentUnavailableView(all.isEmpty ? "Nothing downloading" : "Nothing here", systemImage: "tray",
-                                           description: Text(sources.isEmpty ? "Turn on Soulseek or Apple Music in Settings › Plugins."
-                                                             : "Download from Soulseek or import from Apple Music; everything shows up here."))
+                                           description: Text(sources.isEmpty ? "Turn on Lidarr, Soulseek or Apple Music in Settings › Plugins."
+                                                             : "Get albums with Lidarr, download from Soulseek or import from Apple Music; everything shows up here."))
                         .padding(.top, 50)
                 }
                 // the ones that went wrong first, so one failure isn't buried among the finished ones
@@ -159,7 +161,7 @@ struct DownloadsView: View {
         .sheet(isPresented: Binding(get: { ui.ytDetail != nil }, set: { if !$0 { ui.ytDetail = nil } })) {
             if let id = ui.ytDetail { YTJobDetail(id: id) }
         }
-        .task { await slsk.refreshDownloads() }
+        .task { await slsk.refreshDownloads(); await model.lidarr.refreshQueue() }
     }
 
     func header(_ all: [DownloadEntry]) -> some View {
@@ -173,6 +175,7 @@ struct DownloadsView: View {
                 Text(sources.map { s in
                     let n = active.filter { $0.source == s }.count
                     if s == .soulseek { return "Soulseek: " + (slsk.error != nil ? "unreachable" : n > 0 ? "\(n) active" : slsk.configured ? "idle" : "not set up") }
+                    if s == .lidarr { return "Lidarr: " + (model.lidarr.error != nil ? "unreachable" : n > 0 ? "\(n) in its queue" : model.lidarr.configured ? "idle" : "not set up") }
                     return "\(s.name): " + (n > 0 ? "\(n) active" : "idle")
                 }.joined(separator: " · "))
                 .font(.callout).foregroundStyle(.secondary)
@@ -188,6 +191,9 @@ struct DownloadsView: View {
             } label: { Label("Clear Finished", systemImage: "checkmark.circle") }
             .glassMenu()
             .help("Remove finished downloads from the list")
+            if model.on(.lidarr) {
+                Button("Lidarr", systemImage: PluginID.lidarr.icon) { model.pane = .lidarr }.buttonStyle(.glass)
+            }
             if model.on(.soulseek) {
                 Button("Search Soulseek", systemImage: "magnifyingglass") { model.pane = .soulseek }.buttonStyle(.glass)
             }
@@ -255,24 +261,24 @@ struct DownloadCard: View {
                 }
                 Spacer()
                 if let r = entry.reimport {
-                    Button(entry.imported ? "Import Again" : "Import", systemImage: "square.and.arrow.down", action: r).buttonStyle(.glass)
+                    Button(action: r) { Label(entry.imported ? "Import Again" : "Import", systemImage: "square.and.arrow.down").frame(height: RowIcon.side) }.buttonStyle(.glass)
                         .opacity(quiet ? 0 : 1)
                 }
                 if let id = entry.ytJob {
-                    Button { ui.ytDetail = id } label: { Image(systemName: "info") }.buttonStyle(.glass).help("Details")
+                    Button { ui.ytDetail = id } label: { RowIcon("info") }.buttonStyle(.glass).help("Details")
                 }
                 if let c = entry.cancel {
-                    Button(action: c) { Image(systemName: "xmark") }.buttonStyle(.glass).help("Cancel")
+                    Button(action: c) { RowIcon("xmark") }.buttonStyle(.glass).help("Cancel")
                 }
                 if let r = entry.remove {
-                    Button(action: r) { Image(systemName: "trash") }.buttonStyle(.glass).help("Remove from the list (files stay)")
+                    Button(action: r) { RowIcon("trash") }.buttonStyle(.glass).help("Remove from the list (files stay)")
                         .opacity(quiet ? 0 : 1)
                 }
                 if !entry.files.isEmpty {
                     Button {
                         withAnimation(.snappy) { if open { ui.expanded.remove(entry.id) } else { ui.expanded.insert(entry.id) } }
                     } label: {
-                        Image(systemName: "chevron.down").rotationEffect(.degrees(open ? 180 : 0)).frame(width: 18)
+                        RowIcon("chevron.down").rotationEffect(.degrees(open ? 180 : 0))
                     }
                     .buttonStyle(.glass).help(open ? "Hide files" : "Show files")
                 }
@@ -424,4 +430,94 @@ struct YTJobDetail: View {
             Text(value).textSelection(.enabled).lineLimit(2)
         }
     }
+}
+
+// MARK: getting an album or a song: the same choices everywhere
+
+/// Where an album can come from, in the same order and words on every page and menu: Lidarr (its indexers,
+/// a release to pick), Soulseek (folders to pick), YouTube (song by song, so only when the album's songs are
+/// known: a Spotify album). `complete`: the library has some of its songs, so it's the rest that's wanted.
+struct GetAlbumItems: View {
+    @EnvironmentObject var model: Model
+    var artist, album: String
+    var mbid: String? = nil
+    var songs = 0                        // the whole album's songs, so Soulseek prefers folders with them all
+    var complete = false
+    var spotify: SpotifyAlbum? = nil
+    var then: (() -> Void)? = nil        // after picking one (a sheet closes, say)
+
+    var body: some View {
+        if model.on(.lidarr) {
+            Button(complete ? "Complete with Lidarr…" : "Get with Lidarr…", systemImage: PluginID.lidarr.icon) {
+                model.chooseWithLidarr(artist, album, mbid: mbid); then?()
+            }
+        }
+        if model.on(.soulseek) {
+            Button(complete ? "Complete on Soulseek…" : "Find on Soulseek…", systemImage: PluginID.soulseek.icon) {
+                model.findOnSoulseek(artist, album, songs: songs); then?()
+            }
+        }
+        if Self.youtube(model), let spotify {
+            Button(complete ? "Complete from YouTube" : "Get from YouTube", systemImage: PluginID.youtube.icon) {
+                Task { await model.albumFromYouTube(spotify) }; then?()
+            }
+        }
+    }
+
+    /// YouTube gets an album song by song, from its list on Spotify: that needs the Spotify account connected.
+    static func youtube(_ model: Model) -> Bool { model.on(.youtube) && model.spotifyAPI.direct }
+    /// Whether any of them is on (a button holding none would open an empty menu).
+    static func any(_ model: Model, spotify: Bool) -> Bool { model.on(.lidarr) || model.on(.soulseek) || (spotify && youtube(model)) }
+}
+
+/// GetAlbumItems behind one button, for page headers and list rows: "Get Album" or "Complete Album".
+struct GetAlbumButton: View {
+    @EnvironmentObject var model: Model
+    var artist, album: String
+    var mbid: String? = nil
+    var songs = 0
+    var complete = false
+    var spotify: SpotifyAlbum? = nil
+    var compact = false                  // a list row: just the icon
+    var then: (() -> Void)? = nil
+
+    var body: some View {
+        if GetAlbumItems.any(model, spotify: spotify != nil) {
+            Menu {
+                GetAlbumItems(artist: artist, album: album, mbid: mbid, songs: songs, complete: complete, spotify: spotify, then: then)
+            } label: {
+                if compact { Image(systemName: "arrow.down.circle") }
+                else { Label(complete ? "Complete Album" : "Get Album", systemImage: "arrow.down.circle") }
+            }
+            .menuIndicator(compact ? .hidden : .visible)
+            .fixedSize()
+            .help(complete ? "Get the songs this album is missing" : "Get this album with Lidarr, Soulseek or YouTube")
+        }
+    }
+}
+
+/// Where one song can come from, in the same order and words: Lidarr only gets whole albums, so it offers the
+/// song's album; Soulseek and YouTube get the song itself.
+struct SongSources: View {
+    @EnvironmentObject var model: Model
+    var artist, album: String
+    var soulseek: () -> Void
+    var youtube: () -> Void
+
+    var body: some View {
+        if model.on(.lidarr), !album.isEmpty {
+            Button("Get Its Album with Lidarr…", systemImage: PluginID.lidarr.icon) { model.chooseWithLidarr(artist, album) }
+        }
+        if model.on(.soulseek) { Button("Get Song from Soulseek", systemImage: PluginID.soulseek.icon, action: soulseek) }
+        if model.on(.youtube) { Button("Get Song from YouTube", systemImage: PluginID.youtube.icon, action: youtube) }
+    }
+}
+
+/// An icon-only row button's label: every one the same square, so the glass capsules around them line up
+/// with each other and with the text buttons, whatever the glyph's own height.
+struct RowIcon: View {
+    static let side: CGFloat = 18
+    var name: String
+    init(_ name: String) { self.name = name }
+    var body: some View { Image(systemName: name).frame(width: Self.side, height: Self.side) }
 }

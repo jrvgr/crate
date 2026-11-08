@@ -151,15 +151,16 @@ struct HealthView: View {
                                 }
                             }
                             Spacer()
-                            if issues.contains(.incomplete), model.on(.soulseek), let full = model.expectedSongs(a) {
-                                Button("Complete", systemImage: "arrow.down.circle") { model.findOnSoulseek(a.artist, a.title, songs: full) }.buttonStyle(.glass)
-                                    .help("Search Soulseek for a copy with all \(full) songs")
+                            if issues.contains(.incomplete), let full = model.expectedSongs(a) {
+                                GetAlbumButton(artist: a.artist, album: a.title, songs: full, complete: true)
+                                    .menuStyle(.button).buttonStyle(.glass)
                             }
                             if issues.contains(where: \.metadata) {
                                 Button("Find Metadata", systemImage: "sparkle.magnifyingglass") { model.lookupAlbum = a }.buttonStyle(.glass)
                                     .help("Look the album up on MusicBrainz and iTunes")
                             }
-                            Button("Edit Tags", systemImage: "pencil") { model.editAlbum = a }.buttonStyle(.glass).help("Edit the album's tags by hand")
+                            Button("Edit Tags", systemImage: "pencil") { model.editAlbum = a }.buttonStyle(.glass)
+                                .disabled(!model.tagsEditable(a)).help(model.tagsEditable(a) ? "Edit the album's tags by hand" : Model.serverOnlyHelp)
                             Button { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: a.folder) } label: { Image(systemName: "folder") }
                                 .buttonStyle(.glass).help("Show in Finder")
                         }

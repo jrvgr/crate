@@ -303,6 +303,7 @@ struct ArtistDetail: View {
         switch m {
         case .none: return "Add to iPod"
         case .onIPod: return "On iPod"
+        case .podOnly: return "Only on iPod"
         case .partial: return "Partly on iPod"
         case .adding: return "Adding to iPod"
         case .removing: return "Removing from iPod"

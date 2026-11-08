@@ -44,9 +44,23 @@ struct IPodArt: View {
         var setVolume: (Double) -> Void
         var rating: Int                                // 0…5 stars
         var rate: (Int) -> Void
+        var holdScrub: (Bool) -> Void = { _ in }       // the scrub bar pressed / let go
     }
 
     final class WheelState: ObservableObject {
+        /// The backlight, like the real one's: a touch, a turn, a new song or the pointer coming over the iPod
+        /// lights the screen and the buttons' red labels; it goes off again 10 s later.
+        @Published var backlit = true
+        private var dim: Task<Void, Never>?
+        @MainActor func light() {
+            if !backlit { withAnimation(.easeOut(duration: 0.15)) { backlit = true } }
+            dim?.cancel()
+            dim = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(10))
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeInOut(duration: 0.8)) { self?.backlit = false }
+            }
+        }
         var lastAngle: Double?
         var turned = 0.0
         @Published var dragging = false
@@ -121,7 +135,15 @@ struct IPodArt: View {
             .saturation(mode == .offline ? 0 : 1)
             .opacity(mode == .offline ? 0.6 : 1)
         }
+        .onAppear { wheelState.light() }
+        .onHover { if $0 { wheelState.light() } }
+        .onChange(of: mode) { wheelState.light() }
+        .onChange(of: nowPlaying?.title) { wheelState.light() }
+        .onChange(of: nowPlaying?.playing) { wheelState.light() }
     }
+
+    /// Lit: syncing and drops always (the real one stays lit while it syncs), otherwise until the backlight times out.
+    var backlight: Bool { mode.isSyncing || mode == .dropping || (mode != .offline && wheelState.backlit) }
 
     // MARK: parts
 
@@ -147,7 +169,7 @@ struct IPodArt: View {
         let bw = w * 0.68, bh = bw * 0.815          // bezel, 232:189 in the photos
         let inset = bw * 0.03
         let sw = bw - inset * 2, sh = sw / 1.25     // 160 × 128 LCD
-        let lit = mode != .offline
+        let on = mode != .offline, lit = backlight
         return ZStack(alignment: .top) {
             RoundedRectangle(cornerRadius: w * 0.022, style: .continuous)
                 .fill(LinearGradient(colors: [Color(white: 0.16), Color(white: 0.3)], startPoint: .top, endPoint: .bottom))
@@ -156,7 +178,7 @@ struct IPodArt: View {
                 Rectangle().fill(lit
                     ? LinearGradient(colors: [Color(red: 0.86, green: 0.9, blue: 0.96), Color(red: 0.76, green: 0.82, blue: 0.9)], startPoint: .top, endPoint: .bottom)
                     : LinearGradient(colors: [Color(red: 0.66, green: 0.69, blue: 0.66), Color(red: 0.6, green: 0.63, blue: 0.6)], startPoint: .top, endPoint: .bottom))
-                if lit, height > 70 {
+                if on, height > 70 {     // the LCD still reads with the backlight off, on the grey-green glass
                     lcd(u: sw / 160).transition(.opacity)
                 }
             }
@@ -216,7 +238,7 @@ struct IPodArt: View {
 
     /// A Now Playing line that goes somewhere in the library when clicked.
     func link<V: View>(_ v: V, help: String, _ go: @escaping (Controls) -> Void) -> some View {
-        v.highPriorityGesture(TapGesture().onEnded { if let c = controls { Clicker.press(); go(c) } },
+        v.highPriorityGesture(TapGesture().onEnded { if let c = controls { wheelState.light(); Clicker.press(); go(c) } },
                               including: controls == nil ? .subviews : .all)
             .pointerStyle(controls == nil ? nil : .link)
             .help(controls == nil ? "" : help)
@@ -372,8 +394,9 @@ struct IPodArt: View {
                 .frame(width: 150 * u, height: 7 * u)
                 .padding(.vertical, 4 * u).contentShape(.rect)          // easier to hit
                 .highPriorityGesture(DragGesture(minimumDistance: 0).onChanged { g in
+                    controls?.holdScrub(true)
                     controls?.seek(min(max(g.location.x / (150 * u), 0), 1))
-                }, including: controls == nil ? .subviews : .all)
+                }.onEnded { _ in controls?.holdScrub(false) }, including: controls == nil ? .subviews : .all)
                 .pointerStyle(controls == nil ? nil : .link)
                 .padding(.vertical, -4 * u)
                 HStack {
@@ -388,15 +411,15 @@ struct IPodArt: View {
     }
 
     /// The four touch buttons between screen and wheel; their labels glow red like the 3G's
-    /// backlight while syncing.
+    /// while the backlight is on.
     func buttons(w: CGFloat) -> some View {
-        let glow = mode.isSyncing || mode == .dropping
+        let glow = backlight
         let ink = glow ? Color(red: 1, green: 0.33, blue: 0.25) : Color(white: 0.7)
         let d = w * 0.17, lh = w * 0.024
         return HStack(spacing: w * 0.22 - d) {
             ForEach(0..<4, id: \.self) { i in
                 let action = controls.map { c in [c.previous, c.menu, c.toggle, c.next][i] }
-                Button { action?() } label: {
+                TouchKey(enabled: action != nil, action: { wheelState.light(); action?() }) {
                 ZStack {
                     Circle().fill(LinearGradient(colors: [Color(white: 0.88), Color(white: 0.97)], startPoint: .top, endPoint: .bottom))
                     Circle().strokeBorder(Color(white: 0.8), lineWidth: max(0.4, w * 0.004))
@@ -413,8 +436,7 @@ struct IPodArt: View {
                 .frame(width: d, height: d)
                 .contentShape(Circle())
                 }
-                .buttonStyle(TouchButton())
-                .disabled(action == nil)
+                .pointerStyle(action == nil ? nil : .link)       // like the wheel and the screen's links: shows they can be pressed
                 .help(["Previous", "Back", "Play/Pause", "Next"][i])
             }
         }
@@ -436,6 +458,7 @@ struct IPodArt: View {
             }
             Button {
                 guard controls != nil else { return }
+                wheelState.light()
                 withAnimation(.easeOut(duration: 0.2)) { wheelState.select(cover: coverPage) }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 5.1) { withAnimation(.easeOut(duration: 0.2)) { wheelState.objectWillChange.send() } }
             } label: {
@@ -466,6 +489,7 @@ struct IPodArt: View {
     /// scrubbing it goes through the song in steps of 2% instead, and while rating a star every 3 clicks.
     func turn(_ p: CGPoint, d: CGFloat) {
         guard let c = controls else { return }
+        wheelState.light()
         let angle = atan2(p.y - d / 2, p.x - d / 2)    // grows clockwise (y is down)
         defer { wheelState.lastAngle = angle }
         guard let last = wheelState.lastAngle else { return }
@@ -561,6 +585,22 @@ enum Clicker {
 }
 
 /// The touch buttons dim a little and click when pressed.
+/// A touch button that, unlike a Button, lets go of the mouse once it moves: the drag then moves the remote
+/// (a Button holds the mouse, so the remote only jumped once it was let go). Pressed: darker and a click; let go on it: the action.
+private struct TouchKey<Label: View>: View {
+    var enabled: Bool
+    var action: () -> Void
+    @ViewBuilder var label: Label
+    @GestureState private var down = false      // goes back by itself when the press ends or turns into a drag
+    var body: some View {
+        label
+            .brightness(down ? -0.06 : 0)
+            .onTapGesture { if enabled { action() } }
+            .simultaneousGesture(LongPressGesture(minimumDuration: 30, maximumDistance: 4).updating($down) { v, s, _ in s = enabled && v })
+            .onChange(of: down) { _, d in if d { Clicker.press() } }
+    }
+}
+
 private struct TouchButton: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -722,10 +762,12 @@ struct LiveIPod: View {
                       model.search = ""; model.pane = .artists
                       model.highlight = Model.releaseHighlight(album?.title ?? t.album); model.path = [.artist(album?.artist ?? t.artist)]
                   },
-                  seek: { player.seek($0 * player.length) },
+                  // a scrub held at the end stops a second short, so it doesn't skip to the next song
+                  seek: { player.seek(min($0 * player.length, max(player.length - 1, 0))) },
                   position: player.length > 0 ? player.time / player.length : 0,
                   volume: player.volume, setVolume: { player.setVolume($0) },
-                  rating: model.rating(t), rate: { model.rate(t, $0) })
+                  rating: model.rating(t), rate: { model.rate(t, $0) },
+                  holdScrub: { player.holdScrub($0) })
         }, frogger: model.froggerSticker, coverPage: true, art: art.image, lookingUp: lookup.on)
         .onChange(of: np) { _, v in if let v { last.value = v; last.track = t } }
         .onAppear { last.value = np; last.track = t; art.load(album, remote: player.remoteArt, model: model) }

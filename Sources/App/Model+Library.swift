@@ -61,6 +61,19 @@ extension Model {
 
     func isPodOnly(_ a: Album) -> Bool { !libraryIDs.contains(a.id) }
 
+    /// Songs of a library album that are on the iPod but not in the library (deleted from it, say): the album page
+    /// shows them faded, to get back from the iPod or delete from it at the next sync. Their keys are the iPod's.
+    func ghosts(_ a: Album) -> [LibTrack] {
+        guard !isPodOnly(a), let pod = podAlbums.first(where: { $0.id == a.id }) else { return [] }
+        let have = Set(a.tracks.map(\.key))
+        return pod.tracks.filter { !have.contains(aliases[$0.key] ?? $0.key) }
+    }
+
+    /// Whether Crate can change the album's files: some are on this Mac, not only on the iPod or only on the
+    /// Subsonic server (whose API can't change tags, covers or files).
+    func filesHere(_ a: Album) -> Bool { !isPodOnly(a) && a.tracks.contains { !Subsonic.serverOnly($0.path) } }
+    static let serverOnlyHelp = "Only on the Subsonic server: its files can't be changed from Crate (set up Tagr in Settings › Plugins › Subsonic to edit its tags)"
+
     static func loose(_ s: String) -> String { s.lowercased().filter { $0.isLetter || $0.isNumber } }
 
     func rebuild() {
@@ -140,7 +153,7 @@ extension Model {
         // the import folder is scanned directly too, so new files show up before OwnTone has indexed them;
         // when OwnTone doesn't answer, its whole music folder (the import folder's parent) is, so nothing goes missing
         let ownToneRoot = on(.ownTone) && libraryError != nil ? [(importRoot as NSString).deletingLastPathComponent] : []
-        let subsonicRoot = serverFailed ? [subsonic.musicFolder] : []
+        let subsonicRoot = serverFailed && subsonic.useShare ? [subsonic.musicFolder] : []
         let fromServer = tracks.count
         for f in folders + [importRoot] + ownToneRoot + subsonicRoot where !f.isEmpty {
             updateJob(job) { $0.detail = "Scanning \((f as NSString).lastPathComponent)" }
@@ -163,6 +176,7 @@ extension Model {
         libTracks = tracks
         if !tracks.isEmpty { Task.detached { Store.save("library.json", tracks) } }     // for the next launch
         rebuild()
+        if on(.subsonic), !serverFailed { Task { await moveRatingsToServer() } }
         await showCachedArtwork()
         playlistTracks = [:]
         var lists: [OTPlaylist] = on(.ownTone) ? ((try? await OwnTonePlaylists.all(ownToneURL)) ?? []) : []

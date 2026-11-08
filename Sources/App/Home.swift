@@ -458,9 +458,10 @@ struct MaintenanceRow<Actions: View>: View {
 extension View {
     /// A Menu drawn as a glass button, like the buttons around it: Menu ignores `.buttonStyle(.glass)` and
     /// comes out as a flat grey button.
-    func glassMenu(indicator: Bool = true) -> some View {
+    /// `large`: beside `.controlSize(.large)` glass buttons.
+    func glassMenu(indicator: Bool = true, large: Bool = false) -> some View {
         menuStyle(.button).buttonStyle(.plain).menuIndicator(indicator ? .visible : .hidden)
-            .padding(.horizontal, 10).padding(.vertical, 5)
+            .padding(.horizontal, large ? 14 : 10).padding(.vertical, large ? 8 : 5)
             .glassEffect(.regular.interactive(), in: .capsule)
             .fixedSize()
     }
@@ -680,10 +681,7 @@ struct SongsView: View {
                 // on the iPod or not is the usual state: only on the selected rows (and clickable only where it shows);
                 // queued, partly and removing always stand out, as on album covers
                 let m = model.songMark(t), shown = (m != .none && m != .onIPod) || ui.selection.contains(t.id)
-                Button { model.toggleSong(t) } label: {
-                    Image(systemName: m.icon.map { $0 == "checkmark" ? "checkmark.circle.fill" : $0 + ".circle.fill" } ?? "plus.circle")
-                        .foregroundStyle(m == .none ? AnyShapeStyle(.secondary) : AnyShapeStyle(m.tint))
-                }
+                Button { model.toggleSong(t) } label: { SongMark(mark: m) }
                 .buttonStyle(.plain)
                 .help(m == .none ? "Add this song to the iPod" : m.help)
                 .opacity(shown ? 1 : 0).allowsHitTesting(shown)
@@ -697,7 +695,7 @@ struct SongsView: View {
                     }
                     .frame(width: 26, height: 26).clipShape(.rect(cornerRadius: 4, style: .continuous))
                     Text(t.title).lineLimit(1)
-                    if model.player.current?.id == t.id { Image(systemName: "speaker.wave.2.fill").font(.caption).foregroundStyle(.tint) }
+                    if model.player.current?.id == t.id { PlayingBars(playing: model.player.playing) }
                 }
             }
             .width(min: 160, ideal: 280).customizationID("title").disabledCustomizationBehavior(.visibility)
@@ -737,6 +735,8 @@ struct SongsView: View {
             Divider()
             if ids.count == 1, let a = album(ids.first) {
                 Button("Go to Album", systemImage: "square.stack") { model.path.append(.album(a)) }
+                Button("Go to Artist", systemImage: "music.microphone") { model.path.append(.artist(a.artist)) }
+                Divider()
                 AlbumMenu(album: a)
             }
         } primaryAction: { ids in

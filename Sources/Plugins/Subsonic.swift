@@ -27,13 +27,16 @@ enum SubsonicError: Error, LocalizedError {
 }
 
 /// A song on the server, by library path.
-struct SubsonicSong: Hashable { var id, albumID, cover: String }
+struct SubsonicSong: Hashable { var id, albumID, cover: String; var rating = 0; var serverPath = "" }     // serverPath: as the server reports it     // rating: the server's stars, 0 for none
 
 @MainActor
 final class Subsonic: ObservableObject {
     @AppStorage("subsonicURL") var url = ""
     @AppStorage("subsonicUser") var user = ""
     @AppStorage("subsonicMusicFolder") var musicFolder = ""      // learnt from the paths the server reports (see library())
+    /// false: everything goes through the API (songs are downloaded when a sync needs them), no share needed;
+    /// changing the files themselves (tags, covers, deleting) then isn't possible from Crate.
+    @AppStorage("subsonicUseShare") var useShare = true
 
     @Published var status = ""
     @Published var error: String?
@@ -49,7 +52,8 @@ final class Subsonic: ObservableObject {
 
     /// Library path → the server's song, from the last load.
     private(set) var songs: [String: SubsonicSong] = [:]
-    private(set) var rawPaths: [String] = []         // a few paths as the server reports them (--subsonic-check)
+    private(set) var rawPaths: [String] = []
+    private(set) var serverRoot = ""                 // where the server's absolute paths start (empty when it reports relative ones)         // a few paths as the server reports them (--subsonic-check)
     private var paths: [String: String] = [:]          // song id → library path
     /// Album + title → the server's song: matches files Crate found itself when the server doesn't report real paths.
     private var byKey: [String: SubsonicSong] = [:]
@@ -61,6 +65,10 @@ final class Subsonic: ObservableObject {
     nonisolated static var cache: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("nl.jrvgr.crate/Subsonic")
     }
+    nonisolated static let cachePrefix = cache.path + "/"
+
+    /// A library song Crate only has through the API: its file is (or will be) a download in the cache, not one it can change.
+    nonisolated static func serverOnly(_ path: String) -> Bool { path.hasPrefix(cachePrefix) }
 
     var base: String { url.hasSuffix("/") ? String(url.dropLast()) : url }
     var configured: Bool { !url.isEmpty && !user.isEmpty && !password.isEmpty }
@@ -79,9 +87,17 @@ final class Subsonic: ObservableObject {
     }
 
     /// One call; the "subsonic-response" object, or the server's error.
-    func call(_ method: String, _ params: [URLQueryItem] = []) async throws -> [String: Any] {
+    /// `post`: the parameters go in a form body instead of the URL (a long playlist's song ids don't fit in one).
+    func call(_ method: String, _ params: [URLQueryItem] = [], post: Bool = false) async throws -> [String: Any] {
         guard configured, let u = endpoint(method, params) else { throw SubsonicError.notConfigured }
         var r = URLRequest(url: u); r.timeoutInterval = 20
+        if post, var c = URLComponents(url: u, resolvingAgainstBaseURL: false), let body = c.percentEncodedQuery {
+            c.query = nil
+            if let bare = c.url { r.url = bare }
+            r.httpMethod = "POST"
+            r.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            r.httpBody = Data(body.utf8)
+        }
         let d: Data, resp: URLResponse
         do { (d, resp) = try await URLSession.shared.data(for: r) }
         catch { throw SubsonicError.unreachable(error.localizedDescription) }
@@ -122,11 +138,12 @@ final class Subsonic: ObservableObject {
         if raw.isEmpty { raw = try await songsByAlbum() }
         if raw.isEmpty { throw SubsonicError.noSongs }
         // the server's music folder as this Mac sees it: where all the paths it reports start (when it reports real paths)
-        if musicFolder.isEmpty, let root = Self.commonFolder(raw.compactMap { $0["path"] as? String }.filter { $0.hasPrefix("/") }) {
+        if useShare, musicFolder.isEmpty, let root = Self.commonFolder(raw.compactMap { $0["path"] as? String }.filter { $0.hasPrefix("/") }) {
             musicFolder = LibraryLoader.localPath(root)
         }
         rawPaths = raw.prefix(5).map { ($0["path"] as? String) ?? "" }
-        let folder = musicFolder, cache = Self.cache.path
+        serverRoot = Self.commonFolder(raw.compactMap { $0["path"] as? String }.filter { $0.hasPrefix("/") }) ?? ""
+        let folder = useShare ? musicFolder : "", cache = Self.cache.path
         let found = await Task.detached { Self.tracks(raw, folder: folder, cache: cache) }.value
         songs = Dictionary(found.map { ($0.0.path, $0.1) }, uniquingKeysWith: { a, _ in a })
         paths = Dictionary(found.map { ($0.1.id, $0.0.path) }, uniquingKeysWith: { a, _ in a })
@@ -176,6 +193,7 @@ final class Subsonic: ObservableObject {
 
     /// Server songs → library tracks. A song is used from the share when its album's first file is
     /// there (one look per folder, not per song); otherwise it gets a path in the download cache.
+    /// `folder` empty: API only, every song gets its download spot.
     nonisolated static func tracks(_ raw: [[String: Any]], folder: String, cache: String) -> [(LibTrack, SubsonicSong)] {
         var listings: [String: [String]] = [:]      // each folder's files, read once
         let bare = { (x: String) in x.lowercased().filter { $0.isLetter || $0.isNumber } }
@@ -186,7 +204,7 @@ final class Subsonic: ObservableObject {
             let p = str("path")
             let local = p.hasPrefix("/") ? LibraryLoader.localPath(p) : folder + "/" + p
             let dir = (local as NSString).deletingLastPathComponent
-            if listings[dir] == nil { listings[dir] = p.isEmpty ? [] : (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] }
+            if listings[dir] == nil { listings[dir] = p.isEmpty || folder.isEmpty ? [] : (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] }
             let files = listings[dir]!
             // without Report Real Path the server makes up file names ("01-01 - Title.mp3"): the folder is right, so
             // take the file in it whose name has the title
@@ -208,7 +226,7 @@ final class Subsonic: ObservableObject {
             let t = LibTrack(title: str("title"), artist: albumArtist, album: str("album"), genre: str("genre"),
                              trackNumber: num("track"), discNumber: num("discNumber"), year: num("year"),
                              lengthMs: num("duration") * 1000, path: path, trackArtist: str("artist"), added: added)
-            return (t, SubsonicSong(id: id, albumID: albumID, cover: str("coverArt")))
+            return (t, SubsonicSong(id: id, albumID: albumID, cover: str("coverArt"), rating: num("userRating"), serverPath: p))
         }
     }
 
@@ -241,6 +259,46 @@ final class Subsonic: ObservableObject {
                            artworkPath: coverURL(str("coverArt"))?.absoluteString ?? "",
                            lengthMs: ((s["duration"] as? Int) ?? 0) * 1000, path: paths[str("id")] ?? "")
         }
+    }
+
+    /// Puts these songs in the playlist, in this order (createPlaylist with an id replaces its songs).
+    func setSongs(_ songIDs: [String], ofPlaylist id: String) async throws {
+        _ = try await call("createPlaylist", [.init(name: "playlistId", value: id)] + songIDs.map { .init(name: "songId", value: $0) }, post: true)
+    }
+
+    func renamePlaylist(_ id: String, to name: String) async throws {
+        _ = try await call("updatePlaylist", [.init(name: "playlistId", value: id), .init(name: "name", value: name)])
+    }
+
+    func deletePlaylist(_ id: String) async throws {
+        _ = try await call("deletePlaylist", [.init(name: "id", value: id)])
+    }
+
+    /// Stars (0 clears them), on the server too, so other clients and the next load see them.
+    func setRating(_ songID: String, _ stars: Int) async throws {
+        _ = try await call("setRating", [.init(name: "id", value: songID), .init(name: "rating", value: "\(stars)")])
+    }
+
+    /// The song's path relative to the server's music folder (for Tagr, which sees the same folder).
+    func relativePath(_ s: SubsonicSong) -> String {
+        let p = s.serverPath
+        guard p.hasPrefix("/") else { return p }
+        return !serverRoot.isEmpty && p.hasPrefix(serverRoot + "/") ? String(p.dropFirst(serverRoot.count + 1)) : String(p.dropFirst())
+    }
+
+    /// The song's id for a library path.
+    func id(forPath path: String) -> String? { songs[path]?.id }
+
+    /// The server's stars for a library song; nil when it isn't the server's.
+    func rating(of t: LibTrack) -> Int? { song(for: t)?.rating }
+
+    /// Rates the song on the server, and in the copy Crate keeps until the next load.
+    func rate(_ t: LibTrack, _ stars: Int) async throws {
+        guard let s = song(for: t) else { return }
+        try await setRating(s.id, stars)
+        for (k, v) in songs where v.id == s.id { songs[k]?.rating = stars }
+        for (k, v) in byKey where v.id == s.id { byKey[k]?.rating = stars }
+        objectWillChange.send()
     }
 
     // MARK: files

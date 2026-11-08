@@ -131,7 +131,7 @@ struct SearchView: View {
                                         Text("\(t.trackArtist.isEmpty ? t.artist : t.trackArtist) — \(t.album)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                                     }
                                     Spacer()
-                                    if keys.contains(t.key) { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).help("On the iPod") }
+                                    if keys.contains(t.key) { SongMark(mark: .onIPod) }
                                     Text(t.lengthMs > 0 ? duration(t.lengthMs) : "").monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
                                 }
                                 .padding(.horizontal, 14).padding(.vertical, 6)
@@ -173,10 +173,8 @@ struct SearchView: View {
                                         Text(a.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                                     }
                                     Spacer()
-                                    if model.on(.soulseek) {
-                                        Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(a.artist, a.name) }
-                                            .buttonStyle(.glass).controlSize(.small)
-                                    }
+                                    GetAlbumButton(artist: a.artist, album: a.name, spotify: a)
+                                        .menuStyle(.button).buttonStyle(.glass).controlSize(.small)
                                 }
                                 .padding(.horizontal, 14).padding(.vertical, 6)
                             }

@@ -6,7 +6,7 @@ import Security
 // all of them off Crate is a plain folder → iPod manager.
 
 enum PluginID: String, CaseIterable, Identifiable, Codable {
-    case ownTone, subsonic, musicAssistant, spotify, soulseek, appleMusic, youtube
+    case ownTone, subsonic, musicAssistant, spotify, soulseek, lidarr, appleMusic, youtube
     var id: String { rawValue }
 
     var name: String {
@@ -16,6 +16,7 @@ enum PluginID: String, CaseIterable, Identifiable, Codable {
         case .musicAssistant: return "Music Assistant"
         case .spotify: return "Spotify"
         case .soulseek: return "Soulseek"
+        case .lidarr: return "Lidarr"
         case .appleMusic: return "Apple Music"
         case .youtube: return "YouTube"
         }
@@ -28,6 +29,7 @@ enum PluginID: String, CaseIterable, Identifiable, Codable {
         case .musicAssistant: return "hifispeaker.2.fill"
         case .spotify: return "dot.radiowaves.left.and.right"
         case .soulseek: return "arrow.down.circle"
+        case .lidarr: return "tray.and.arrow.down"
         case .appleMusic: return "icloud"
         case .youtube: return "play.rectangle"
         }
@@ -40,6 +42,7 @@ enum PluginID: String, CaseIterable, Identifiable, Codable {
         case .musicAssistant: return .blue
         case .spotify: return Color(red: 0.11, green: 0.73, blue: 0.33)
         case .soulseek: return .orange
+        case .lidarr: return .green
         case .appleMusic: return .pink
         case .youtube: return .red
         }
@@ -52,6 +55,7 @@ enum PluginID: String, CaseIterable, Identifiable, Codable {
         case .musicAssistant: return "Plays on Music Assistant's speakers and groups instead of this Mac; the iPod's buttons and the menu bar control them."
         case .spotify: return "Your saved Spotify albums and playlists: see which ones you have files for, copy playlists to the iPod, find the rest on Soulseek."
         case .soulseek: return "Searches Soulseek through your slskd server, downloads albums and imports them into the library."
+        case .lidarr: return "Hands albums to your Lidarr server, which finds and files them; its downloads show in Downloads."
         case .appleMusic: return "Imports iTunes Match albums from this Mac's Music app (256 kbps AAC, no DRM)."
         case .youtube: return "Searches YouTube and downloads songs, playlists, Spotify albums or a playlist's missing songs with yt-dlp, tagged and with covers."
         }
@@ -65,7 +69,7 @@ enum PluginID: String, CaseIterable, Identifiable, Codable {
 enum PluginStore {
     static let key = "enabledPlugins"
     static func load() -> Set<PluginID> {
-        guard let raw = UserDefaults.standard.array(forKey: key) as? [String] else { return Set(PluginID.allCases).subtracting([.youtube, .ownTone, .musicAssistant]) }
+        guard let raw = UserDefaults.standard.array(forKey: key) as? [String] else { return Set(PluginID.allCases).subtracting([.youtube, .ownTone, .musicAssistant, .lidarr]) }
         return Set(raw.compactMap(PluginID.init(rawValue:)))
     }
     static func save(_ s: Set<PluginID>) { UserDefaults.standard.set(s.map(\.rawValue).sorted(), forKey: key) }

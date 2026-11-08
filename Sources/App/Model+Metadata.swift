@@ -23,8 +23,15 @@ extension Model {
 
     /// Uses an image you dropped on an album's cover as its cover.jpg.
     func setCover(_ data: Data, for album: Album) async {
-        guard NSImage(data: data) != nil, !isPodOnly(album) else { notify("That isn't an image"); return }
+        guard let img = NSImage(data: data), !isPodOnly(album) else { notify("That isn't an image"); return }
         let folder = album.folder
+        guard filesHere(album) else {           // only on the Subsonic server: embedded through Tagr, else shown in Crate only
+            artwork[album.id] = img
+            guard viaTagr else { notify("New cover for \(album.title), shown in Crate only (the album is only on the Subsonic server)"); return }
+            let r = await saveTags(album.tracks.map { (path: $0.path, edit: TagEdit(cover: data)) })
+            notify(r.failures.isEmpty ? "New cover for \(album.title)" : "New cover for \(album.title); \(r.failures.count) songs failed: \(r.failures[0])")
+            return
+        }
         guard await Self.writeCover(data, in: folder) else { notify("Couldn't write cover.jpg in \(folder)"); return }
         artwork[album.id] = await offMain { ArtCache.storeAlbum(data, folder: folder) ?? NSImage(data: data) }
         await rescanServers()
@@ -67,7 +74,14 @@ extension Model {
     func writeTags(_ album: Album, year: Int, genre: String) async -> (files: Int, error: String?) {
         let all = album.tracks.map(\.path)
         let paths = await offMain { all.filter { TagWriter.canWrite($0) && FileManager.default.fileExists(atPath: $0) } }
-        guard !paths.isEmpty, year > 0 || !genre.isEmpty else { return (0, nil) }
+        guard year > 0 || !genre.isEmpty else { return (0, nil) }
+        // the Subsonic server's songs that aren't here: through Tagr
+        let remote = viaTagr ? album.tracks.map(\.path).filter(Subsonic.serverOnly) : []
+        if !remote.isEmpty {
+            let r = await saveTags(remote.map { ($0, TagEdit(genre: genre.isEmpty ? nil : genre, year: year > 0 ? year : nil)) })
+            if paths.isEmpty { return (r.written.count, r.failures.first) }
+        }
+        guard !paths.isEmpty else { return (0, nil) }
         let result = await Task.detached { () -> (Int, String?) in
             var n = 0, err: String?
             for p in paths {
@@ -78,5 +92,61 @@ extension Model {
         }.value
         if result.0 > 0 { await rescanServers() }
         return result
+    }
+}
+
+// MARK: writing tags: here or through Tagr
+
+extension Model {
+    /// Tagr writes tags for the Subsonic server's songs that aren't on a share here.
+    var viaTagr: Bool { on(.subsonic) && tagr.enabled && tagr.configured }
+
+    /// Whether the album's tags can be changed: its files are here, or Tagr writes them on the server.
+    func tagsEditable(_ a: Album) -> Bool { filesHere(a) || (!isPodOnly(a) && viaTagr) }
+
+    /// Writes tag edits: files on this Mac directly, the Subsonic server's songs through Tagr (then the server
+    /// is asked to rescan, and Crate's copy of those songs shows the new tags right away). The paths written,
+    /// and what failed.
+    func saveTags(_ edits: [(path: String, edit: TagEdit)], each: (() -> Void)? = nil) async -> (written: [String], failures: [String]) {
+        var written: [String] = [], failures: [String] = []
+        tagr.forget()
+        for (p, e) in edits {
+            defer { each?() }
+            let name = libraryTrack(path: p)?.track.title ?? (p as NSString).lastPathComponent
+            if Subsonic.serverOnly(p) {
+                guard viaTagr, let t = libraryTrack(path: p)?.track, let s = subsonic.songs[p] else {
+                    failures.append("\(name): only on the Subsonic server"); continue
+                }
+                do {
+                    let song = try await tagr.find(t, serverPath: subsonic.relativePath(s))
+                    try await tagr.update(song.id, e)
+                    written.append(p)
+                } catch { failures.append("\(name): \(error.localizedDescription)") }
+            } else {
+                guard TagWriter.canWrite(p) else { continue }
+                let err = await offMain { () -> String? in
+                    do { _ = try TagWriter.write(p, e); return nil } catch { return error.localizedDescription }
+                }
+                if let err { failures.append("\(name): \(err)") } else { written.append(p) }
+            }
+        }
+        let remote = Set(written.filter(Subsonic.serverOnly))
+        if !remote.isEmpty {
+            let byPath = Dictionary(edits.map { ($0.path, $0.edit) }, uniquingKeysWith: { _, b in b })
+            for i in libTracks.indices where remote.contains(libTracks[i].path) {
+                let e = byPath[libTracks[i].path]!
+                if let v = e.title { libTracks[i].title = v }
+                if let v = e.artist { libTracks[i].trackArtist = v }
+                if let v = e.albumArtist { libTracks[i].artist = v }
+                if let v = e.album { libTracks[i].album = v }
+                if let v = e.genre { libTracks[i].genre = v }
+                if let v = e.year { libTracks[i].year = v }
+                if let v = e.track { libTracks[i].trackNumber = v }
+                if let v = e.disc { libTracks[i].discNumber = v }
+            }
+            rebuild()
+            Task { await rescanServers() }
+        }
+        return (written, failures)
     }
 }

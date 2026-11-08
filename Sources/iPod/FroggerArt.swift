@@ -98,8 +98,10 @@ enum FroggerArt {
             _ = try FileManager.default.replaceItemAt(dst, withItemAt: tmp)
         } catch {
             try? FileManager.default.removeItem(at: tmp)
+            await prepared.clear()
             return 0
         }
+        await prepared.clear()                                    // a later write checks the covers again
         return images.count
     }
 
@@ -116,14 +118,58 @@ enum FroggerArt {
         return d
     }()
 
-    /// The track's picture with `look`, from the cache when its album's stamp still matches (or the library can't be
-    /// reached right now), else made from the cover and cached.
+    /// The track's picture with `look`: the one `prepare` checked for this sync, else `fresh`.
     static func picture(_ t: PodTrack, ipod: IPodInfo, albums: [Album], look: Look) async -> Data? {
-        let album = libraryAlbum(t, albums)
-        let id = album.map { "lib:" + $0.folder } ?? "pod:\(t.location)|\(t.size)"     // an iPod file's picture never changes
-        let stamp = album.map(folderStamp) ?? ""                                        // nil: the album's folder isn't there now
+        let album = libraryAlbum(t, albums), podID = "pod:\(t.location)|\(t.size)"
+        if let px = await prepared.get(cacheKey(album, podID, look)) { return px }
+        return await fresh(album, podID, look) { await cover(t, ipod: ipod, albums: albums) }
+    }
+
+    /// Pictures checked ahead of the Cover art phase (`prepare`), by cache key; nil inside: checked, no cover.
+    actor Prepared {
+        private var px: [String: Data?] = [:]
+        func get(_ k: String) -> Data?? { px[k] }
+        func set(_ k: String, _ v: Data?) { px[k] = v }
+        func clear() { px = [:] }
+    }
+    static let prepared = Prepared()
+
+    /// Checks every album's picture while the sync is still removing, copying and converting songs (one look at
+    /// the share per album, and the reading and dithering of covers that are new or changed), so the Cover art
+    /// phase only puts the file together: `tracks` are the iPod's songs, `adding` the library albums going on it.
+    /// `write` uses what this found and forgets it afterwards; cancelling stops it early (the rest is made then).
+    static func prepare(_ tracks: [PodTrack], adding: [Album], ipod: IPodInfo, albums: [Album]) async {
+        await prepared.clear()
+        let look = Look.saved
+        var seen = Set<String>()
+        for t in tracks where t.raw != nil && seen.insert(albumKey(t)).inserted {
+            if Task.isCancelled { return }
+            let album = libraryAlbum(t, albums), podID = "pod:\(t.location)|\(t.size)"
+            let px = await fresh(album, podID, look) { await cover(t, ipod: ipod, albums: albums) }
+            await prepared.set(cacheKey(album, podID, look), px)
+        }
+        for a in adding where seen.insert(a.artist.lowercased() + "\u{1f}" + a.title.lowercased()).inserted {
+            if Task.isCancelled { return }
+            // its songs aren't on the iPod yet: the library's cover (which includes the art in its files) is all there is
+            let px = await fresh(a, "", look) {
+                if let d = await LibraryLoader.artwork(for: a) { return d }
+                return try? Data(contentsOf: ArtCache.file("album:" + a.folder))
+            }
+            await prepared.set(cacheKey(a, "", look), px)
+        }
+    }
+
+    static func cacheKey(_ album: Album?, _ podID: String, _ look: Look) -> String {
         let enc = JSONEncoder(); enc.outputFormatting = .sortedKeys
-        let key = id + "|" + (String(data: (try? enc.encode(look)) ?? Data(), encoding: .utf8) ?? "") + "|\(size)"
+        let id = album.map { "lib:" + $0.folder } ?? podID          // an iPod file's picture never changes
+        return id + "|" + (String(data: (try? enc.encode(look)) ?? Data(), encoding: .utf8) ?? "") + "|\(size)"
+    }
+
+    /// The picture with `look`, from the disk cache when its album's stamp still matches (or the library can't be
+    /// reached right now), else made from `cover()` and cached.
+    static func fresh(_ album: Album?, _ podID: String, _ look: Look, cover: () async -> Data?) async -> Data? {
+        let stamp = album.map(folderStamp) ?? ""                                        // nil: the album's folder isn't there now
+        let key = cacheKey(album, podID, look)
         let file = cacheDir.appendingPathComponent(SHA256.hash(data: Data(key.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined())
         if let c = try? Data(contentsOf: file), c.count >= 2 {
             let n = Int(c[c.startIndex]) | Int(c[c.startIndex + 1]) << 8
@@ -132,7 +178,7 @@ enum FroggerArt {
                 return px.isEmpty ? nil : Data(px)
             }
         }
-        let px = await cover(t, ipod: ipod, albums: albums).flatMap { pixels($0, look: look) }
+        let px = await cover().flatMap { pixels($0, look: look) }
         if let stamp, px != nil || album != nil {         // made offline (from Crate's art cache): not kept, to try again
             let s = Data(stamp.utf8)
             try? (Data([UInt8(s.count & 0xff), UInt8(s.count >> 8 & 0xff)]) + s + (px ?? Data())).write(to: file)

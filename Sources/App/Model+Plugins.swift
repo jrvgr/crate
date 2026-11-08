@@ -18,7 +18,7 @@ extension Model {
     /// folder, else ~/Music/Crate, so Crate works on its own with no server or share set up.
     var importRoot: String {
         if !importFolder.isEmpty { return importFolder }
-        if on(.subsonic), !subsonic.musicFolder.isEmpty { return subsonic.musicFolder }
+        if on(.subsonic), subsonic.useShare, !subsonic.musicFolder.isEmpty { return subsonic.musicFolder }
         return folders.first ?? Self.localMusic
     }
     nonisolated static var localMusic: String {
@@ -29,7 +29,7 @@ extension Model {
     /// With OwnTone the import folder sat inside its music folder, so that counts too.
     var libraryRoots: [String] {
         var r = folders + [importRoot]
-        if on(.subsonic) { r.append(subsonic.musicFolder) }
+        if on(.subsonic), subsonic.useShare { r.append(subsonic.musicFolder) }
         if on(.ownTone) { r.append((importRoot as NSString).deletingLastPathComponent) }
         var seen = Set<String>()
         return r.filter { !$0.isEmpty && seen.insert($0).inserted }

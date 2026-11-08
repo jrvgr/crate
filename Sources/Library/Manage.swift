@@ -21,6 +21,9 @@ extension Model {
     }
 
     func trash(_ tracks: [LibTrack]) async {
+        // songs only on the Subsonic server can't be deleted from here (its API can't delete files)
+        let tracks = tracks.filter { !Subsonic.serverOnly($0.path) }
+        guard !tracks.isEmpty else { notify(Model.serverOnlyHelp); return }
         let paths = tracks.map(\.path)
         let folders = Set(paths.map { ($0 as NSString).deletingLastPathComponent }), roots = trashRoots
         let (failed, gone) = await offMain { () -> (Int, Set<String>) in
@@ -35,9 +38,8 @@ extension Model {
             }
             return (failed, Set(paths.filter { !FileManager.default.fileExists(atPath: $0) }))
         }
-        // their copies on the iPod go at the next sync too
+        // their copies on the iPod stay, as ghosts on the album page: get them back or delete them there
         let fromPod = tracks.filter { gone.contains($0.path) && podKeys.contains($0.key) }
-        songsToRemove.formUnion(fromPod.map { podKey($0.key) })
         songsToAdd.subtract(gone)
         libTracks.removeAll { gone.contains($0.path) }
         let ids = Set(albums.map(\.id))
@@ -45,7 +47,7 @@ extension Model {
         toAdd = toAdd.filter { id in albums.contains { $0.id == id } || !ids.contains(id) }
         await rescanServers()
         notify("Deleted \(paths.count - failed) file\(paths.count - failed == 1 ? "" : "s")" + (failed > 0 ? ", \(failed) couldn't be moved" : "")
-               + (fromPod.isEmpty ? "" : "; \(fromPod.count) leave the iPod on the next sync"))
+               + (fromPod.isEmpty ? "" : "; \(fromPod.count) still on the iPod: get \(fromPod.count == 1 ? "it" : "them") back or delete \(fromPod.count == 1 ? "it" : "them") on the album page"))
     }
 
     /// The .crate-trash folders on the shares: their size, and emptying them for good.
@@ -151,19 +153,13 @@ struct MergeSheet: View {
         s.working = true; s.error = nil
         // a server song that isn't on this Mac (not on the share, not downloaded) has no file to write;
         // the server keeps its own tags for it
+        let tagr = model.viaTagr          // the server's songs that aren't here: through Tagr, when it's set up
         let tracks = await Task.detached { [all = albums.flatMap(\.tracks)] in
-            all.filter { TagWriter.canWrite($0.path) && FileManager.default.fileExists(atPath: $0.path) }
+            all.filter { Subsonic.serverOnly($0.path) ? tagr : TagWriter.canWrite($0.path) && FileManager.default.fileExists(atPath: $0.path) }
         }.value
         let e = TagEdit(albumArtist: s.artist, album: s.title)
-        var failed: [String] = []
         s.phase = "Writing album tags"; s.done = 0; s.total = tracks.count
-        for t in tracks {
-            defer { s.done += 1 }
-            let p = t.path
-            if let err = await Task.detached(operation: { () -> String? in
-                do { try TagWriter.write(p, e); return nil } catch { return error.localizedDescription }
-            }).value { failed.append(err) }
-        }
+        var failed = await model.saveTags(tracks.map { (path: $0.path, edit: e) }) { s.done += 1 }.failures
         let wasAdding = albums.contains { model.toAdd.contains($0.id) }
         s.phase = "Reading the songs back in"; s.total = 0
         await model.refreshFiles(tracks.map(\.path), oldID: albums.first?.id, rescan: false)

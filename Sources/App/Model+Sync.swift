@@ -186,6 +186,12 @@ extension Model {
                 if let a = libraryTrack(key: t.key)?.album { work.append((a, t)) }
             }
         }
+        // Frogger's cover art is checked now, while songs are copied, so the Cover art phase at the end is quick
+        let artPrep: Task<Void, Never>? = froggerFeatures ? {
+            let podTracks = db.tracks, adding = Array(Set(work.map(\.0))), all = albums
+            return Task.detached(priority: .utility) { await FroggerArt.prepare(podTracks, adding: adding, ipod: ipod, albums: all) }
+        }() : nil
+        defer { artPrep?.cancel() }
         let remote = work.filter { subsonic.needsDownload($0.1.path) }     // server songs this Mac has no file for
         if !remote.isEmpty {
             syncPhase = "Downloading from Subsonic"; syncTotal = remote.count; syncDone = 0
@@ -288,8 +294,10 @@ extension Model {
             let want = wantsHidden(db.tracks[i].key, rule)
             if db.tracks[i].hidden != want { db.setHidden(i, want) }
         }
-        for i in db.tracks.indices {        // ratings set in Crate
-            if let r = ratings[aliases[db.tracks[i].key] ?? db.tracks[i].key] { db.setRating(i, r) }
+        for i in db.tracks.indices {        // ratings set in Crate or on the Subsonic server
+            let k = aliases[db.tracks[i].key] ?? db.tracks[i].key
+            if let lib = libraryTrack(key: k)?.track, let r = serverRating(lib), r > 0 { db.setRating(i, r) }
+            else if let r = ratings[k] { db.setRating(i, r) }
         }
         let solo = Set(db.tracks.map { $0.artist.lowercased() } + artists.map { $0.name.lowercased() })
         for i in db.tracks.indices {        // collaborations under their main artist, or back to the full credit
@@ -315,6 +323,7 @@ extension Model {
             retags = retags.filter { renames[$0.key] == nil }
             if froggerFeatures {
                 syncPhase = "Cover art"; syncCurrent = ""; syncTotal = 0
+                await artPrep?.value
                 await FroggerArt.write(db, to: ipod, albums: albums) { done, total, album in     // for Frogger's Now Playing page
                     self.syncDone = done; self.syncTotal = total; self.syncCurrent = album
                 }

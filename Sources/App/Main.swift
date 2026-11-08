@@ -27,7 +27,7 @@ struct CrateApp: App {
                 Button("Previous Song") { model.player.previous() }.keyboardShortcut(.leftArrow, modifiers: .command)
                 Divider()
                 Button("Search") { model.focusSearch += 1 }.keyboardShortcut("f")
-                Button("Edit Tags…") { model.editAlbum = model.focusAlbum }.keyboardShortcut("i").disabled(model.focusAlbum == nil)
+                Button("Edit Tags…") { model.editAlbum = model.focusAlbum }.keyboardShortcut("i").disabled(!(model.focusAlbum.map(model.tagsEditable) ?? false))
                 Button("Find Metadata…") { model.lookupAlbum = model.focusAlbum }.keyboardShortcut("f", modifiers: [.command, .option])
                     .disabled(model.focusAlbum == nil)
                 Button("Quick Look Cover") { if let a = model.focusAlbum { Task { await model.quickLookCover(a) } } }.keyboardShortcut("y").disabled(model.focusAlbum == nil)
@@ -134,6 +134,8 @@ enum Main {
             print("set:", Keychain.set("crate-test", "dummy"), "get:", Keychain.get("crate-test") == "dummy")
             Keychain.set("crate-test", ""); return
         }
+        if let i = args.firstIndex(of: "--lidarr-check") { lidarrCheck(Array(args[(i + 1)...])); return }
+        if let i = args.firstIndex(of: "--tagr-check"), args.count > i + 4 { tagrCheck(Array(args[(i + 1)...])); return }
         if let i = args.firstIndex(of: "--subsonic-check") { subsonicCheck(args.count > i + 1 ? args[i + 1] : nil); return }
         if let i = args.firstIndex(of: "--ma-check"), args.count > i + 2 { maCheck(player: args[i + 1], album: args[i + 2]); return }
         if let i = args.firstIndex(of: "--slskd-check") { slskdCheck(args.count > i + 1 ? args[i + 1] : ""); return }
@@ -614,6 +616,59 @@ enum Main {
 
     /// Logs in to the Subsonic server (ping) and reads its library and playlists; no downloads, no scrobbles.
     /// `filter`: also lists every song whose album contains it, with the path it resolved to.
+    /// --tagr-check URL USER FOLDER SERVER-PATH [NEW-TITLE], password in $TAGR_PASSWORD: logs in to Tagr, finds the
+    /// song the Subsonic server reports at SERVER-PATH and, with a NEW-TITLE, writes it (and a test cover). Leaves the
+    /// Tagr settings as they were.
+    static func tagrCheck(_ a: [String]) {
+        Task { @MainActor in
+            let t = Tagr(), was = (t.url, t.user, t.folder)
+            let done = { t.url = was.0; t.user = was.1; t.folder = was.2; UserDefaults.standard.synchronize(); exit(0) }
+            t.url = a[0]; t.user = a[1]; t.folder = a[2]; t.testPassword = ProcessInfo.processInfo.environment["TAGR_PASSWORD"] ?? ""
+            await t.check()
+            print("check:", t.error ?? t.status)
+            let rel = a[3], name = (rel as NSString).lastPathComponent
+            let title = name.replacingOccurrences(of: #"^[\d-]+ (- )?"#, with: "", options: .regularExpression)
+            let lib = LibTrack(title: (title as NSString).deletingPathExtension, artist: "", album: "", genre: "", trackNumber: 1, discNumber: 1,
+                               year: 0, lengthMs: 0, path: "")
+            do {
+                let song = try await t.find(lib, serverPath: rel)
+                print("found:", song.id, song.path, "|", song.title)
+                if a.count > 4 {
+                    let png = NSImage(size: .init(width: 8, height: 8), flipped: false) { r in NSColor.systemPink.setFill(); r.fill(); return true }
+                    let cover = NSBitmapImageRep(data: png.tiffRepresentation!)!.representation(using: .png, properties: [:])!
+                    try await t.update(song.id, TagEdit(title: a[4], year: 2005, cover: cover))
+                    t.forget()
+                    let after = try await t.find(LibTrack(title: a[4], artist: "", album: "", genre: "", trackNumber: song.track, discNumber: song.disc,
+                                                          year: 0, lengthMs: 0, path: ""), serverPath: rel)
+                    print("after:", after.id, "|", after.title)
+                }
+            } catch { print("error:", error.localizedDescription) }
+            done()
+        }
+        RunLoop.main.run()
+    }
+
+    /// --lidarr-check [ARTIST ALBUM]: Lidarr's setup and queue as Crate sees them (Settings' address and key), and how it
+    /// would find the album. Read only: nothing is added or searched.
+    static func lidarrCheck(_ a: [String]) {
+        Task { @MainActor in
+            let l = Lidarr()
+            await l.check()
+            print("check:", l.error ?? l.status)
+            await l.refreshQueue()
+            print("queue: \(l.queue.count)"); l.queue.prefix(5).forEach { print("  \($0.artist) – \($0.album) | \($0.status) \(Int($0.progress * 100))%") }
+            if a.count > 1 {
+                do {
+                    let m = try await l.lookup(artist: a[0], album: a[1])
+                    let art = (m?["artist"] as? [String: Any])?["artistName"] as? String ?? ""
+                    print("lookup:", m.map { "\(art) – \($0["title"] as? String ?? "") (\($0["albumType"] as? String ?? "")), " + (($0["id"] as? Int ?? 0) > 0 ? "already in Lidarr" : "not in Lidarr yet") } ?? "not found")
+                } catch { print("lookup error:", error.localizedDescription) }
+            }
+            exit(0)
+        }
+        RunLoop.main.run()
+    }
+
     static func subsonicCheck(_ filter: String? = nil) {
         Task { @MainActor in
             let s = Subsonic()

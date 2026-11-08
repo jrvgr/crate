@@ -113,20 +113,54 @@ struct MatchSheet: View {
 // MARK: ratings
 
 extension Model {
-    /// Stars for a song: set in Crate, else what the iPod says.
-    func rating(_ t: LibTrack) -> Int { ratings[t.key] ?? stat(t).rating }
+    /// The Subsonic server's stars for one of its songs (nil for other songs). Ratings of the server's songs
+    /// live there, so every Subsonic client sees the same ones; ratings.json keeps the rest.
+    func serverRating(_ t: LibTrack) -> Int? { on(.subsonic) ? subsonic.rating(of: t) : nil }
+
+    /// Stars for a song: the server's or set in Crate, else what the iPod says.
+    func rating(_ t: LibTrack) -> Int {
+        if let r = serverRating(t), r > 0 { return r }
+        return ratings[t.key] ?? stat(t).rating
+    }
 
     func rate(_ t: LibTrack, _ stars: Int) {
-        ratings[t.key] = stars
-        Store.save("ratings.json", ratings)
+        guard serverRating(t) != nil else {
+            ratings[t.key] = stars
+            Store.save("ratings.json", ratings)
+            return
+        }
+        if ratings.removeValue(forKey: t.key) != nil { Store.save("ratings.json", ratings) }
+        Task {
+            do { try await subsonic.rate(t, stars); objectWillChange.send(); invalidateSyncCache() }
+            catch { notify("Couldn't save the rating on the Subsonic server: \(error.localizedDescription)") }
+        }
     }
 
     /// The same for a song on the iPod (its library song's key when it's matched to one).
-    func rating(_ t: PodTrack) -> Int { ratings[aliases[t.key] ?? t.key] ?? t.stars }
+    func rating(_ t: PodTrack) -> Int {
+        let k = aliases[t.key] ?? t.key
+        if let lib = libraryTrack(key: k)?.track, let r = serverRating(lib), r > 0 { return r }
+        return ratings[k] ?? t.stars
+    }
 
     func rate(_ t: PodTrack, _ stars: Int) {
-        ratings[aliases[t.key] ?? t.key] = stars
+        let k = aliases[t.key] ?? t.key
+        if let lib = libraryTrack(key: k)?.track, serverRating(lib) != nil { rate(lib, stars); return }
+        ratings[k] = stars
         Store.save("ratings.json", ratings)
+    }
+
+    /// Stars set in Crate on songs the Subsonic server has: onto the server where it has none yet (the server's
+    /// own win), then out of ratings.json. Run after each library load, so ratings from before this moved over.
+    func moveRatingsToServer() async {
+        guard on(.subsonic) else { return }
+        var changed = false
+        for (k, stars) in ratings {
+            guard let t = libraryTrack(key: k)?.track, let r = subsonic.rating(of: t) else { continue }
+            if r == 0, stars > 0, (try? await subsonic.rate(t, stars)) == nil { continue }     // try again next load
+            ratings[k] = nil; changed = true
+        }
+        if changed { Store.save("ratings.json", ratings); objectWillChange.send() }
     }
 }
 

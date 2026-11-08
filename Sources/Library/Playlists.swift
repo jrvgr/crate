@@ -54,10 +54,7 @@ enum OwnToneM3U {
 
     /// A path on this Mac as OwnTone sees it (the reverse of LibraryLoader.localPath).
     static func serverPath(_ p: String) -> String {
-        for (a, b) in [("/Volumes/share/", "/share/"), ("/Volumes/media/", "/media/")] where p.hasPrefix(a) {
-            return b + p.dropFirst(a.count)
-        }
-        return p
+        ServerPaths.convert(p, ServerPaths.mappings, from: \.mac, to: \.server)
     }
 
     /// An entry's path or URL the way OwnTone resolves it: relative to the playlist's folder.
@@ -270,31 +267,45 @@ extension Model {
         return n
     }
 
-    // OwnTone
+    // a server's playlists: OwnTone's (its .m3u files on the share) and the Subsonic server's (through its API)
 
-    func ownToneEditable(_ p: OTPlaylist) -> Bool { on(.ownTone) && OwnToneM3U.file(p) != nil }
+    func serverEditable(_ p: OTPlaylist) -> Bool {
+        if p.subsonicID != nil { return on(.subsonic) }
+        return p.spotifyID == nil && on(.ownTone) && OwnToneM3U.file(p) != nil
+    }
 
-    func editOwnTone(_ p: OTPlaylist, _ change: (inout [OTTrack]) -> Void) async {
+    func editServerPlaylist(_ p: OTPlaylist, _ change: (inout [OTTrack]) -> Void) async {
         let before = await tracks(for: p)
         var after = before
         change(&after)
         do {
-            let paths = after.map(\.path), listed = before.map(\.path)
-            try await offMain { try OwnToneM3U.write(p, paths: paths, listed: listed) }     // the .m3u is on the share
+            if let id = p.subsonicID {
+                let ids = after.map { subsonic.id(forPath: $0.path) }
+                guard !ids.contains(nil) else { notify("Couldn't change “\(p.name)”: some of its songs aren't on the Subsonic server"); return }
+                try await subsonic.setSongs(ids.compactMap { $0 }, ofPlaylist: id)
+            } else {
+                let paths = after.map(\.path), listed = before.map(\.path)
+                try await offMain { try OwnToneM3U.write(p, paths: paths, listed: listed) }     // the .m3u is on the share
+            }
             playlistTracks[p.id] = after
             if let i = playlists.firstIndex(where: { $0.id == p.id }) { playlists[i].count = after.count }
-            Task { await refreshOwnTonePlaylists() }
+            if p.subsonicID == nil { Task { await refreshOwnTonePlaylists() } }
         } catch { notify("Couldn't change “\(p.name)”: \(error.localizedDescription)") }
     }
 
-    func add(_ tracks: [LibTrack], toOwnTone p: OTPlaylist) async {
+    func add(_ tracks: [LibTrack], toServer p: OTPlaylist) async {
+        let subsonicList = p.subsonicID != nil
+        // the playlist's own path for a song: the library's for Subsonic (only songs the server has), the server's for OwnTone
+        let path = { (t: LibTrack) -> String? in subsonicList ? (self.subsonic.id(forPath: t.path) != nil ? t.path : nil) : OwnToneM3U.serverPath(t.path) }
         let have = Set(await self.tracks(for: p).map(\.path))
-        let new = tracks.filter { !have.contains(OwnToneM3U.serverPath($0.path)) }.map { t in
+        let usable = tracks.compactMap { t in path(t).map { (t, $0) } }
+        let new = usable.filter { !have.contains($0.1) }.map { t, path in
             OTTrack(id: 0, title: t.title, artist: t.trackArtist.isEmpty ? t.artist : t.trackArtist, album: t.album, albumArtist: t.artist,
-                    dataKind: "file", uri: t.uri, artworkPath: "", lengthMs: t.lengthMs, path: OwnToneM3U.serverPath(t.path))
+                    dataKind: "file", uri: t.uri, artworkPath: "", lengthMs: t.lengthMs, path: path)
         }
-        await editOwnTone(p) { $0 += new }
-        notify(added(new.count, to: p.name))
+        await editServerPlaylist(p) { $0 += new }
+        let skipped = tracks.count - usable.count
+        notify(added(new.count, to: p.name) + (skipped > 0 ? " (\(skipped) aren't on the Subsonic server)" : ""))
     }
 
     /// Rescans, then reads OwnTone's playlists again (a renamed file is a new playlist there).
@@ -331,6 +342,13 @@ extension Model {
             if let p = db?.playlists.first(where: { $0.id == id }) { editPod(p, name: n) }
         case .ownTone(let id):
             guard let p = playlists.first(where: { $0.id == id }) else { return }
+            if let sid = p.subsonicID {
+                do {
+                    try await subsonic.renamePlaylist(sid, to: n)
+                    if let i = playlists.firstIndex(where: { $0.id == id }) { playlists[i].name = n }
+                } catch { notify("Couldn't rename “\(p.name)”: \(error.localizedDescription)") }
+                return
+            }
             do {
                 let path = try await offMain { try OwnToneM3U.rename(p, to: n) }
                 if let i = playlists.firstIndex(where: { $0.id == id }) { playlists[i].path = path; playlists[i].name = n }
@@ -352,10 +370,11 @@ extension Model {
         case .ownTone(let id):
             guard let p = playlists.first(where: { $0.id == id }) else { return }
             do {
-                try await offMain { try OwnToneM3U.delete(p) }
+                if let sid = p.subsonicID { try await subsonic.deletePlaylist(sid) }
+                else { try await offMain { try OwnToneM3U.delete(p) } }
                 playlists.removeAll { $0.id == id }
                 if pane == .playlist(id) { pane = .albums }
-                Task { await refreshOwnTonePlaylists() }
+                if p.subsonicID == nil { Task { await refreshOwnTonePlaylists() } }
             } catch { notify("Couldn't delete “\(p.name)”: \(error.localizedDescription)") }
         }
     }
@@ -379,7 +398,8 @@ struct PlaylistDialogs: ViewModifier {
                 switch r {
                 case .crate: Text("")
                 case .pod: Text("The iPod's playlist is renamed on the next Sync.")
-                case .ownTone: Text("Renames its .m3u file on the share.")
+                case .ownTone(let id):
+                    Text(model.playlists.first { $0.id == id }?.subsonicID != nil ? "Renames it on the Subsonic server." : "Renames its .m3u file on the share.")
                 }
             }
             .confirmationDialog("Delete “\(deleting.map(model.name) ?? "")”?",
@@ -392,7 +412,9 @@ struct PlaylistDialogs: ViewModifier {
                     let onIPod = model.cratePlaylist(id).map { model.cratePlaylists[$0].onIPod } ?? false
                     Text("The songs stay in your library." + (onIPod ? " Its copy on the iPod goes on the next Sync." : ""))
                 case .pod: Text("It's removed from the iPod on the next Sync.")
-                case .ownTone: Text("Deletes its .m3u file from the share. A copy is kept in Crate's Playlist Backups folder.")
+                case .ownTone(let id):
+                    Text(model.playlists.first { $0.id == id }?.subsonicID != nil ? "Deletes it from the Subsonic server. The songs stay."
+                                                                                  : "Deletes its .m3u file from the share. A copy is kept in Crate's Playlist Backups folder.")
                 }
             }
     }
@@ -410,10 +432,12 @@ struct AddToPlaylistMenu: View {
                 Divider()
                 ForEach(model.cratePlaylists) { p in Button(p.name) { model.add(tracks, to: p.id) } }
             }
-            let own = model.playlists.filter(model.ownToneEditable)
-            if !own.isEmpty {
-                Section("OwnTone") {
-                    ForEach(own) { p in Button(p.name) { Task { await model.add(tracks, toOwnTone: p) } } }
+            ForEach(["Subsonic", "OwnTone"], id: \.self) { source in
+                let lists = model.playlists.filter { model.serverEditable($0) && model.source(of: $0) == source }
+                if !lists.isEmpty {
+                    Section(source) {
+                        ForEach(lists) { p in Button(p.name) { Task { await model.add(tracks, toServer: p) } } }
+                    }
                 }
             }
             if let db = model.db, !db.playlists.isEmpty, !model.podIDs(for: tracks).isEmpty {

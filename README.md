@@ -18,7 +18,7 @@ Everything that talks to another service is a plugin you can switch off (Setting
 
 | Plugin | What it adds |
 |---|---|
-| Subsonic | A Navidrome/Subsonic server's library and playlists; rescans after imports; scrobbles the iPod's plays |
+| Subsonic | A Navidrome/Subsonic server's library, ratings and playlists, from a share or over the API alone; rescans after imports; scrobbles the iPod's plays. Without a share, tag edits go through [Tagr](https://github.com/suitux/tagr) |
 | Music Assistant | Its speakers and groups in the toolbar; Play and the controls drive its queue |
 | Spotify | Your saved albums and playlists (Web API, your own Client ID): what you have files for, copy playlists to the iPod |
 | Soulseek | Search and download through your slskd server, imported into the library |

@@ -21,7 +21,7 @@ enum Snapshot {
 
     private static let panes: [String: Pane] = ["recent": .recent, "albums": .albums, "artists": .artists, "songs": .songs, "playlists": .playlists,
                                                  "ipod": .ipod, "health": .health, "spotify": .spotify, "downloads": .downloads,
-                                                 "soulseek": .soulseek, "apple-music": .appleMusic, "youtube": .youtube]
+                                                 "soulseek": .soulseek, "apple-music": .appleMusic, "youtube": .youtube, "lidarr": .lidarr]
 
     static func take(_ what: String, to file: String, _ model: Model) async {
         if what.hasPrefix("album-info:") {       // where an album's songs and cover come from, as text
@@ -58,6 +58,9 @@ enum Snapshot {
         } else if what.hasPrefix("soulseek-search:") {      // "soulseek-search:<songs>:<query>", as an album page's Find on Soulseek
             let parts = what.dropFirst(16).split(separator: ":", maxSplits: 1).map(String.init)
             model.findOnSoulseek("", parts.last ?? "", songs: Int(parts.first ?? "") ?? 0)
+        } else if what.hasPrefix("lidarr-choose:") {        // "lidarr-choose:<artist>|<album>", as Get with Lidarr
+            let parts = what.dropFirst(14).split(separator: "|", maxSplits: 1).map(String.init)
+            model.chooseWithLidarr(parts.first ?? "", parts.last ?? "")
         } else if what.hasPrefix("push-artist:") {          // an artist page over whatever is showing (a search's results, say)
             model.path.append(.artist(String(what.dropFirst(12))))
         } else if what.hasPrefix("search:") {
