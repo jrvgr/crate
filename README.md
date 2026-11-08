@@ -25,9 +25,34 @@ Everything that talks to another service is a plugin you can switch off (Setting
 | Apple Music | Import iTunes Match albums from the Music app |
 | YouTube | Download songs, playlists or a playlist's missing songs with yt-dlp, tagged with covers |
 
+## Install
+
+Needs macOS 26 on an Apple Silicon Mac.
+
+### Homebrew
+
+```sh
+brew tap jrvgr/crate
+brew install --cask crate
+```
+
+### Download
+
+Get `Crate-vX.Y.Z.dmg` from the [latest release](https://github.com/jrvgr/crate/releases/latest) and drag Crate into Applications.
+
+Crate isn't notarised (that needs a paid Apple developer account), so macOS blocks it the first time you open it. Open it once, then go to **System Settings › Privacy & Security** and click **Open Anyway** next to the message about Crate. You only do this once. Or, from Terminal:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Crate.app
+```
+
+### Updates
+
+Crate checks for new versions itself (**Crate › Check for Updates…**) and installs them; Homebrew users can also `brew upgrade`.
+
 ## Building
 
-Needs macOS 26 and the Xcode Command Line Tools (no Xcode project):
+Needs Xcode 27.2 or later (the project uses Xcode's JSON project format). Open `Crate.xcodeproj` and press Run, or from Terminal:
 
 ```sh
 ./build.sh        # optimised build into build/Crate.app
@@ -37,6 +62,10 @@ open build/Crate.app
 
 With a code-signing identity named "Crate Local Signing" in your keychain, builds keep their macOS permissions between rebuilds; otherwise they're signed ad hoc.
 
+### Releasing
+
+Push a version tag (`git tag v0.2.0 && git push origin v0.2.0`). The Release workflow builds the DMG, signs the update for Sparkle, publishes the GitHub release with its `appcast.xml` and moves the cask in [jrvgr/homebrew-crate](https://github.com/jrvgr/homebrew-crate) to the new version. It needs two repository secrets: `SPARKLE_PRIVATE_KEY` (Sparkle's `generate_keys -x`) and `TAP_GITHUB_TOKEN` (a token that can push to the tap).
+
 ## Layout
 
 ```
@@ -45,6 +74,8 @@ Sources/Library   library loading, albums/artists/songs, tags, metadata, organis
 Sources/iPod      iTunesDB, iPod sync, artwork, Frogger, disk repair
 Sources/Plugins   Subsonic, Music Assistant, Spotify, Soulseek, Apple Music, YouTube
 Resources         Info.plist, icon, the iPod LCD font
+Crate.xcodeproj   the Xcode project (JSON format; Sources is a synchronized folder)
+.github           build on every push; releases from version tags
 docs/NOTES.md     detailed notes, file formats and command-line test flags
 ```
 
