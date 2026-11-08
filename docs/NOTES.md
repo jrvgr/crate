@@ -44,9 +44,10 @@ of them off Crate is a plain folder → iPod manager.
   result. It re-reads the iPod's iTunesDB right before writing and applies only the queued
   changes, so changes made elsewhere stay; the iPod's `Play Counts` (plays, ratings, last played)
   are merged into the tracks and the file removed, like iTunes; so are Frogger's `FroggerHidden`
-  (songs hidden there, and ones shown again: a show choice over a hidden playlist's rule) and `FroggerSkips` (skips, added to Crate's own count: the Skips column and smart rule,
-  as the 2.3 iTunesDB has no skip fields), each only when its stamp matches the iTunesDB. Track/playlist records are kept
-  byte for byte; FLAC/WAV are converted with `afconvert`.
+  (songs hidden there, and ones shown again: a show choice over a hidden playlist's rule), `FroggerSkips` (skips, added to Crate's own count: the Skips column and smart rule,
+  as the 2.3 iTunesDB has no skip fields), `FroggerBookmarks` (Resume Mixes positions, into the records' bookmark
+  where Play Counts brought none) and `FroggerPlaylist_*` (a synced playlist edited with Add to Playlist).
+  See "Frogger's files" below. Track/playlist records are kept byte for byte; FLAC/WAV are converted with `afconvert`.
   M4A files the 3G's firmware can't read (index after the audio, or a 64-bit audio box, as some
   downloads have) are rearranged on the way, audio untouched (`MP4Layout.swift`), and copies already
   on the iPod are fixed in place at the next sync ("Fixing song files"), as are Apple Lossless songs,
@@ -102,6 +103,35 @@ of them off Crate is a plain folder → iPod manager.
   and M4A (AVFoundation passthrough, audio untouched).
 - **Menu bar**: iPod status with Sync/Eject, now playing, downloads (Settings › Library to hide it).
 
+## Frogger's files
+
+The formats are Frogger's `docs/file-formats.md` (code: `Sources/iPod/FroggerFiles.swift`, `IPod.swift`,
+`FroggerArt.swift`). The current versions name a song by a **track key** from its mhit: dbid (`+0x70`), track id,
+size and length; a key matches the track with that dbid, else (no dbid on one side) the one with the same id, size
+and length, else nothing (the entry is dropped). So they fit any later database that kept the dbids, and Crate
+reads them whatever their stamp: `FroggerHidden` v3, `FroggerSkips` v2, `FroggerBookmarks` v1,
+`FroggerPlaylist_<persistent id>` (16 upper-case hex digits, the playlist's `mhyp+0x1c`; "FRGP"). The older
+versions named songs by position (`FroggerHidden` v1/v2, `FroggerSkips` v1, `FroggerPlaylist_I` in Apple's
+On-The-Go format) and are still read, only when their stamp is the iTunesDB's file time; `FroggerPlaylist_I` only
+for a playlist that has no `FroggerPlaylist_<id>`.
+
+Crate writes `FroggerArt` version 2 at the end of every sync (and from the Cover Studio): the header, then 24 bytes
+per song with a cover (its key, its image index, 2 bytes padding), then the images. It stays right after any later
+sync, so a database write no longer deletes it (only an old version 1 file, which is by position). The hide flag
+goes into the iTunesDB (`mhit+0x98`, "HIDE"); Crate writes no other Frogger file onto the iPod.
+
+The keys only work if dbids stay put: records read from the iPod are written back byte for byte (dbid, track id
+and playlist persistent ids included; the master playlist keeps its id too), and each new song gets a random dbid
+that no song in the database has (`ITunesDB.newDBID`). A song whose file Crate replaces (lossless to AAC) keeps its
+dbid but gets a new size, so it still matches by dbid; one without a dbid (written by another app) would lose
+Frogger's data. New playlists get a random persistent id, kept from then on (playlists are matched by name or
+`podID`, so their record is reused).
+
+`--frogger-fixtures <dir>` checks all this against Frogger's `tests/fixtures/` (copied into `<dir>`, e.g.
+`git -C ~/Projects/frogger show <branch>:tests/fixtures/<file>` each): every version is read (old ones only with
+the stamp), the current versions are written byte for byte like the fixtures, and the dbids and persistent ids
+survive a round trip.
+
 Build: `./build.sh` (Command Line Tools only). It signs with the self-signed
 "Crate Local Signing" identity in the login keychain so macOS keeps the privacy
 permissions across builds. `@State` can't be used: its macro plugin isn't in the CLT
@@ -109,7 +139,7 @@ permissions across builds. `@State` can't be used: its macro plugin isn't in the
 
 Headless checks (`build/Crate.app/Contents/MacOS/Crate ...`):
 `--selftest <iTunesDB>` (round trip, tracks and playlists), `--playlist-test <iTunesDB>`
-(offline: playlists, On-The-Go import, pruning; use a copy), `--add-folder <dir>`,
+(offline: playlists, On-The-Go import, pruning; use a copy), `--frogger-fixtures <dir>` (Frogger's file formats, above), `--add-folder <dir>`,
 `--remove-album <title>`, `--remove-playlist <name>`, `--model-test <album>` (remove + re-add
 through the app's Model), `--lookup <album> <artist>`, `--write-tags <file> <year> <genre>`
 (use a copy), `--import <root> <files/folders...>`, `--apple-music` (list albums),

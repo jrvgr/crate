@@ -161,7 +161,12 @@ struct LibrarySettings: View {
                 Toggle("Frogger features", isOn: $model.froggerFeatures)
                     .help("The frog sticker, hiding songs from the iPod's Artists and Albums, the Cover Studio and cover art on Sync, and the Frogger section on the iPod's page. Turn off for a stock iPod")
                 SettingsTransferRow()
-            } header: { Text("App") }
+            } header: { Text("App") } footer: {
+                let info = Bundle.main.infoDictionary
+                Text("Crate \(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?"))")
+                    .foregroundStyle(.tertiary)
+            }
+            if model.froggerFeatures { FroggerSourceSettings() }
             Section {
                 LabeledContent("Deleted from shares") {
                     HStack {
@@ -398,5 +403,48 @@ struct PluginHeader: View {
             Toggle("", isOn: on).toggleStyle(.switch).labelsHidden()
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// Which Frogger the iPod page installs: the newest GitHub release, or a local checkout.
+struct FroggerSourceSettings: View {
+    @ObservedObject var source = FroggerSource.shared
+    var body: some View {
+        Section {
+            LabeledContent("Installs") {
+                HStack(spacing: 8) {
+                    if source.checking { ProgressView().controlSize(.small) }
+                    Text(source.summary).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    if !source.useCheckout {
+                        Button("Check for Updates") { Task { await source.refresh(force: true) } }.disabled(source.checking)
+                    }
+                }
+            }
+            if !source.useCheckout, let e = source.error {
+                Text(source.tag.map { "\(e). Using the downloaded \($0)." } ?? e).font(.caption).foregroundStyle(.orange)
+            } else if !source.useCheckout, source.newest {
+                Text("That's the newest release.").font(.caption).foregroundStyle(.secondary)
+            }
+            if !source.useCheckout {
+                Picker("Update channel", selection: $source.beta) {
+                    Text("Stable").tag(false)
+                    Text("Beta").tag(true)
+                }
+                .pickerStyle(.segmented).fixedSize()
+                .help("Beta also installs Frogger's prereleases")
+                .onChange(of: source.beta) { Task { await source.refresh(force: true) } }
+                Toggle("Debug build", isOn: $source.debug)
+                    .help("Installs the release's frogger-loader-debug.bin instead of frogger-loader.bin")
+            }
+            Toggle("Use a local Frogger checkout", isOn: $source.useCheckout)
+            if source.useCheckout {
+                FolderField(title: "Checkout", path: $source.checkoutPath, help: "A clone of github.com/jrvgr/frogger with the loader built")
+            }
+        } header: { Text("Frogger") } footer: {
+            Text(source.useCheckout
+                 ? "Installs the checkout's build/loader/frogger-loader.bin with its tools/install.py; build it with nix develop -c make -C loader."
+                 : "Crate downloads the newest Frogger release from github.com/jrvgr/frogger (on Beta, prereleases too) and checks it against the release's SHA256SUMS. Without the network it uses the last one downloaded.")
+        }
+        .task(id: source.useCheckout) { await source.refresh() }
     }
 }

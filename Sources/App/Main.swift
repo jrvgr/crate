@@ -67,6 +67,7 @@ enum Main {
         if let i = args.firstIndex(of: "--playlist-test"), args.count > i + 1 { playlistTest(args[i + 1]); return }
         if let i = args.firstIndex(of: "--pod-files"), args.count > i + 1 { podFiles(args[i + 1]); return }
         if let i = args.firstIndex(of: "--froggerart"), args.count > i + 1 { froggerArt(args[i + 1]); return }
+        if let i = args.firstIndex(of: "--frogger-fixtures"), args.count > i + 1 { froggerFixtures(args[i + 1]); return }
         if let i = args.firstIndex(of: "--frogger-test"), args.count > i + 2 {     // install/remove/restore on a partition image file, no root
             if args[i + 1] == "devices" { print(Frogger.devices(of: URL(fileURLWithPath: args[i + 2])).map { "\($0.disk) \($0.firmware)" } ?? "none"); exit(0) }
             let p = Process()
@@ -310,7 +311,7 @@ enum Main {
             let tracks = await LibraryLoader.scan(folder).filter { !have.contains($0.key) }
             for t in tracks {
                 do {
-                    db.tracks.append(try await Syncer.add(t, to: ipod, albumCount: tracks.count, id: db.nextID))
+                    db.tracks.append(try await Syncer.add(t, to: ipod, albumCount: tracks.count, id: db.nextID, dbid: db.newDBID()))
                     print("added \(t.artist) – \(t.title)")
                 } catch { print("failed \(t.title): \(error.localizedDescription)") }
             }
@@ -393,10 +394,10 @@ enum Main {
         check(files[0].trackIDs == [ids[0], ids[1], ids[2], ids[3]] && files[3].trackIDs == [ids[0], ids[2]], "songs counted in the master playlist's order")
         check(OnTheGo.load(dir: dir, db: db, dbTime: dbTime.addingTimeInterval(600)).isEmpty, "nothing read for a newer iTunesDB")
         // FroggerHidden: songs hidden (or shown again) on the iPod, by track list index and id; a moved song is skipped
-        let hid1 = PodHides.make([(1, ids[1], false), (3, ids[3], false), (0, ids[2], false)], stamp: stamp, version: 1)
+        let hid1 = PodHides.makeByPosition([(1, ids[1], false), (3, ids[3], false), (0, ids[2], false)], stamp: stamp, version: 1)
         check(PodHides.parse(hid1, db: db, dbTime: dbTime) == [.init(index: 1, shown: false), .init(index: 3, shown: false)],
               "hidden songs read (version 1), a mismatched entry skipped")
-        let hid = PodHides.make([(1, ids[1], false), (3, ids[3], true), (0, ids[2], true)], stamp: stamp)
+        let hid = PodHides.makeByPosition([(1, ids[1], false), (3, ids[3], true), (0, ids[2], true)], stamp: stamp)
         let ents = PodHides.parse(hid, db: db, dbTime: dbTime)
         check(ents == [.init(index: 1, shown: false), .init(index: 3, shown: true)], "hidden and shown songs read (version 2)")
         let choices = PodHides.choices(ents ?? [], db: db), rule: Set = [db.tracks[3].key]     // a hidden playlist has song 3
@@ -405,11 +406,11 @@ enum Main {
         check(PodHides.parse(hid, db: db, dbTime: dbTime.addingTimeInterval(600)) == nil, "hidden songs ignored for a newer iTunesDB")
         check(PodHides.parse(Data("FRGH".utf8), db: db, dbTime: dbTime) == nil && PodHides.parse(hid.prefix(40), db: db, dbTime: dbTime) == nil,
               "broken or cut-off hidden file ignored")
-        var v3 = [UInt8](hid); v3[4] = 3
-        check(PodHides.parse(Data(v3), db: db, dbTime: dbTime) == nil, "hidden file of an unknown version ignored")
+        var v9 = [UInt8](hid); v9[4] = 9
+        check(PodHides.parse(Data(v9), db: db, dbTime: dbTime) == nil, "hidden file of an unknown version ignored")
         // FroggerSkips: skips on the iPod by track list index and id, with the last skip's time (1904-based)
         let mac = 3_800_000_000, macDate = Date(timeIntervalSince1970: Double(mac - 2_082_844_800))
-        let sk = PodSkips.make([(1, ids[1], 2, mac), (3, ids[3], 1, 0), (0, ids[2], 5, mac)], stamp: stamp)
+        let sk = PodSkips.makeByPosition([(1, ids[1], 2, mac), (3, ids[3], 1, 0), (0, ids[2], 5, mac)], stamp: stamp)
         check(PodSkips.parse(sk, db: db, dbTime: dbTime) == [PodSkips.Entry(index: 1, count: 2, last: macDate), PodSkips.Entry(index: 3, count: 1, last: nil)],
               "skips read, a moved song (wrong id at its index) left out")
         check(PodSkips.parse(sk, db: db, dbTime: dbTime.addingTimeInterval(600)) == nil, "skips ignored for a newer iTunesDB (stale file)")

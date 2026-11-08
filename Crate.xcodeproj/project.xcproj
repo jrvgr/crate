@@ -57,7 +57,7 @@
         "INFOPLIST_FILE": "Resources/Info.plist",
         "LD_RUNPATH_SEARCH_PATHS": "@executable_path/../Frameworks",
         "MACOSX_DEPLOYMENT_TARGET": "26.0",
-        "MARKETING_VERSION": "0.1.0",
+        "MARKETING_VERSION": "0.1.1",
         "PRODUCT_BUNDLE_IDENTIFIER": "nl.jrvgr.crate",
         "PRODUCT_NAME": "$(TARGET_NAME)",
         "SDKROOT": "macosx",

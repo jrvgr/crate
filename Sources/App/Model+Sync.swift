@@ -115,6 +115,8 @@ extension Model {
         let podHides = PodHides.load(ipod, db: db)      // songs hidden or shown on the iPod become your hide choice
         for (k, v) in PodHides.choices(podHides, db: db) { hides[k] = v }
         let podSkips = PodSkips.load(ipod, db: db).map { (db.tracks[$0.index].key, $0) }     // added once the database is written
+        let podMarks = PodBookmarks.load(ipod, db: db)      // Resume Mixes positions, into the records (where Play Counts had none)
+        PodBookmarks.apply(podMarks, to: &db, playCountsMerged: playCountsMerged)
         db.playlists.removeAll { playlistsToRemove.contains($0.id) }
         rep.playlists += applyPodEdits(&db)
 
@@ -131,11 +133,12 @@ extension Model {
         let left = Set(db.tracks.map(\.id))     // new tracks may reuse the ids of removed ones
         for i in db.playlists.indices { db.playlists[i].items.removeAll { !left.contains($0.trackID) } }
         // write now (before the track order changes again), so On-The-Go lists and play counts can't be imported twice
-        if !otg.isEmpty || rep.removed > 0 || pendingName != nil || playCountsMerged || !podHides.isEmpty || !podSkips.isEmpty {
+        if !otg.isEmpty || rep.removed > 0 || pendingName != nil || playCountsMerged || !podHides.isEmpty || !podSkips.isEmpty || !podMarks.isEmpty {
             do {
                 try await Syncer.save(db, to: ipod)
                 // (a skips file left behind is stale now: the database's stamp moved on)
                 let used = otg.map(\.url) + (podHides.isEmpty ? [] : [PodHides.url(ipod)]) + (podSkips.isEmpty ? [] : [PodSkips.url(ipod)])
+                    + (podMarks.isEmpty ? [] : [PodBookmarks.url(ipod)])
                     + (playCountsMerged ? [PlayCounts.url(ipod)] : [])
                 await offMain { used.forEach { try? FileManager.default.removeItem(at: $0) } }
                 if !podSkips.isEmpty { skips = PodSkips.add(podSkips, to: skips) }
@@ -230,7 +233,7 @@ extension Model {
                 if t.genre.isEmpty { t.genre = mb.genre }
             }
             do {
-                db.tracks.append(try await Syncer.add(t, to: ipod, albumCount: album.tracks.count, id: db.nextID, settings: podSettings, prepared: ready))
+                db.tracks.append(try await Syncer.add(t, to: ipod, albumCount: album.tracks.count, id: db.nextID, dbid: db.newDBID(), settings: podSettings, prepared: ready))
                 rep.added += 1
                 if n % 10 == 9 { try await Syncer.save(db, to: ipod) }    // keep the database current during long syncs
             } catch { rep.failures.append("\(t.title): \(error.localizedDescription)") }
