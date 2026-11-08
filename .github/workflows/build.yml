@@ -1,11 +1,13 @@
 name: Build
 
-# Builds every push and pull request, so a change that doesn't compile shows up before a release.
+# Builds main and every pull request once, so a change that doesn't compile shows up before a release.
+# A branch without a pull request builds from the Actions tab (Run workflow).
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
