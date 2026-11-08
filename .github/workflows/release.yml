@@ -1,0 +1,92 @@
+name: Release
+
+# Push a tag like v0.2.0 to build, package and publish a release:
+#   Crate-v0.2.0.dmg   the app, for direct download, Homebrew and Sparkle
+#   appcast.xml        Sparkle's feed (Info.plist's SUFeedURL points at the latest release's copy)
+# then the Homebrew cask in jrvgr/homebrew-crate is moved to the new version.
+#
+# Secrets:
+#   SPARKLE_PRIVATE_KEY   Sparkle's EdDSA private key (generate_keys -x), signs the update
+#   TAP_GITHUB_TOKEN      a token that can push to jrvgr/homebrew-crate (skipped with a warning when missing)
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  SPARKLE_VERSION: "2.10.1"
+
+jobs:
+  release:
+    runs-on: xcode-27            # macOS 27 with Xcode 27.2, which reads the JSON project format
+    steps:
+      - name: Check the tag
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Tag '$GITHUB_REF_NAME' isn't vMAJOR.MINOR.PATCH"; exit 1; }
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0         # the build number is the commit count
+
+      - name: Select Xcode 27.2
+        run: sudo xcode-select -s /Applications/Xcode_27.2.app
+
+      - name: Build
+        run: |
+          echo "BUILD=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+          MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$(git rev-list --count HEAD)" ./build.sh
+
+      - name: Make the DMG
+        run: |
+          DMG="Crate-$GITHUB_REF_NAME.dmg"
+          mkdir dmg && cp -R build/Crate.app dmg/ && ln -s /Applications dmg/Applications
+          hdiutil create -volname "Crate $VERSION" -srcfolder dmg -ov -format UDZO "$DMG"
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+
+      - name: Sign the update and write the appcast
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          [ -n "$SPARKLE_PRIVATE_KEY" ] || { echo "::error::SPARKLE_PRIVATE_KEY isn't set"; exit 1; }
+          curl -sL "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          SIG=$(echo "$SPARKLE_PRIVATE_KEY" | "$RUNNER_TEMP/bin/sign_update" --ed-key-file - "$DMG")
+          cat > appcast.xml <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>Crate</title>
+              <item>
+                <title>Crate $VERSION</title>
+                <pubDate>$(date -R)</pubDate>
+                <sparkle:version>$BUILD</sparkle:version>
+                <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+                <sparkle:fullReleaseNotesLink>https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME</sparkle:fullReleaseNotesLink>
+                <enclosure url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$DMG" type="application/octet-stream" $SIG/>
+              </item>
+            </channel>
+          </rss>
+          EOF
+          cat appcast.xml
+
+      # published right away (not a draft), so the cask and the appcast never point at a download that isn't public yet
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "$DMG" appcast.xml --verify-tag --generate-notes --title "Crate $VERSION"
+
+      - name: Update the Homebrew cask
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          [ -n "$TAP_GITHUB_TOKEN" ] || { echo "::warning::TAP_GITHUB_TOKEN isn't set; update jrvgr/homebrew-crate by hand"; exit 0; }
+          SHA=$(shasum -a 256 "$DMG" | awk '{print $1}')
+          git clone "https://x-access-token:$TAP_GITHUB_TOKEN@github.com/jrvgr/homebrew-crate.git" tap
+          cd tap
+          sed -i '' -e "s/version \".*\"/version \"$VERSION\"/" -e "s/sha256 \".*\"/sha256 \"$SHA\"/" Casks/crate.rb
+          git -c user.name=github-actions -c user.email=actions@github.com commit -am "Crate $VERSION"
+          git push
