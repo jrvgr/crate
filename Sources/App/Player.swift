@@ -39,8 +39,11 @@ final class Player: ObservableObject {
     private let player = AVPlayer()
     private var observer: Any?
     private var endObserver: NSObjectProtocol?
+    /// The media keys and the system's Now Playing.
+    private(set) var nowPlaying: NowPlaying!
 
     init() {
+        nowPlaying = NowPlaying(self)
         observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] t in
             Task { @MainActor in
                 guard let self, self.remoteQueue == nil else { return }
@@ -48,10 +51,60 @@ final class Player: ObservableObject {
                 if self.seeks == 0 { self.time = t.seconds.isFinite ? t.seconds : 0 }
                 if let d = self.player.currentItem?.duration.seconds, d.isFinite { self.length = d }
                 self.playing = self.player.rate > 0
+                if abs(self.time - self.savedTime) >= 5 { self.saveTime() }
             }
         }
         endObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.next() }
+        }
+        quitObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.saveTime() }
+        }
+    }
+
+    // MARK: picking up where it stopped
+
+    /// The queue and the song in it, kept on disk so the next launch can carry on (the spot in the song is
+    /// kept apart, as it changes all the time). Only what plays on this Mac: a Music Assistant player keeps its own queue.
+    private struct Saved: Codable { var queue: [LibTrack]; var index: Int }
+    private static var savedURL: URL { PodCache.dir.appendingPathComponent("playback.json") }
+    private var quitObserver: NSObjectProtocol?
+    private var savedTime = 0.0
+
+    private func saveQueue() {
+        guard remoteQueue == nil else { return }
+        if queue.isEmpty { try? FileManager.default.removeItem(at: Self.savedURL); return }
+        try? JSONEncoder().encode(Saved(queue: queue, index: index)).write(to: Self.savedURL, options: .atomic)
+        saveTime()
+    }
+
+    private func saveTime() {
+        guard remoteQueue == nil, current != nil else { return }
+        savedTime = time
+        UserDefaults.standard.set(time, forKey: "playbackTime")
+    }
+
+    /// Puts back the song that played when Crate quit, paused where it was: Play carries on.
+    func restore() {
+        guard current == nil, output == "mac",
+              let d = try? Data(contentsOf: Self.savedURL), let s = try? JSONDecoder().decode(Saved.self, from: d) else { return }
+        let playable = s.queue.filter { FileManager.default.fileExists(atPath: $0.path) || stream($0) != nil }
+        guard let at = s.queue[safe: s.index], let i = playable.firstIndex(where: { $0.id == at.id }) else { return }
+        let t = UserDefaults.standard.double(forKey: "playbackTime")    // before load, which saves the new song's 0
+        queue = playable
+        index = i
+        load(play: false)
+        guard t > 1, t < length - 1 else { return }
+        time = t; savedTime = t
+        UserDefaults.standard.set(t, forKey: "playbackTime")    // load saved the new song's 0 over it
+        // a seek before the file is read is dropped: wait for it (a few seconds at most, a share can be slow)
+        Task { [weak self] in
+            for _ in 0..<60 {
+                guard let self, let item = self.player.currentItem, self.current?.id == at.id, !self.playing else { return }
+                if item.status == .readyToPlay { self.seek(t); return }
+                if item.status == .failed { return }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
         }
     }
 
@@ -111,18 +164,19 @@ final class Player: ObservableObject {
         play(tracks, from: i)
     }
 
-    private func load() {
+    private func load(play: Bool = true) {
         guard let t = current else { stop(); return }
         let url = FileManager.default.fileExists(atPath: t.path) ? URL(fileURLWithPath: t.path) : stream(t) ?? URL(fileURLWithPath: t.path)
         player.replaceCurrentItem(with: AVPlayerItem(url: url))
         time = 0; length = Double(t.lengthMs) / 1000
-        player.play(); playing = true
+        if play { player.play(); playing = true }
+        saveQueue()
     }
 
     func toggle() {
         guard current != nil else { return }
         if let q = remoteQueue { playing.toggle(); Task { await ma?.command("play_pause", q) }; return }
-        if player.rate > 0 { player.pause(); playing = false } else { player.play(); playing = true }
+        if player.rate > 0 { player.pause(); playing = false; saveTime() } else { player.play(); playing = true }
     }
     func next() {
         if let q = remoteQueue { Task { await ma?.command("next", q) }; return }
@@ -130,6 +184,11 @@ final class Player: ObservableObject {
     func previous() {
         if let q = remoteQueue { Task { await ma?.command("previous", q) }; return }
         if time > 3 || index == 0 { player.seek(to: .zero) } else { index -= 1; load() }
+    }
+    /// While the scrub bar is held, playback waits, so holding it at the end doesn't run into the next song.
+    func holdScrub(_ on: Bool) {
+        guard remoteQueue == nil, playing else { return }
+        if on { if player.rate > 0 { player.pause() } } else { player.play() }
     }
     private var seeks = 0                               // seeks still in flight
     func seek(_ seconds: Double) {
@@ -140,7 +199,7 @@ final class Player: ObservableObject {
             Task { @MainActor in self?.seeks -= 1 }
         }
     }
-    func stop() { endRemote(); player.pause(); player.replaceCurrentItem(with: nil); playing = false; queue = []; index = 0; time = 0 }
+    func stop() { endRemote(); player.pause(); player.replaceCurrentItem(with: nil); playing = false; queue = []; index = 0; time = 0; saveQueue() }
 
     // MARK: Music Assistant
 

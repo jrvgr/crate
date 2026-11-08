@@ -24,13 +24,46 @@ extension Model {
         guard on(.soulseek) else { notify("Turn on the Soulseek plugin in Settings to download songs"); return false }
         do {
             let q = (artist == "Various Artists" ? t.artist : artist) + " " + t.title
-            guard let (folder, file) = slsk.bestSong(try await slsk.find(q), title: t.title, album: album) else {
+            let found = slsk.songCandidates(try await slsk.find(q), title: t.title, album: album)
+            // one file per user: a second copy from someone who just failed would fail the same way
+            var seen = Set<String>()
+            let tries = Array(found.filter { seen.insert($0.0.username).inserted }.prefix(5))
+            guard !tries.isEmpty else {
                 notify("“\(t.title)” isn't on Soulseek in a format that passes your rules"); return false
             }
-            try await slsk.download(folder, only: file)
+            try await slsk.download(tries[0].0, only: tries[0].1)
             notify("Downloading “\(t.title)” from Soulseek")
+            Task { await keepTrying(t.title, tries) }
             return true
         } catch { notify(error.localizedDescription); return false }
+    }
+
+    /// Follows a song's download and, when the user it came from fails it (offline, refused, timed out) or keeps it
+    /// in their queue for 2 minutes, drops it and tries the next one: a single song has no folder to pick from by hand.
+    private func keepTrying(_ title: String, _ tries: [(SlskFolder, SlskFile)]) async {
+        for (n, (folder, file)) in tries.enumerated() {
+            if n > 0 {
+                notify("“\(title)” failed from \(tries[n - 1].0.username); trying \(folder.username) (\(n + 1) of \(tries.count))")
+                do { try await slsk.download(folder, only: file) } catch { continue }
+            }
+            let started = Date()
+            while true {
+                try? await Task.sleep(for: .seconds(3))
+                await slsk.refreshDownloads()
+                guard let job = slsk.jobs.first(where: { $0.username == folder.username && $0.directory == folder.directory }),
+                      let f = job.files.first(where: { $0.filename == file.filename }) else {
+                    if Date().timeIntervalSince(started) > 60 { break }       // never showed up in slskd: next
+                    continue
+                }
+                if f.succeeded { return }
+                if f.failed { await slsk.cancel(job, remove: true); break }
+                // still waiting in their queue (not started): someone else may send it now
+                if !f.state.hasPrefix("InProgress"), f.bytes == 0, Date().timeIntervalSince(started) > 120 {
+                    await slsk.cancel(job, remove: true); break
+                }
+            }
+        }
+        notify("Couldn't get “\(title)” from Soulseek: \(tries.count) user\(tries.count == 1 ? "" : "s") tried, none sent it")
     }
 
     /// One song of an album, from YouTube, tagged with its place on the album.

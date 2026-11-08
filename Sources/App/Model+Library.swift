@@ -61,6 +61,14 @@ extension Model {
 
     func isPodOnly(_ a: Album) -> Bool { !libraryIDs.contains(a.id) }
 
+    /// Songs of a library album that are on the iPod but not in the library (deleted from it, say): the album page
+    /// shows them faded, to get back from the iPod or delete from it at the next sync. Their keys are the iPod's.
+    func ghosts(_ a: Album) -> [LibTrack] {
+        guard !isPodOnly(a), let pod = podAlbums.first(where: { $0.id == a.id }) else { return [] }
+        let have = Set(a.tracks.map(\.key))
+        return pod.tracks.filter { !have.contains(aliases[$0.key] ?? $0.key) }
+    }
+
     /// Whether Crate can change the album's files: some are on this Mac, not only on the iPod or only on the
     /// Subsonic server (whose API can't change tags, covers or files).
     func filesHere(_ a: Album) -> Bool { !isPodOnly(a) && a.tracks.contains { !Subsonic.serverOnly($0.path) } }

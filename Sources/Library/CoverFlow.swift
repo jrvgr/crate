@@ -302,17 +302,24 @@ struct CoverFlowTracks: View {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(album.tracks.enumerated()), id: \.element.id) { n, t in
                         HStack(spacing: 12) {
-                            Text(t.trackNumber > 0 ? "\(t.trackNumber)" : "").monospacedDigit().foregroundStyle(.secondary).frame(width: 26, alignment: .trailing)
+                            PlayingNumber(track: t).frame(width: 26, alignment: .trailing)
                             Text(t.title).lineLimit(1)
                             if !t.trackArtist.isEmpty, t.trackArtist != album.artist {
                                 Text(t.trackArtist).foregroundStyle(.secondary).lineLimit(1)
                             }
                             Spacer()
-                            if keys.contains(t.key) { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).help("On the iPod") }
+                            if keys.contains(t.key) { SongMark(mark: .onIPod) }
                             Text(t.lengthMs > 0 ? duration(t.lengthMs) : "").monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
                         }
                         .padding(.horizontal, 18).padding(.vertical, 5)
                         .background(n % 2 == 1 ? Color.primary.opacity(0.05) : .clear)
+                        .background { PlayingHighlight(track: t) }
+                        // like the album page: double-click plays from this song on
+                        .contentShape(.rect)
+                        .onTapGesture(count: 2) { Task { await model.play(album, from: n) } }
+                        .contextMenu {
+                            Button("Play", systemImage: "play.fill") { Task { await model.play(album, from: n) } }
+                        }
                     }
                 }
                 .padding(.bottom, 12)
@@ -352,10 +359,7 @@ struct SpotifyCoverFlow: View {
                         HStack(spacing: 10) {
                             Button("Open", systemImage: "chevron.right") { model.path.append(.spotifyAlbum(a)) }
                             Button(model.playURILabel, systemImage: "play.fill") { Task { await model.playURIs([a.uri]) } }
-                            if model.on(.soulseek), !model.hasFiles(a) {
-                                Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(a.artist, a.name) }
-                            }
-                            if !model.hasFiles(a) { LidarrButton(artist: a.artist, album: a.name) }
+                            if !model.hasFiles(a) { GetAlbumButton(artist: a.artist, album: a.name, spotify: a).menuStyle(.button) }
                         }
                         .buttonStyle(.glass).padding(.top, 10)
                     }
@@ -451,5 +455,47 @@ struct CoverFlowArtists: View {
         .onKeyPress(.return) { if let a = current { model.path.append(.artist(a.name)) }; return .handled }
         .onChange(of: artists.map(\.id)) { flow.go(to: min(flow.index, max(artists.count - 1, 0)), count: artists.count) }
         .onChange(of: current?.id) { albumFlow.go(to: 0, count: max(albums.count, 1)) }   // another artist: their newest album
+    }
+}
+
+/// A song's track number, or little level bars while it's the one playing (moving while it plays). Its own view watching
+/// the player, so only these redraw as playback moves on, not the list around them.
+struct PlayingNumber: View {
+    @EnvironmentObject var player: Player
+    var track: LibTrack
+    var body: some View {
+        if player.current?.id == track.id {
+            PlayingBars(playing: player.playing).help(player.playing ? "Playing" : "Paused")
+        } else {
+            Text(track.trackNumber > 0 ? "\(track.trackNumber)" : "").monospacedDigit().foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// The album page's highlight behind the song that's playing.
+struct PlayingHighlight: View {
+    @EnvironmentObject var player: Player
+    var track: LibTrack
+    var body: some View {
+        if player.current?.id == track.id { Color.accentColor.opacity(0.15) }
+    }
+}
+
+/// Three thin bars bouncing like a level meter while music plays, resting low when paused.
+struct PlayingBars: View {
+    var playing: Bool
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1 / 15, paused: !playing)) { tl in
+            let t = tl.date.timeIntervalSinceReferenceDate
+            HStack(alignment: .bottom, spacing: 2) {
+                ForEach(0..<3, id: \.self) { i in
+                    // each bar its own speed, so they don't move together
+                    let level = playing ? 0.35 + 0.65 * abs(sin(t * [5.1, 7.3, 6.2][i] + Double(i) * 1.7)) : [0.35, 0.6, 0.45][i]
+                    Capsule().frame(width: 2.5, height: 12 * level)
+                }
+            }
+            .frame(height: 12, alignment: .bottom)
+            .foregroundStyle(.tint)
+        }
     }
 }

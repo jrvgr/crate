@@ -38,9 +38,8 @@ extension Model {
             }
             return (failed, Set(paths.filter { !FileManager.default.fileExists(atPath: $0) }))
         }
-        // their copies on the iPod go at the next sync too
+        // their copies on the iPod stay, as ghosts on the album page: get them back or delete them there
         let fromPod = tracks.filter { gone.contains($0.path) && podKeys.contains($0.key) }
-        songsToRemove.formUnion(fromPod.map { podKey($0.key) })
         songsToAdd.subtract(gone)
         libTracks.removeAll { gone.contains($0.path) }
         let ids = Set(albums.map(\.id))
@@ -48,7 +47,7 @@ extension Model {
         toAdd = toAdd.filter { id in albums.contains { $0.id == id } || !ids.contains(id) }
         await rescanServers()
         notify("Deleted \(paths.count - failed) file\(paths.count - failed == 1 ? "" : "s")" + (failed > 0 ? ", \(failed) couldn't be moved" : "")
-               + (fromPod.isEmpty ? "" : "; \(fromPod.count) leave the iPod on the next sync"))
+               + (fromPod.isEmpty ? "" : "; \(fromPod.count) still on the iPod: get \(fromPod.count == 1 ? "it" : "them") back or delete \(fromPod.count == 1 ? "it" : "them") on the album page"))
     }
 
     /// The .crate-trash folders on the shares: their size, and emptying them for good.

@@ -28,6 +28,12 @@ enum MusicBrainz {
     }
 
     static func search(album: String, artist: String) async throws -> [MBRelease] {
+        try await LookupCache.cached(LookupCache.key("mb", album, artist), ttl: LookupCache.searchTTL) {
+            try await fetchSearch(album: album, artist: artist)
+        } ?? []
+    }
+
+    private static func fetchSearch(album: String, artist: String) async throws -> [MBRelease] {
         let q = "release:\"\(album)\"" + (artist.isEmpty || artist == "Various Artists" ? "" : " AND artist:\"\(artist)\"")
         var c = URLComponents(string: "https://musicbrainz.org/ws/2/release/")!
         c.queryItems = [.init(name: "query", value: q), .init(name: "fmt", value: "json"), .init(name: "limit", value: "8")]
@@ -72,6 +78,12 @@ enum Discogs {
 
     static func search(album: String, artist: String) async throws -> [MBRelease] {
         guard !token.isEmpty else { return [] }
+        return try await LookupCache.cached(LookupCache.key("discogs", album, artist), ttl: LookupCache.searchTTL) {
+            try await fetchSearch(album: album, artist: artist)
+        } ?? []
+    }
+
+    private static func fetchSearch(album: String, artist: String) async throws -> [MBRelease] {
         var c = URLComponents(string: "https://api.discogs.com/database/search")!
         c.queryItems = [.init(name: "release_title", value: album), .init(name: "type", value: "release"),
                         .init(name: "per_page", value: "8")]
@@ -96,6 +108,12 @@ enum Discogs {
 /// The iTunes Store (the same catalogue iTunes Match matches against): big covers, year, genre.
 enum ITunesLookup {
     static func search(album: String, artist: String) async throws -> [MBRelease] {
+        try await LookupCache.cached(LookupCache.key("itunes", album, artist), ttl: LookupCache.searchTTL) {
+            try await fetchSearch(album: album, artist: artist)
+        } ?? []
+    }
+
+    private static func fetchSearch(album: String, artist: String) async throws -> [MBRelease] {
         var c = URLComponents(string: "https://itunes.apple.com/search")!
         c.queryItems = [.init(name: "term", value: (artist.isEmpty || artist == "Various Artists" ? "" : artist + " ") + album),
                         .init(name: "entity", value: "album"), .init(name: "limit", value: "8")]
@@ -108,6 +126,54 @@ enum ITunesLookup {
                       genre: x["primaryGenreName"] as? String ?? "", source: "iTunes",
                       cover: (x["artworkUrl100"] as? String ?? "").replacingOccurrences(of: "100x100bb", with: "1200x1200bb"))
         }
+    }
+}
+
+/// Answers from the metadata services, kept on disk for a while so looking the same album up again
+/// doesn't wait on MusicBrainz' one-request-a-second limit (Application Support/Crate/lookups.json).
+/// Only answers that came back are kept: a failed request is asked again next time.
+enum LookupCache {
+    private struct Entry: Codable { var at: Date; var data: Data }
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var entries: [String: Entry]?
+    private static var url: URL { PodCache.dir.appendingPathComponent("lookups.json") }
+    static let searchTTL: TimeInterval = 7 * 86400, tracksTTL: TimeInterval = 30 * 86400
+
+    static func key(_ kind: String, _ parts: String...) -> String {
+        kind + ":" + parts.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.joined(separator: "|")
+    }
+
+    /// The kept answer for `key`, or `fetch`'s (kept when it returns one).
+    static func cached<T: Codable>(_ key: String, ttl: TimeInterval, _ fetch: () async throws -> T?) async rethrows -> T? {
+        if let v: T = get(key, ttl: ttl) { return v }
+        guard let v = try await fetch() else { return nil }
+        put(key, v)
+        return v
+    }
+
+    private static func get<T: Decodable>(_ key: String, ttl: TimeInterval) -> T? {
+        lock.lock(); defer { lock.unlock() }
+        guard let e = all()[key], Date().timeIntervalSince(e.at) < ttl else { return nil }
+        return try? JSONDecoder().decode(T.self, from: e.data)
+    }
+
+    private static func put<T: Encodable>(_ key: String, _ v: T) {
+        guard let d = try? JSONEncoder().encode(v) else { return }
+        lock.lock()
+        var m = all(); m[key] = Entry(at: Date(), data: d)
+        entries = m
+        let file = try? JSONEncoder().encode(m)
+        lock.unlock()
+        try? file?.write(to: url, options: .atomic)
+    }
+
+    /// Loaded once; entries older than the longest TTL are dropped. Call with the lock held.
+    private static func all() -> [String: Entry] {
+        if let e = entries { return e }
+        let loaded = (try? JSONDecoder().decode([String: Entry].self, from: Data(contentsOf: url))) ?? [:]
+        let e = loaded.filter { Date().timeIntervalSince($0.value.at) < max(searchTTL, tracksTTL) }
+        entries = e
+        return e
     }
 }
 

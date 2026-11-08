@@ -142,17 +142,39 @@ struct PodStateIcon: View {
     var mark: SyncMark
     var pinned = false                  // an artist kept on the iPod
     var body: some View {
-        let symbol = pinned ? "pin.fill" : mark.icon ?? "plus"
-        let tint: Color = pinned ? .blue : mark == .none ? .gray : mark.tint
-        Image(symbol: "ipod")
-            .padding(.trailing, 2)
-            .overlay(alignment: .bottomTrailing) {
-                // the symbol in the state's colour on a small plain disc, not a coloured disc
-                Image(systemName: symbol).font(.system(size: 7.5, weight: .heavy)).foregroundStyle(tint)
-                    .frame(width: 12, height: 12)
-                    .background(.background, in: .circle)
-                    .overlay { Circle().strokeBorder(.primary.opacity(0.12), lineWidth: 0.5) }
-                    .offset(x: 3, y: 3)         // out on the corner, past the iPod's edge
+        // only on the iPod: the iPod on its own
+        let symbol: String? = pinned ? "pin.fill" : mark == .podOnly ? nil : mark.icon ?? "plus"
+        // the state's symbol just past the iPod's corner, in the text's colour: in a glass button colours wash out
+        // (a blue + came out pale cyan, on a disc or not), while the label's own colour stays crisp
+        HStack(alignment: .bottom, spacing: 0) {
+            Image(symbol: "ipod")
+            if let symbol {
+                Image(systemName: symbol).font(.system(size: 7.5, weight: .black))
+                    .offset(x: -1, y: 1)
             }
+        }
+    }
+}
+
+/// A song's (or a list row's) place on the iPod: the state's plain symbol, like the corner of the album page's
+/// iPod button, not a bright filled disc; the iPod glyph itself only for a song that's only on the iPod.
+/// On the iPod, the usual case, is quiet; only queued changes take a colour.
+struct SongMark: View {
+    var mark: SyncMark
+    var body: some View {
+        Group {
+            if mark == .podOnly { Image(symbol: "ipod") }
+            else { Image(systemName: mark.icon ?? "plus").font(.system(size: 11, weight: .bold)) }
+        }
+            .foregroundStyle(style)
+            .frame(width: 22, alignment: .center)
+            .help(mark == .none ? "Not on the iPod" : mark.help)
+    }
+    private var style: AnyShapeStyle {
+        switch mark {
+        case .none: AnyShapeStyle(.quaternary)
+        case .onIPod, .podOnly: AnyShapeStyle(.secondary)
+        case .adding, .removing, .partial: AnyShapeStyle(mark.tint)
+        }
     }
 }

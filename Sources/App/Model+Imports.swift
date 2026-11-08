@@ -31,8 +31,13 @@ extension Model {
 
     /// Copies albums from the iPod into the library (for music that only lives on the iPod).
     func copyFromIPod(_ albums: [Album]) async {
+        await copyFromIPod(keys: Set(albums.flatMap { $0.tracks.map(\.key) }),
+                           title: albums.count == 1 ? albums[0].title : "\(albums.count) albums")
+    }
+
+    /// Copies iPod songs (by their iPod keys) into the library: a ghost on an album page, for one.
+    func copyFromIPod(keys: Set<String>, title: String) async {
         guard let ipod, connected, let db else { notify("Connect the iPod to copy from it"); return }
-        let keys = Set(albums.flatMap { $0.tracks.map(\.key) })
         // with renames waiting for the next sync applied, as podAlbums has them
         let songs = db.tracks.map { t in
             var t = t
@@ -40,7 +45,7 @@ extension Model {
             return t
         }.filter { keys.contains($0.key) }
         guard !songs.isEmpty else { notify("None of those songs are on the iPod's list"); return }
-        let job = startJob(albums.count == 1 ? "Copying \(albums[0].title) from the iPod" : "Copying \(albums.count) albums from the iPod", icon: "ipod")
+        let job = startJob("Copying \(title) from the iPod", icon: "ipod")
         // Files Crate converted for the iPod carry no tags of their own (the iPod's list has them), so the
         // copies are named, filed and tagged from the list, not from the files.
         var copied: [LibTrack] = [], skipped = 0, failed: [String] = []

@@ -302,7 +302,7 @@ struct SongTarget {
     var total, year: Int
 }
 
-/// A song you have no file for: get it on its own, from Soulseek or YouTube (whichever are on; a menu when both are).
+/// A song you have no file for: a menu of where to get it (SongSources: its album with Lidarr, the song from Soulseek or YouTube).
 struct GetSongButton: View {
     @EnvironmentObject var model: Model
     @ObservedObject var s: SpotifyAlbumState
@@ -316,12 +316,10 @@ struct GetSongButton: View {
             ProgressView().controlSize(.small).frame(width: 18).help("Looking for “\(track.title)” on Soulseek…")
         } else if s.getting.contains(number) {
             Image(systemName: "arrow.down.circle.fill").foregroundStyle(.secondary).help("Downloading; it shows up in the library when it's done")
-        } else if soulseek && youtube {
+        } else if soulseek || youtube || model.on(.lidarr) {
+            // always the same menu, whichever sources are on (a button that went straight to one was a different thing per setup)
             Menu { GetSongItems(s: s, track: track, number: number, to: to) } label: { Image(systemName: "arrow.down.circle") }
                 .menuStyle(.button).menuIndicator(.hidden).buttonStyle(.plain).fixedSize().help("Get this song")
-        } else if soulseek || youtube {
-            Button { GetSongItems.get(model, s, track, number, to, soulseek: soulseek) } label: { Image(systemName: "arrow.down.circle") }
-                .buttonStyle(.plain).help(soulseek ? "Get this song from Soulseek" : "Get this song from YouTube")
         }
     }
 }
@@ -335,8 +333,9 @@ struct GetSongItems: View {
     var to: SongTarget
 
     var body: some View {
-        if model.on(.soulseek) { Button("Get Song from Soulseek", systemImage: "arrow.down.circle") { Self.get(model, s, track, number, to, soulseek: true) } }
-        if model.on(.youtube) { Button("Get Song from YouTube", systemImage: "play.rectangle") { Self.get(model, s, track, number, to, soulseek: false) } }
+        SongSources(artist: to.artist, album: to.album,
+                    soulseek: { Self.get(model, s, track, number, to, soulseek: true) },
+                    youtube: { Self.get(model, s, track, number, to, soulseek: false) })
     }
 
     @MainActor
@@ -444,6 +443,7 @@ struct SpotifyAlbumView: View {
     private var artist: String { switch source { case .spotify(let a): a.artist; case .release(_, let a): a } }
     private var id: String { switch source { case .spotify(let a): a.uri; case .release(let g, _): g.id } }
     private var spotifyAlbum: SpotifyAlbum? { if case .spotify(let a) = source { a } else { s.found } }
+    private var releaseID: String? { if case .release(let g, _) = source { g.id } else { nil } }
 
     var body: some View {
         let lib = model.albums.first { $0.id == name.lowercased() }
@@ -481,16 +481,15 @@ struct SpotifyAlbumView: View {
                             .foregroundStyle(.secondary)
                         HStack(spacing: 10) {
                             if let lib {
-                                Button("Go to Album", systemImage: "square.stack") { model.path.append(.album(lib)) }.buttonStyle(.glassProminent)
+                                Button("Go to Album", systemImage: "square.stack") { model.path.append(.album(lib)) }
+                                // some of its songs only (a Lidarr Wanted album, say): the rest
+                                if s.tracks.count > lib.tracks.count {
+                                    GetAlbumButton(artist: artist, album: name, mbid: releaseID, songs: s.tracks.count, complete: true, spotify: spotifyAlbum)
+                                        .glassMenu(large: true)
+                                }
                             } else {
-                                LidarrButton(artist: artist, album: name).buttonStyle(.glass)
-                                if model.on(.soulseek) {
-                                    Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(artist, name, songs: s.tracks.count) }
-                                        .buttonStyle(.glassProminent)
-                                }
-                                if model.on(.youtube), spot.direct, let a = spotifyAlbum {
-                                    Button("Get from YouTube", systemImage: "play.rectangle") { Task { await model.albumFromYouTube(a) } }
-                                }
+                                GetAlbumButton(artist: artist, album: name, mbid: releaseID, songs: s.tracks.count, spotify: spotifyAlbum)
+                                    .glassMenu(large: true)
                             }
                             if let a = spotifyAlbum {
                                 Button(model.remoteName == nil ? "Open in Spotify" : "Play", systemImage: "play.fill") { Task { await model.playURIs([a.uri]) } }

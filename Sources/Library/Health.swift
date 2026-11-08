@@ -151,9 +151,9 @@ struct HealthView: View {
                                 }
                             }
                             Spacer()
-                            if issues.contains(.incomplete), model.on(.soulseek), let full = model.expectedSongs(a) {
-                                Button("Complete", systemImage: "arrow.down.circle") { model.findOnSoulseek(a.artist, a.title, songs: full) }.buttonStyle(.glass)
-                                    .help("Search Soulseek for a copy with all \(full) songs")
+                            if issues.contains(.incomplete), let full = model.expectedSongs(a) {
+                                GetAlbumButton(artist: a.artist, album: a.title, songs: full, complete: true)
+                                    .menuStyle(.button).buttonStyle(.glass)
                             }
                             if issues.contains(where: \.metadata) {
                                 Button("Find Metadata", systemImage: "sparkle.magnifyingglass") { model.lookupAlbum = a }.buttonStyle(.glass)

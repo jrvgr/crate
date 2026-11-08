@@ -5,25 +5,39 @@ import SwiftUI
 
 struct SlskFile: Identifiable, Hashable {
     var id: String { filename }
-    var filename: String          // remote path with backslashes: "@@music\Artist\Album\01 Song.flac"
+    let filename: String          // remote path with backslashes: "@@music\Artist\Album\01 Song.flac"
     var size: Int
     var bitRate = 0, bitDepth = 0, sampleRate = 0, length = 0
-    var name: String { filename.split(separator: "\\").last.map(String.init) ?? filename }
-    var ext: String { (name as NSString).pathExtension.lowercased() }
-    var isAudio: Bool { LibraryLoader.audioExts.contains(ext) || ext == "ogg" || ext == "opus" }
+    // Worked out once: views sort and filter big result sets by these on every redraw.
+    let name: String, ext: String, isAudio: Bool
+
+    init(filename: String, size: Int, bitRate: Int = 0, bitDepth: Int = 0, sampleRate: Int = 0, length: Int = 0) {
+        self.filename = filename; self.size = size
+        self.bitRate = bitRate; self.bitDepth = bitDepth; self.sampleRate = sampleRate; self.length = length
+        name = filename.split(separator: "\\").last.map(String.init) ?? filename
+        ext = (name as NSString).pathExtension.lowercased()
+        isAudio = LibraryLoader.audioExts.contains(ext) || ext == "ogg" || ext == "opus"
+    }
 }
 
 /// One folder of one user's search response: the unit Crate downloads (an album, usually).
 struct SlskFolder: Identifiable, Hashable {
     var id: String { username + "\u{1}" + directory }
     var username, directory: String
-    var files: [SlskFile]
+    var files: [SlskFile] { didSet { audio = files.filter(\.isAudio) } }
     var freeSlot: Bool
     var speed, queue: Int
+    /// The audio files, kept in step with `files` (sorting results reads it per comparison).
+    private(set) var audio: [SlskFile]
+
+    init(username: String, directory: String, files: [SlskFile], freeSlot: Bool, speed: Int, queue: Int) {
+        self.username = username; self.directory = directory; self.files = files
+        self.freeSlot = freeSlot; self.speed = speed; self.queue = queue
+        audio = files.filter(\.isAudio)
+    }
 
     var name: String { directory.split(separator: "\\").last.map(String.init) ?? directory }
     var parent: String { directory.split(separator: "\\").dropLast().last.map(String.init) ?? "" }
-    var audio: [SlskFile] { files.filter(\.isAudio) }
     var size: Int { audio.map(\.size).reduce(0, +) }
     var formats: String { Set(audio.map { $0.ext.uppercased() }).sorted().joined(separator: "/") }
     var lossless: Bool { audio.contains { ["flac", "wav", "aif", "aiff", "alac"].contains($0.ext) } }
@@ -264,14 +278,23 @@ final class Slskd: ObservableObject {
     /// The file to download for one song: in a folder that passes the rules, named like the song,
     /// from a folder that looks like its album when there is one, then the best source.
     func bestSong(_ folders: [SlskFolder], title: String, album: String) -> (SlskFolder, SlskFile)? {
+        songCandidates(folders, title: title, album: album).first
+    }
+
+    /// Every file that could be the song, best first: ones in a folder that looks like its album, then the rest,
+    /// each by source (free slot, lossless, speed, short queue). One user at a time can fail, so there's a next.
+    func songCandidates(_ folders: [SlskFolder], title: String, album: String) -> [(SlskFolder, SlskFile)] {
         let loose = { (s: String) in s.lowercased().filter { $0.isLetter || $0.isNumber } }
         let want = loose(title), albumWant = loose(album)
-        guard !want.isEmpty else { return nil }
+        guard !want.isEmpty else { return [] }
         let hits = folders.filter(passes).compactMap { f in
             f.audio.first { loose(($0.name as NSString).deletingPathExtension).contains(want) }.map { (f, $0) }
         }
-        let fromAlbum = hits.filter { !albumWant.isEmpty && loose($0.0.name + $0.0.parent).contains(albumWant) }
-        return (fromAlbum.isEmpty ? hits : fromAlbum).max { $0.0.rank < $1.0.rank }
+        let inAlbum = { (h: (SlskFolder, SlskFile)) in !albumWant.isEmpty && loose(h.0.name + h.0.parent).contains(albumWant) }
+        return hits.sorted { a, b in
+            let x = inAlbum(a), y = inAlbum(b)
+            return x != y ? x : a.0.rank > b.0.rank
+        }
     }
 
     private func parse(_ j: Any?) -> [SlskFolder] {

@@ -97,14 +97,14 @@ struct ContentView: View {
             func arg(_ f: String) -> String? { args.firstIndex(of: f).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
             for (flag, pane) in [("--open-recent", Pane.recent), ("--open-spotify", .spotify), ("--open-artists", .artists),
                                  ("--open-apple-music", .appleMusic), ("--open-ipod", .ipod), ("--open-songs", .songs),
-                                 ("--open-soulseek", .soulseek), ("--open-downloads", .downloads), ("--open-health", .health), ("--open-youtube", .youtube), ("--open-review", .review), ("--open-albums", .albums)]
+                                 ("--open-soulseek", .soulseek), ("--open-downloads", .downloads), ("--open-health", .health), ("--open-youtube", .youtube), ("--open-lidarr", .lidarr), ("--open-review", .review), ("--open-albums", .albums)]
             where args.contains(flag) { model.pane = pane }
             if let q = arg("--search") { model.search = q }
             if let t = arg("--spotify-tab") { model.spotifyTab = t }
             model.spotifyArtist = arg("--spotify-artist")
             let m = model
             Snapshot.listen(m)
-            Task { await slsk.poll { m.on(.soulseek) } }
+            Task { await slsk.poll { m.on(.soulseek) || (m.on(.lidarr) && !m.lidarr.queue.isEmpty) } }
             Task { await m.lidarr.poll { m.on(.lidarr) } }
             await model.reload()
             if let t = arg("--open-lookup") { model.lookupAlbum = model.albums.first { $0.title == t } }
@@ -154,7 +154,7 @@ struct ContentView: View {
                 Task { await model.trash(ts) }
             }
         } message: {
-            Text("The files go to the Trash (on a network share: a hidden .crate-trash folder there), so you can put them back. Copies on the iPod are removed at the next sync.")
+            Text("The files go to the Trash (on a network share: a hidden .crate-trash folder there), so you can put them back. Copies on the iPod stay on its album page, faded, until you get them back or delete them from the iPod.")
         }
         .sheet(isPresented: Binding(get: { model.organize != nil }, set: { if !$0 { model.organize = nil } })) {
             OrganizerSheet(albums: model.organize ?? []).environmentObject(model)
@@ -235,6 +235,7 @@ struct PaneView: View {
         case .youtube: YouTubeView()
         case .appleMusic: AppleMusicView()
         case .soulseek: SoulseekView()
+        case .lidarr: LidarrView(lidarr: model.lidarr)
         case .downloads: DownloadsView()
         case .playlists: PlaylistsPage()
         case .playlist(let id):
@@ -253,11 +254,13 @@ struct PaneView: View {
 /// How an item relates to the iPod, shown as a small badge.
 enum SyncMark {
     case none, onIPod, partial, adding, removing
+    case podOnly                        // a song on the iPod that isn't in the library
 
     var icon: String? {
         switch self {
         case .none: return nil
         case .onIPod: return "checkmark"
+        case .podOnly: return "ipod"
         case .partial: return "circle.lefthalf.filled"
         case .adding: return "plus"
         case .removing: return "minus"
@@ -267,6 +270,7 @@ enum SyncMark {
         switch self {
         case .none: return .clear
         case .onIPod: return .green
+        case .podOnly: return .gray
         case .partial: return .orange
         case .adding: return .blue        // not the accent: it may be red, which reads as an error
         case .removing: return .red
@@ -276,6 +280,7 @@ enum SyncMark {
         switch self {
         case .none: return "Not on the iPod"
         case .onIPod: return "On the iPod"
+        case .podOnly: return "Only on the iPod, not in the library"
         case .partial: return "Partly on the iPod"
         case .adding: return "Will be added on Sync"
         case .removing: return "Will be removed on Sync"
@@ -307,7 +312,7 @@ extension Model {
         switch mark(a) {
         case .adding: toAdd.remove(a.id)
         case .removing: toRemove.remove(a.id)
-        case .onIPod: if Self.removeClick { toRemove.insert(a.id) }
+        case .onIPod, .podOnly: if Self.removeClick { toRemove.insert(a.id) }
         case .partial, .none: if !isPodOnly(a) { toAdd.insert(a.id) }
         }
     }
@@ -330,10 +335,7 @@ struct MarkBadge: View {
 struct SidebarMark: View {
     var mark: SyncMark
     var body: some View {
-        if let icon = mark.icon {
-            Image(systemName: icon == "checkmark" ? "checkmark.circle.fill" : icon + ".circle.fill")
-                .foregroundStyle(mark.tint).help(mark.help)
-        }
+        if mark != .none { SongMark(mark: mark) }
     }
 }
 
@@ -392,7 +394,7 @@ struct Sidebar: View {
                 .onMove { var p = pins.map(\.0); p.move(fromOffsets: $0, toOffset: $1); model.pinned = p }
             }
 
-            let sources = [PluginID.spotify, .appleMusic, .soulseek, .youtube].filter { model.on($0) }
+            let sources = [PluginID.spotify, .appleMusic, .lidarr, .soulseek, .youtube].filter { model.on($0) }
             if !sources.isEmpty {
                 Section("Sources") {
                     ForEach(sources) { p in
@@ -400,7 +402,7 @@ struct Sidebar: View {
                             if p == .spotify { Label { Text(p.name) } icon: { Image(nsImage: SpotifyMark.template) } }
                             else { Label(p.name, systemImage: p.icon) }
                         }
-                        .tag(p == .spotify ? Pane.spotify : p == .appleMusic ? .appleMusic : p == .youtube ? .youtube : .soulseek)
+                        .tag(p == .spotify ? Pane.spotify : p == .appleMusic ? .appleMusic : p == .youtube ? .youtube : p == .lidarr ? .lidarr : .soulseek)
                     }
                 }
             }

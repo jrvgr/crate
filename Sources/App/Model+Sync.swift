@@ -183,6 +183,12 @@ extension Model {
                 if let a = libraryTrack(key: t.key)?.album { work.append((a, t)) }
             }
         }
+        // Frogger's cover art is checked now, while songs are copied, so the Cover art phase at the end is quick
+        let artPrep: Task<Void, Never>? = froggerFeatures ? {
+            let podTracks = db.tracks, adding = Array(Set(work.map(\.0))), all = albums
+            return Task.detached(priority: .utility) { await FroggerArt.prepare(podTracks, adding: adding, ipod: ipod, albums: all) }
+        }() : nil
+        defer { artPrep?.cancel() }
         let remote = work.filter { subsonic.needsDownload($0.1.path) }     // server songs this Mac has no file for
         if !remote.isEmpty {
             syncPhase = "Downloading from Subsonic"; syncTotal = remote.count; syncDone = 0
@@ -314,6 +320,7 @@ extension Model {
             retags = retags.filter { renames[$0.key] == nil }
             if froggerFeatures {
                 syncPhase = "Cover art"; syncCurrent = ""; syncTotal = 0
+                await artPrep?.value
                 await FroggerArt.write(db, to: ipod, albums: albums) { done, total, album in     // for Frogger's Now Playing page
                     self.syncDone = done; self.syncTotal = total; self.syncCurrent = album
                 }

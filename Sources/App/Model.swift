@@ -5,7 +5,7 @@ import AppKit
 enum Pane: Hashable {
     case recent, albums, artists, songs, playlists, health, review, ipod
     case smart(UUID)
-    case spotify, appleMusic, soulseek, downloads, youtube
+    case spotify, appleMusic, soulseek, downloads, youtube, lidarr
     case playlist(Int), podPlaylist(UInt64), cratePlaylist(UUID)
 }
 
@@ -209,7 +209,9 @@ final class Model: ObservableObject {
     @Published var forward: [Place] = []
     var travelling = false
     @Published var albumFilter = AlbumFilter.all
-    @Published var albumSort = AlbumSort.artist
+    /// The albums' order, shared by the grid, the list's columns and Cover Flow (and shown in the toolbar's Sort menu).
+    @Published var albumOrder = AlbumSort.artist.comparators
+    var albumSort: AlbumSort? { AlbumSort(albumOrder) }
     @AppStorage("artistView") var artistView = "grid"        // "grid", "list" or "flow"
     @AppStorage("albumView") var albumView = "grid"          // "grid", "flow" or "list"
     @AppStorage("albumsByArtist") var albumsByArtist = false  // the library grid in a section per artist
@@ -271,7 +273,11 @@ final class Model: ObservableObject {
         }
         // also the disks that never mount, like an iPod whose volume has errors
         diskWatch = DiskWatch { [weak self] in Task { @MainActor in self?.diskChanged() } }
-        slsk.onFinished = { [weak self] job, folder in Task { await self?.importDownloaded(job, folder: folder) } }
+        // downloads Lidarr started are Lidarr's to import (Downloads offers Import when it can't)
+        slsk.onFinished = { [weak self] job, folder in
+            guard let self, !self.lidarrSlskJobs.contains(job.id) else { return }
+            Task { await self.importDownloaded(job, folder: folder) }
+        }
         player.stream = { [weak self] t in self.flatMap { $0.on(.subsonic) ? $0.subsonic.streamURL(forPath: t.path) : nil } }
         player.remote = { [weak self] in
             guard let self, self.on(.musicAssistant), self.player.output.hasPrefix("ma:") else { return nil }
@@ -283,6 +289,8 @@ final class Model: ObservableObject {
             guard let self, let m = self.index[t.key] ?? self.index["~" + Self.loose(t.album) + "|" + Self.loose(t.title)] else { return nil }
             return (m.album.tracks, m.album.tracks.firstIndex { $0.id == m.track.id } ?? 0)
         }
+        player.nowPlaying.art = { [weak self] t in self?.album(of: t).flatMap { self?.artwork[$0.id] } }
+        player.restore()        // the song that played when Crate quit, paused where it was
         if on(.musicAssistant) { Task { try? await ma.loadPlayers() } }
         yt.onFiles = { [weak self] files, id in
             guard let self, let j = self.yt.jobs.first(where: { $0.id == id }) else { return }

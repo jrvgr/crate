@@ -102,8 +102,14 @@ import SwiftUI
     /// going back sends it home.
     func navigated(from old: [Route], to new: [Route]) {
         guard -quiet.timeIntervalSinceNow > 0.3 else { return }     // the pane and path change in either order
-        if new.count > old.count, Array(new.prefix(old.count)) == old, let last = new.last, let art = Art(last) { open(art); return }
-        guard new.count < old.count, Array(old.prefix(new.count)) == new, let last = old.last, let art = Art(last) else { return }
+        // tiles are on the pane's own page and on artist pages; a page on top of them (a release's details, say)
+        // leaves them registered but hidden underneath, so the art would fly from or to somewhere you can't see
+        func showsTiles(_ path: [Route]) -> Bool { guard let top = path.last else { return true }; if case .artist = top { return true }; return false }
+        if new.count > old.count, Array(new.prefix(old.count)) == old, let last = new.last, let art = Art(last) {
+            if showsTiles(old) { open(art) }
+            return
+        }
+        guard new.count < old.count, Array(old.prefix(new.count)) == new, let last = old.last, let art = Art(last), showsTiles(new) else { return }
         close(art)
     }
 
