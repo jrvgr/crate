@@ -7,12 +7,14 @@ import AppKit
 // tools/install.py, run as root through sudo (Crate asks for the password). Each run saves the whole firmware
 // partition to Application Support/Crate/Frogger first. Holding Menu at boot always starts
 // Apple's firmware, Frogger installed or not. Every run ends with install.py disk-status, so
-// Crate shows what's on the partition rather than what it last did; Check runs only that.
+// Crate shows what's on the partition rather than what it last did; Check runs only that. The loader and
+// install.py come from Frogger's newest GitHub release, or a local checkout (FroggerRelease.swift).
 
 enum Frogger {
     enum Action: Equatable { case install, remove, restore(URL), check }
 
-    /// The Frogger checkout: its built loader and installer are used from there.
+    /// A local Frogger checkout (Settings › Frogger › Use a local Frogger checkout): its built loader and installer.
+    static var useCheckout: Bool { UserDefaults.standard.bool(forKey: "froggerUseCheckout") }
     static var checkout: URL {
         get {
             let path = UserDefaults.standard.string(forKey: "froggerCheckout") ?? "~/Projects/frogger"
@@ -20,18 +22,36 @@ enum Frogger {
         }
         set { UserDefaults.standard.set(newValue.path, forKey: "froggerCheckout") }
     }
-    static var installer: URL { checkout.appendingPathComponent("tools/install.py") }
-    static var loader: URL { checkout.appendingPathComponent("build/loader/frogger-loader.bin") }
+    /// Otherwise the downloaded release's folder (see FroggerSource), nil before the first download.
+    static var release: URL? { UserDefaults.standard.string(forKey: "froggerRelease").map(FroggerSource.dir) }
+    static var installer: URL {
+        useCheckout ? checkout.appendingPathComponent("tools/install.py") : (release ?? backups).appendingPathComponent("install.py")
+    }
+    static var loader: URL {
+        useCheckout ? checkout.appendingPathComponent("build/loader/frogger-loader.bin")
+            : (release ?? backups).appendingPathComponent(UserDefaults.standard.bool(forKey: "froggerDebug") ? "frogger-loader-debug.bin" : "frogger-loader.bin")
+    }
     static var backups: URL { PodCache.dir.appendingPathComponent("Frogger") }
 
     /// What's missing before Crate can install, or nil.
-    static func problem(for ipod: IPodInfo?) -> String? {
+    @MainActor static func problem(for ipod: IPodInfo?) -> String? {
         guard let ipod else { return "Connect the iPod" }
         guard ipod.modelName == "iPod (3rd generation)" else { return "Frogger is for the 3rd generation iPod only" }
+        if !useCheckout { return releaseProblem }
         guard FileManager.default.fileExists(atPath: installer.path) else { return "No Frogger checkout at \(checkout.path)" }
         guard FileManager.default.fileExists(atPath: loader.path) else {
             return "Build the loader first: nix develop -c make -C loader (in \(checkout.path))"
         }
+        return nil
+    }
+
+    /// Why the downloaded release can't be used yet, or nil.
+    @MainActor private static var releaseProblem: String? {
+        let source = FroggerSource.shared
+        guard let tag = source.tag else {
+            return source.checking ? "Downloading Frogger from GitHub…" : source.error ?? "Frogger isn't downloaded yet (Settings › Frogger)"
+        }
+        guard FileManager.default.fileExists(atPath: loader.path) else { return "Frogger \(tag) has no \(loader.lastPathComponent)" }
         return nil
     }
 
@@ -310,6 +330,7 @@ struct FroggerSettings: View {
     @EnvironmentObject var model: Model      // @State can't be used (see README), so the question lives in the model
     @StateObject private var studio = CoverStudioUI()
     @StateObject private var switches = FroggerSwitchesUI()
+    @ObservedObject private var source = FroggerSource.shared
 
     var body: some View {
         let confirm = model.froggerConfirm
@@ -345,7 +366,7 @@ struct FroggerSettings: View {
                     .disabled(!Frogger.canCheck(model.ipod) || busy)
                 if installed {
                     Button("Update…") { model.froggerConfirm = .install }
-                        .help("Writes the Frogger you last built over the one on the iPod")
+                        .help("Writes Frogger \(source.summary) over the one on the iPod")
                         .disabled(problem != nil || busy)
                 } else {
                     Button("Install…") { model.froggerConfirm = .install }
@@ -397,6 +418,7 @@ struct FroggerSettings: View {
             if installed { switchRows }
         }
         .onAppear { switches.load(model.ipod, connected: model.connected) }
+        .task { await source.refresh() }
         .onChange(of: model.connected) { _, on in switches.load(model.ipod, connected: on); if !on { switches.changed = false } }
         .sheet(isPresented: $studio.open) { CoverStudio(ui: studio).environmentObject(model) }
         .alert(title(confirm), isPresented: Binding(get: { model.froggerConfirm != nil }, set: { if !$0 { model.froggerConfirm = nil } })) {
@@ -410,7 +432,7 @@ struct FroggerSettings: View {
                  : confirm != .install
                  ? "Writes this saved copy back over the iPod's whole firmware partition, exactly as it was then. The iPod is "
                    + "unmounted for a moment, and Crate asks for your password. Restart the iPod afterwards (hold Menu + Play)."
-                 : "Writes Frogger's loader into the iPod's firmware partition. A copy of the partition is saved first, the iPod is "
+                 : "Writes the loader of Frogger \(source.summary) into the iPod's firmware partition. A copy of the partition is saved first, the iPod is "
                    + "unmounted for a moment, and Crate asks for your password. Hold Menu while the iPod starts to get Apple's "
                    + "firmware without Frogger. Restart the iPod afterwards (hold Menu + Play).")
         }
@@ -466,7 +488,7 @@ struct FroggerSettings: View {
         }
         .opacity(clicker == .off || clicker == .speaker ? 0.5 : 1)
         if let e = switches.error { Text(e).font(.caption).foregroundStyle(.red).padding(.horizontal, 14).padding(.bottom, 11) }
-        Text("An older Frogger on the iPod may not have every switch yet: Update puts the one you last built on it.")
+        Text("An older Frogger on the iPod may not have every switch yet: Update puts \(source.summary) on it.")
             .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.bottom, 11)
     }
 
