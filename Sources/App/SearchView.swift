@@ -173,6 +173,7 @@ struct SearchView: View {
                                         Text(a.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                                     }
                                     Spacer()
+                                    LidarrButton(artist: a.artist, album: a.name, label: "Lidarr").buttonStyle(.glass).controlSize(.small)
                                     if model.on(.soulseek) {
                                         Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(a.artist, a.name) }
                                             .buttonStyle(.glass).controlSize(.small)

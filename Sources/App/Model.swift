@@ -85,6 +85,7 @@ final class Model: ObservableObject {
     let yt = YouTube()
     let subsonic = Subsonic()
     let tagr = Tagr()
+    let lidarr = Lidarr()
     let ma = MusicAssistant()
 
     // library

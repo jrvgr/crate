@@ -221,6 +221,8 @@ struct PluginSettings: View {
             TagrSettings(tagr: model.tagr)
         case .musicAssistant:
             MusicAssistantSettings(ma: model.ma)
+        case .lidarr:
+            LidarrSettings(lidarr: model.lidarr)
         case .spotify:
             Picker("Read from", selection: Binding(get: { spot.mode }, set: { spot.mode = $0; model.objectWillChange.send(); Task { await model.reload() } })) {
                 Text("My Spotify account").tag("account")

@@ -77,6 +77,7 @@ extension Model {
                     remove: j.finished ? { [weak self] in self?.yt.remove(j.id) } : nil))
             }
         }
+        out += lidarrEntries()
         for j in jobs where j.source == .appleMusic {
             let failed: Bool = { if case .failed = j.state { return true }; return false }()
             out.append(DownloadEntry(

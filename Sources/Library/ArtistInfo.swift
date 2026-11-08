@@ -152,6 +152,7 @@ struct MissingRow: View {
         .buttonStyle(.plain)
         .contextMenu {
             if model.on(.soulseek) { Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(artist, release.title) } }
+            LidarrButton(artist: artist, album: release.title)
         }
     }
 }

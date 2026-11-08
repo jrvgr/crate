@@ -355,6 +355,7 @@ struct SpotifyCoverFlow: View {
                             if model.on(.soulseek), !model.hasFiles(a) {
                                 Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(a.artist, a.name) }
                             }
+                            if !model.hasFiles(a) { LidarrButton(artist: a.artist, album: a.name) }
                         }
                         .buttonStyle(.glass).padding(.top, 10)
                     }

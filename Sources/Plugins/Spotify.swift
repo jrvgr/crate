@@ -483,6 +483,7 @@ struct SpotifyAlbumView: View {
                             if let lib {
                                 Button("Go to Album", systemImage: "square.stack") { model.path.append(.album(lib)) }.buttonStyle(.glassProminent)
                             } else {
+                                LidarrButton(artist: artist, album: name).buttonStyle(.glass)
                                 if model.on(.soulseek) {
                                     Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(artist, name, songs: s.tracks.count) }
                                         .buttonStyle(.glassProminent)

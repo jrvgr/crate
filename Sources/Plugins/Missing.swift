@@ -105,6 +105,10 @@ struct MissingAlbumsSheet: View {
                             .frame(maxWidth: 280, alignment: .trailing)
                             Button { model.findOnSoulseek(r.album.artist, r.album.name); dismiss() } label: { Image(systemName: "magnifyingglass") }
                                 .buttonStyle(.glass).help("Search yourself on the Soulseek page")
+                            if model.on(.lidarr) {
+                                Button { model.getWithLidarr(r.album.artist, r.album.name) } label: { Image(systemName: PluginID.lidarr.icon) }
+                                    .buttonStyle(.glass).help("Get it with Lidarr instead")
+                            }
                         }
                         .padding(8)
                         .glassEffect(.regular, in: .rect(cornerRadius: 12))

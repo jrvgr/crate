@@ -364,6 +364,7 @@ struct AlbumMenu: View {
                     .disabled(!model.tagsEditable(album))
                 if same.isEmpty { Text("Select albums in the list view to merge any") }
             }
+            LidarrButton(artist: album.artist, album: album.title, label: model.expectedSongs(album) != nil ? "Complete Album with Lidarr" : "Get with Lidarr")
             if model.on(.soulseek) {
                 Button(model.expectedSongs(album) != nil ? "Complete Album on Soulseek" : "Find on Soulseek", systemImage: "arrow.down.circle") {
                     model.findOnSoulseek(album.artist, album.title, songs: model.expectedSongs(album) ?? album.tracks.count)
@@ -1103,6 +1104,7 @@ struct SpotifyGrid: View {
                         if model.on(.soulseek) {
                             Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(a.artist, a.name) }
                         }
+                        LidarrButton(artist: a.artist, album: a.name)
                         if model.on(.youtube) {
                             Button("Get from YouTube", systemImage: "play.rectangle") { Task { await model.albumFromYouTube(a) } }
                         }
@@ -1208,6 +1210,7 @@ struct SpotifyAlbumList: View {
                 if model.on(.soulseek) {
                     Button("Find on Soulseek", systemImage: "arrow.down.circle") { model.findOnSoulseek(a.artist, a.name) }
                 }
+                LidarrButton(artist: a.artist, album: a.name)
             }
         } primaryAction: { ids in
             if let a = albums.first(where: { ids.contains($0.id) }) { model.path.append(.spotifyAlbum(a)) }

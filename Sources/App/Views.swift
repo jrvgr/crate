@@ -105,6 +105,7 @@ struct ContentView: View {
             let m = model
             Snapshot.listen(m)
             Task { await slsk.poll { m.on(.soulseek) } }
+            Task { await m.lidarr.poll { m.on(.lidarr) } }
             await model.reload()
             if let t = arg("--open-lookup") { model.lookupAlbum = model.albums.first { $0.title == t } }
             if let t = arg("--open-album"), let a = model.allAlbums.first(where: { $0.title == t }) { model.pane = .albums; model.path = [.album(a)] }

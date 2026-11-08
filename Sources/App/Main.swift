@@ -133,6 +133,7 @@ enum Main {
             print("set:", Keychain.set("crate-test", "dummy"), "get:", Keychain.get("crate-test") == "dummy")
             Keychain.set("crate-test", ""); return
         }
+        if let i = args.firstIndex(of: "--lidarr-check") { lidarrCheck(Array(args[(i + 1)...])); return }
         if let i = args.firstIndex(of: "--tagr-check"), args.count > i + 4 { tagrCheck(Array(args[(i + 1)...])); return }
         if let i = args.firstIndex(of: "--subsonic-check") { subsonicCheck(args.count > i + 1 ? args[i + 1] : nil); return }
         if let i = args.firstIndex(of: "--ma-check"), args.count > i + 2 { maCheck(player: args[i + 1], album: args[i + 2]); return }
@@ -642,6 +643,27 @@ enum Main {
                 }
             } catch { print("error:", error.localizedDescription) }
             done()
+        }
+        RunLoop.main.run()
+    }
+
+    /// --lidarr-check [ARTIST ALBUM]: Lidarr's setup and queue as Crate sees them (Settings' address and key), and how it
+    /// would find the album. Read only: nothing is added or searched.
+    static func lidarrCheck(_ a: [String]) {
+        Task { @MainActor in
+            let l = Lidarr()
+            await l.check()
+            print("check:", l.error ?? l.status)
+            await l.refreshQueue()
+            print("queue: \(l.queue.count)"); l.queue.prefix(5).forEach { print("  \($0.artist) – \($0.album) | \($0.status) \(Int($0.progress * 100))%") }
+            if a.count > 1 {
+                do {
+                    let m = try await l.lookup(artist: a[0], album: a[1])
+                    let art = (m?["artist"] as? [String: Any])?["artistName"] as? String ?? ""
+                    print("lookup:", m.map { "\(art) – \($0["title"] as? String ?? "") (\($0["albumType"] as? String ?? "")), " + (($0["id"] as? Int ?? 0) > 0 ? "already in Lidarr" : "not in Lidarr yet") } ?? "not found")
+                } catch { print("lookup error:", error.localizedDescription) }
+            }
+            exit(0)
         }
         RunLoop.main.run()
     }
