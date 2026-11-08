@@ -169,12 +169,12 @@ struct IPodView: View {
                 }
             }
             .confirmationDialog("Restore the previous database?", isPresented: $ui.confirmRestore) {
-                Button("Restore", role: .destructive) { model.restoreBackup() }
+                Button("Restore", role: .destructive) { Task { await model.restoreBackup() } }
             } message: {
                 Text("Puts back the database from before Crate's last write to the iPod. Songs copied since then stay as files but leave the song list.")
             }
             .confirmationDialog("Delete \(model.orphans?.count ?? 0) stray files?", isPresented: $ui.confirmOrphans) {
-                Button("Delete", role: .destructive) { model.deleteOrphans() }
+                Button("Delete", role: .destructive) { Task { await model.deleteOrphans() } }
             } message: {
                 Text("These files are in iPod_Control/Music but not in the song list, so the iPod can't play them.")
             }
@@ -342,8 +342,7 @@ struct IPodView: View {
         if !c.missing.isEmpty { parts.append("\(c.missing.count) songs have no file") }
         if !c.wrongSize.isEmpty { parts.append("\(c.wrongSize.count) files have another size than the list says") }
         if !c.stray.isEmpty {
-            let bytes = c.stray.compactMap { (try? FileManager.default.attributesOfItem(atPath: $0.path))?[.size] as? Int }.reduce(0, +)
-            parts.append("\(c.stray.count) stray files (\(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)))")
+            parts.append("\(c.stray.count) stray files (\(ByteCountFormatter.string(fromByteCount: model.strayBytes, countStyle: .file)))")
         }
         return parts.isEmpty ? "All good: every song has its file and there are no stray files" : parts.joined(separator: " · ")
     }
@@ -374,7 +373,7 @@ struct IPodView: View {
                         Button("Delete Stray Files…") { ui.confirmOrphans = true }.buttonStyle(.glass)
                     }
                     if let m = model.podCheck?.missing, !m.isEmpty {
-                        Button("Remove \(m.count) from List") { model.removeMissing() }.buttonStyle(.glass)
+                        Button("Remove \(m.count) from List") { Task { await model.removeMissing() } }.buttonStyle(.glass)
                             .help("Songs in the iPod's list whose file is gone; the iPod skips them")
                     }
                     Button(ui.checking ? "Checking…" : "Check") {

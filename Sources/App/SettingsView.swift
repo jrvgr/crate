@@ -44,9 +44,7 @@ struct FolderField: View {
     var body: some View {
         LabeledContent(title) {
             HStack(spacing: 8) {
-                Image(systemName: FileManager.default.fileExists(atPath: path) ? "folder.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(FileManager.default.fileExists(atPath: path) ? AnyShapeStyle(.tint) : AnyShapeStyle(.orange))
-                    .help(FileManager.default.fileExists(atPath: path) ? path : "Not found – is the share mounted?")
+                FolderStatus(path: path)
                 Text(path.isEmpty ? "None" : (path as NSString).abbreviatingWithTildeInPath)
                     .lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
                     .frame(maxWidth: 260, alignment: .trailing)
@@ -54,6 +52,19 @@ struct FolderField: View {
             }
         }
         .help(help)
+    }
+}
+
+/// A folder when it's there, a warning when not. Checked off the main thread: a share that isn't mounted
+/// can hang a stat for seconds, and in the view's body that ran on every redraw.
+struct FolderStatus: View {
+    var path: String
+    @State private var exists: Bool?
+    var body: some View {
+        Image(systemName: exists == false ? "exclamationmark.triangle.fill" : "folder.fill")
+            .foregroundStyle(exists == false ? AnyShapeStyle(.orange) : AnyShapeStyle(.tint))
+            .help(exists == false ? "Not found – is the share mounted?" : path)
+            .task(id: path) { let p = path; exists = await offMain { FileManager.default.fileExists(atPath: p) } }
     }
 }
 
@@ -92,8 +103,7 @@ struct LibrarySettings: View {
                 List(selection: $ui.folderSelection) {
                     ForEach(model.folders, id: \.self) { f in
                         HStack(spacing: 8) {
-                            Image(systemName: FileManager.default.fileExists(atPath: f) ? "folder.fill" : "exclamationmark.triangle.fill")
-                                .foregroundStyle(FileManager.default.fileExists(atPath: f) ? AnyShapeStyle(.tint) : AnyShapeStyle(.orange))
+                            FolderStatus(path: f)
                             Text(f).lineLimit(1).truncationMode(.middle)
                         }
                         .tag(f)
@@ -149,11 +159,11 @@ struct LibrarySettings: View {
                 LabeledContent("Deleted from shares") {
                     HStack {
                         Text(ui.trashSize > 0 ? ByteCountFormatter.string(fromByteCount: ui.trashSize, countStyle: .file) : "Empty").foregroundStyle(.secondary)
-                        Button("Show") { model.crateTrash.first.map { NSWorkspace.shared.open(URL(fileURLWithPath: $0)) } }.disabled(ui.trashSize == 0)
-                        Button("Empty Crate Trash", role: .destructive) { model.emptyCrateTrash(); ui.trashSize = 0 }.disabled(ui.trashSize == 0)
+                        Button("Show") { Task { await model.showCrateTrash() } }.disabled(ui.trashSize == 0)
+                        Button("Empty Crate Trash", role: .destructive) { Task { await model.emptyCrateTrash(); ui.trashSize = 0 } }.disabled(ui.trashSize == 0)
                     }
                 }
-                .task { ui.trashSize = model.crateTrashSize() }
+                .task { ui.trashSize = await model.crateTrashSize() }
             } header: { Text("Crate Trash") } footer: {
                 Text("Network shares have no Trash, so Crate keeps what you delete there in a hidden .crate-trash folder until you empty it.")
             }

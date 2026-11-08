@@ -279,7 +279,8 @@ extension Model {
         var after = before
         change(&after)
         do {
-            try OwnToneM3U.write(p, paths: after.map(\.path), listed: before.map(\.path))
+            let paths = after.map(\.path), listed = before.map(\.path)
+            try await offMain { try OwnToneM3U.write(p, paths: paths, listed: listed) }     // the .m3u is on the share
             playlistTracks[p.id] = after
             if let i = playlists.firstIndex(where: { $0.id == p.id }) { playlists[i].count = after.count }
             Task { await refreshOwnTonePlaylists() }
@@ -329,12 +330,12 @@ extension Model {
         case .pod(let id):
             if let p = db?.playlists.first(where: { $0.id == id }) { editPod(p, name: n) }
         case .ownTone(let id):
-            guard let i = playlists.firstIndex(where: { $0.id == id }) else { return }
+            guard let p = playlists.first(where: { $0.id == id }) else { return }
             do {
-                playlists[i].path = try OwnToneM3U.rename(playlists[i], to: n)
-                playlists[i].name = n
+                let path = try await offMain { try OwnToneM3U.rename(p, to: n) }
+                if let i = playlists.firstIndex(where: { $0.id == id }) { playlists[i].path = path; playlists[i].name = n }
                 await refreshOwnTonePlaylists(select: n)
-            } catch { notify("Couldn't rename “\(playlists[i].name)”: \(error.localizedDescription)") }
+            } catch { notify("Couldn't rename “\(p.name)”: \(error.localizedDescription)") }
         }
     }
 
@@ -351,7 +352,7 @@ extension Model {
         case .ownTone(let id):
             guard let p = playlists.first(where: { $0.id == id }) else { return }
             do {
-                try OwnToneM3U.delete(p)
+                try await offMain { try OwnToneM3U.delete(p) }
                 playlists.removeAll { $0.id == id }
                 if pane == .playlist(id) { pane = .albums }
                 Task { await refreshOwnTonePlaylists() }

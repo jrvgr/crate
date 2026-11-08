@@ -29,7 +29,7 @@ struct CrateApp: App {
                 Button("Edit Tags…") { model.editAlbum = model.focusAlbum }.keyboardShortcut("i").disabled(model.focusAlbum == nil)
                 Button("Find Metadata…") { model.lookupAlbum = model.focusAlbum }.keyboardShortcut("f", modifiers: [.command, .option])
                     .disabled(model.focusAlbum == nil)
-                Button("Quick Look Cover") { if let a = model.focusAlbum { model.quickLookCover(a) } }.keyboardShortcut("y").disabled(model.focusAlbum == nil)
+                Button("Quick Look Cover") { if let a = model.focusAlbum { Task { await model.quickLookCover(a) } } }.keyboardShortcut("y").disabled(model.focusAlbum == nil)
                 Button("Play Album") { if let a = model.focusAlbum { Task { await model.play(a) } } }.keyboardShortcut(.return, modifiers: .command)
                     .disabled(model.focusAlbum == nil)
                 Divider()
