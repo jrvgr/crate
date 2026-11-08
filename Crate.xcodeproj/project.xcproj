@@ -1,0 +1,88 @@
+{
+  "default-configuration": "Release",
+  "configurations": [
+    "Debug",
+    "Release",
+  ],
+  "localizations": {
+    "development": "en",
+    "supported": [
+      "Base",
+    ],
+  },
+  "packages": [
+    { "kind": "remote", "repository": "https://github.com/sparkle-project/Sparkle", "version": { "up-to-next-major-version": "2.10.0" } },
+  ],
+  "files": [
+    { "kind": "folder", "path": "Sources", "target-membership": [ "Crate" ] },
+    {
+      "kind": "group",
+      "name": "Resources",
+      "children": [
+        { "path": "Resources/Info.plist" },
+        { "path": "Resources/Icon/Crate.icns", "target-membership": [ "Crate/resources" ] },
+        { "path": "Resources/Fonts/ChicagoFLF.ttf", "target-membership": [ "Crate/resources" ] },
+      ],
+    },
+    {
+      "kind": "group",
+      "name": "Products",
+      "children": [
+        { "path": "<PRODUCTS>/Crate.app", "id": "000000000000000000000120", "type": "wrapper.application", "index": false },
+      ],
+    },
+  ],
+  "targets": [
+    {
+      "name": "Crate",
+      "id": "000000000000000100000000",
+      "product": "Products/Crate.app",
+      "product-type": "application",
+      "build-phases": [
+        "compile-sources",
+        "frameworks",
+        "resources",
+      ],
+      "package-product-members": [
+        { "package": "Sparkle", "product-name": "Sparkle", "build-phase": { "build-phase": "frameworks" } },
+      ],
+      "build-settings": {
+        "CODE_SIGN_IDENTITY": "-",
+        "CODE_SIGN_STYLE": "Manual",
+        "CURRENT_PROJECT_VERSION": "1",
+        "ENABLE_APP_SANDBOX": "NO",
+        "ENABLE_HARDENED_RUNTIME": "NO",
+        "ENABLE_PREVIEWS": "YES",
+        "GENERATE_INFOPLIST_FILE": "NO",
+        "INFOPLIST_FILE": "Resources/Info.plist",
+        "LD_RUNPATH_SEARCH_PATHS": "@executable_path/../Frameworks",
+        "MACOSX_DEPLOYMENT_TARGET": "26.0",
+        "MARKETING_VERSION": "0.1.0",
+        "PRODUCT_BUNDLE_IDENTIFIER": "nl.jrvgr.crate",
+        "PRODUCT_NAME": "$(TARGET_NAME)",
+        "SDKROOT": "macosx",
+        "SUPPORTED_PLATFORMS": "macosx",
+        "SWIFT_VERSION": "5.0",
+      },
+    },
+  ],
+  "build-settings": {
+    "ALWAYS_SEARCH_USER_PATHS": "NO",
+    "CLANG_ENABLE_MODULES": "YES",
+    "CLANG_ENABLE_OBJC_ARC": "YES",
+    "COPY_PHASE_STRIP": "NO",
+    "DEAD_CODE_STRIPPING": "YES",
+    "DEBUG_INFORMATION_FORMAT[config=Debug]": "dwarf",
+    "DEBUG_INFORMATION_FORMAT[config=Release]": "dwarf-with-dsym",
+    "ENABLE_NS_ASSERTIONS[config=Release]": "NO",
+    "ENABLE_TESTABILITY[config=Debug]": "YES",
+    "ENABLE_USER_SCRIPT_SANDBOXING": "YES",
+    "GCC_OPTIMIZATION_LEVEL[config=Debug]": "0",
+    "ONLY_ACTIVE_ARCH[config=Debug]": "YES",
+    "SWIFT_ACTIVE_COMPILATION_CONDITIONS[config=Debug]": "DEBUG $(inherited)",
+    "SWIFT_COMPILATION_MODE[config=Release]": "wholemodule",
+    "SWIFT_OPTIMIZATION_LEVEL[config=Debug]": "-Onone",
+  },
+  "last-upgrade": "27.2",
+  "last-swift-update": "27.2",
+}
