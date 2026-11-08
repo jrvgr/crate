@@ -564,7 +564,7 @@ struct CratePlaylistView: View {
                 }
                 .padding(28).padding(.bottom, 60)
             }
-            .navigationTitle(p.name)
+            .pageTitle(p.name)
         } else {
             ContentUnavailableView("Playlist not found", systemImage: "music.note.list")
         }

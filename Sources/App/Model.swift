@@ -173,6 +173,7 @@ final class Model: ObservableObject {
     @Published var links: [String: String] = Store.load("links.json", [:]) { didSet { Store.save("links.json", links) } }     // streamed song (uri and key) → library file path
     @Published var linking: OTTrack?           // the streamed song the Link to Local Song sheet is open for
     @Published var coverDrop: Album.ID?        // the cover an image is being dragged over
+    @Published var albumOnAlbum: AlbumPair?    // an album dropped on another's cover: what to do with the two
     @Published var playlistsToAdd: Set<OTPlaylist.ID> = [] { didSet { savePending() } }
     @Published var playlistsToRemove: Set<PodPlaylist.ID> = [] { didSet { savePending() } }
     @Published var pendingName: String? { didSet { savePending() } }
@@ -205,7 +206,7 @@ final class Model: ObservableObject {
     var travelling = false
     @Published var albumFilter = AlbumFilter.all
     @Published var albumSort = AlbumSort.artist
-    @AppStorage("artistView") var artistView = "grid"        // "grid" or "list"
+    @AppStorage("artistView") var artistView = "grid"        // "grid", "list" or "flow"
     @AppStorage("albumView") var albumView = "grid"          // "grid", "flow" or "list"
     @AppStorage("albumsByArtist") var albumsByArtist = false  // the library grid in a section per artist
     @Published var lookupAlbum: Album?
@@ -390,9 +391,21 @@ final class Model: ObservableObject {
         /// Library albums plus albums that are only on the iPod (so they can be opened and removed).
         allAlbums = (albums + podAlbums.filter { !libraryIDs.contains($0.id) })
             .sorted { ($0.artist.lowercased(), $0.title.lowercased()) < ($1.artist.lowercased(), $1.title.lowercased()) }
-        artists = Dictionary(grouping: allAlbums) { $0.artist.lowercased() }.values
-            .map { Artist(name: $0[0].artist, albums: $0.sorted { ($0.year, $0.title) < ($1.year, $1.title) }) }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        // an album by several artists ("Kyuss & Queens of the Stone Age") goes under each of them when each is an
+        // artist with albums of their own; otherwise under its credit as it is ("Roni Size & Reprazent")
+        var names: [String: String] = [:]
+        for a in allAlbums { names[a.artist.lowercased()] = names[a.artist.lowercased()] ?? a.artist }
+        let solo = Array(names.values)
+        var byArtist: [String: [Album]] = [:]
+        for a in allAlbums {
+            let parts = ArtistsField.split(a.artist, known: solo)
+            let own = parts.count > 1 && parts.allSatisfy { names[$0.lowercased()] != nil }
+            for p in own ? parts : [a.artist] { byArtist[p.lowercased(), default: []].append(a) }
+        }
+        artists = byArtist.map { key, albums in
+            Artist(name: names[key] ?? albums[0].artist, albums: albums.sorted { ($0.year, $0.title) < ($1.year, $1.title) })
+        }
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     var recentlyAdded: [Album] {
@@ -1024,6 +1037,15 @@ final class Model: ObservableObject {
     static func releaseHighlight(_ title: String) -> String { "release:" + Release.loose(title) }
 
     /// Shows an album's cover in Quick Look (the cover file, or the embedded art saved to a temp file).
+    /// An album's cover as image data: its cover file, else the artwork Crate shows for it.
+    func coverData(_ a: Album) -> Data? {
+        let fm = FileManager.default
+        if let n = ["cover.jpg", "folder.jpg", "cover.png", "folder.png", "front.jpg"].first(where: { fm.fileExists(atPath: a.folder + "/" + $0) }),
+           let d = try? Data(contentsOf: URL(fileURLWithPath: a.folder + "/" + n)) { return d }
+        guard let img = artwork[a.id], let tiff = img.tiffRepresentation else { return nil }
+        return NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+    }
+
     func quickLookCover(_ a: Album) {
         let fm = FileManager.default
         if let n = ["cover.jpg", "folder.jpg", "cover.png", "folder.png", "front.jpg"].first(where: { fm.fileExists(atPath: a.folder + "/" + $0) }) {
@@ -1959,3 +1981,6 @@ extension Model {
     }
 }
 
+
+/// An album dragged onto another album's cover.
+struct AlbumPair: Equatable { var dragged, target: Album }

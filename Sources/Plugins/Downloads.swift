@@ -32,7 +32,12 @@ extension Model {
     }
 }
 
-enum DownloadFilter: String, CaseIterable { case all = "All", active = "In Progress", finished = "Finished" }
+enum DownloadFilter: String, CaseIterable {
+    case all = "All", active = "In Progress", finished = "Finished"
+    var icon: String {
+        switch self { case .all: "square.grid.2x2"; case .active: "arrow.down.circle"; case .finished: "checkmark.circle" }
+    }
+}
 
 extension Model {
     func downloadEntries(_ slsk: Slskd) -> [DownloadEntry] {
@@ -116,21 +121,6 @@ struct DownloadsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 header(all)
-                HStack {
-                    Picker("", selection: $ui.filter) {
-                        ForEach(DownloadFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.segmented).labelsHidden().fixedSize()
-                    Spacer()
-                    Menu {
-                        Picker("Source", selection: $ui.source) {
-                            Text("All Sources").tag(PluginID?.none)
-                            ForEach(sources) { Label($0.name, systemImage: $0.icon).tag(PluginID?.some($0)) }
-                        }
-                        .pickerStyle(.inline)
-                    } label: { Text(ui.source?.name ?? "All Sources") }
-                    .glassMenu()
-                }
                 if shown.isEmpty {
                     ContentUnavailableView(all.isEmpty ? "Nothing downloading" : "Nothing here", systemImage: "tray",
                                            description: Text(sources.isEmpty ? "Turn on Soulseek or Apple Music in Settings › Plugins."
@@ -151,7 +141,21 @@ struct DownloadsView: View {
             }
             .padding(24).padding(.bottom, 50)
         }
-        .navigationTitle("Downloads")
+        .pageTitle("Downloads")
+        .filtersInToolbar {
+            Picker("", selection: $ui.filter) {
+                ForEach(DownloadFilter.allCases, id: \.self) { Image(systemName: $0.icon).help($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            Menu {
+                Picker("Source", selection: $ui.source) {
+                    Text("All Sources").tag(PluginID?.none)
+                    ForEach(sources) { Label($0.name, systemImage: $0.icon).tag(PluginID?.some($0)) }
+                }
+                .pickerStyle(.inline)
+            } label: { Text(ui.source?.name ?? "All Sources") }
+            .fixedSize()
+        }
         .sheet(isPresented: Binding(get: { ui.ytDetail != nil }, set: { if !$0 { ui.ytDetail = nil } })) {
             if let id = ui.ytDetail { YTJobDetail(id: id) }
         }

@@ -589,7 +589,7 @@ struct YouTubeView: View {
             }
             Spacer(minLength: 0)
         }
-        .navigationTitle("YouTube")
+        .pageTitle("YouTube")
         .sheet(isPresented: Binding(get: { split.video != nil }, set: { if !$0 { split.video = nil } })) {
             SplitSheet(ui: split).environmentObject(model).environmentObject(yt)
         }

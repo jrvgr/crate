@@ -482,8 +482,7 @@ struct SoulseekView: View {
             }
             Spacer(minLength: 0)
         }
-        .navigationTitle("Soulseek")
-        .navigationSubtitle(slsk.serverState)
+        .pageTitle("Soulseek", subtitle: slsk.serverState)
         .task { if !slsk.connected { await slsk.check() }; if slsk.results.isEmpty { focused = true } }
     }
 }

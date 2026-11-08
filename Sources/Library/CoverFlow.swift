@@ -61,20 +61,27 @@ struct CoverFlow<Art: View>: View {
     var count: Int
     @ObservedObject var flow: FlowState
     var art: (Int) -> Art
+    var horizontalOnly = false          // in a page that scrolls: vertical swipes scroll the page
+    var reflection = true               // false: just the covers, centred and as big as the height allows
+    var shadow = true
+    var fitAll = false                  // every cover in the width (closer together), none faded out
     var onOpen: (Int) -> Void
 
     var body: some View {
         GeometryReader { g in
-            let size = min(g.size.height * 0.68, g.size.width * 0.26)
-            let mid = g.size.height * 0.46
+            let size = min(g.size.height * (reflection ? 0.68 : 0.86), g.size.width * 0.26)
+            let mid = g.size.height * (reflection ? 0.46 : 0.5)
+            // fitAll: the side covers close up so that the last one, with the first in the middle, still reaches the edge
+            let room = g.size.width / 2 - size * 0.9 - size * 0.55
+            let step = fitAll ? min(size * 0.46, max(room / Double(max(count - 1, 1)), 3)) : size * 0.46
             TimelineView(.animation(paused: flow.settled)) { tl in
                 let pos = flow.settled ? flow.target : flow.advance(tl.date, count: count)
-                let lo = max(0, Int(pos) - 5), hi = min(count - 1, Int(pos) + 6)
+                let lo = fitAll ? 0 : max(0, Int(pos) - 5), hi = fitAll ? count - 1 : min(count - 1, Int(pos) + 6)
                 ZStack {
                     if lo <= hi {
                         ForEach(lo...hi, id: \.self) { i in
                             cover(i, d: Double(i) - pos, size: size)
-                                .position(x: g.size.width / 2 + x(Double(i) - pos, size), y: mid)
+                                .position(x: g.size.width / 2 + x(Double(i) - pos, size, step: step), y: mid)
                                 .zIndex(-abs(Double(i) - pos))
                                 .onTapGesture {
                                     if i == Int(flow.target.rounded()) { onOpen(i) } else { flow.go(to: i, count: count) }
@@ -84,15 +91,15 @@ struct CoverFlow<Art: View>: View {
                 }
                 .frame(width: g.size.width, height: g.size.height)
             }
-            .overlay { ScrollCatcher { delta, ended in flow.scroll(by: delta / Double(size * 0.2), count: count, ended: ended) } }
+            .overlay { ScrollCatcher(horizontalOnly: horizontalOnly) { delta, ended in flow.scroll(by: delta / Double(size * 0.2), count: count, ended: ended) } }
         }
         .clipped()
     }
 
     /// Horizontal position: 0.9 cover widths to the first side cover, then 0.46 apart.
-    func x(_ d: Double, _ size: Double) -> Double {
+    func x(_ d: Double, _ size: Double, step: Double) -> Double {
         let a = abs(d), s: Double = d < 0 ? -1 : 1
-        return a < 1 ? d * size * 0.9 : s * (size * 0.9 + (a - 1) * size * 0.46)
+        return a < 1 ? d * size * 0.9 : s * (size * 0.9 + (a - 1) * step)
     }
 
     func cover(_ i: Int, d: Double, size: Double) -> some View {
@@ -107,28 +114,45 @@ struct CoverFlow<Art: View>: View {
                     LinearGradient(colors: [.white.opacity(0.12 * (1 - t)), .clear], startPoint: .topLeading, endPoint: .center)
                         .clipShape(.rect(cornerRadius: 14, style: .continuous)).allowsHitTesting(false)
                 }
-                .shadow(color: .black.opacity(0.35), radius: 14, y: 8)
-            art
-                .scaleEffect(x: 1, y: -1)
-                .mask(LinearGradient(colors: [.black.opacity(0.22), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.35)))
+                .shadow(color: .black.opacity(shadow ? 0.35 : 0), radius: 14, y: 8)
+            if reflection {
+                art
+                    .scaleEffect(x: 1, y: -1)
+                    .mask(LinearGradient(colors: [.black.opacity(0.22), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.35)))
+            }
         }
-        .frame(width: size, height: size * 2 + 6, alignment: .top)
-        .offset(y: size / 2 + 3)
+        .frame(width: size, height: reflection ? size * 2 + 6 : size, alignment: .top)
+        .offset(y: reflection ? size / 2 + 3 : 0)
         .rotation3DEffect(.radians(-s * 0.6 * t), axis: (0, 1, 0), anchor: .center, perspective: 0.35)
         .scaleEffect(1 - 0.2 * t - 0.03 * max(0, far - 1))
-        .opacity(far > 4.5 ? max(0, 5.5 - far) : 1 - 0.12 * max(0, far - 1))
+        .opacity(fitAll ? 1 : far > 4.5 ? max(0, 5.5 - far) : 1 - 0.12 * max(0, far - 1))
     }
 }
 
 /// Catches trackpad/wheel scrolling (and click-drags) over Cover Flow, in points.
 struct ScrollCatcher: NSViewRepresentable {
+    var horizontalOnly = false
     var onScroll: (Double, Bool) -> Void
 
     final class Catcher: NSView {
         var onScroll: ((Double, Bool) -> Void)?
+        var horizontalOnly = false
         private var dragX: CGFloat?
+        private var vertical: Bool?           // the swipe's direction, decided on its first event
 
         override func scrollWheel(with e: NSEvent) {
+            if horizontalOnly {
+                if e.phase == .began || vertical == nil || (!e.hasPreciseScrollingDeltas) {
+                    vertical = abs(e.scrollingDeltaY) > abs(e.scrollingDeltaX)
+                }
+                let done = e.momentumPhase == .ended || e.momentumPhase == .cancelled || (e.phase == .ended && e.momentumPhase == [])
+                if vertical == true {
+                    super.scrollWheel(with: e)          // on to the page's scroll view
+                    if done { vertical = nil }
+                    return
+                }
+                if done { vertical = nil }          // a sideways swipe ended: the next one decides again
+            }
             let dx = abs(e.scrollingDeltaX) >= abs(e.scrollingDeltaY) ? -e.scrollingDeltaX : -e.scrollingDeltaY
             let lines = e.hasPreciseScrollingDeltas ? 1.0 : 18.0       // a mouse wheel moves in lines
             let finished = e.momentumPhase == .ended || e.momentumPhase == .cancelled
@@ -153,8 +177,8 @@ struct ScrollCatcher: NSViewRepresentable {
         }
     }
 
-    func makeNSView(context: Context) -> Catcher { let v = Catcher(); v.onScroll = onScroll; return v }
-    func updateNSView(_ v: Catcher, context: Context) { v.onScroll = onScroll }
+    func makeNSView(context: Context) -> Catcher { let v = Catcher(); v.onScroll = onScroll; v.horizontalOnly = horizontalOnly; return v }
+    func updateNSView(_ v: Catcher, context: Context) { v.onScroll = onScroll; v.horizontalOnly = horizontalOnly }
 }
 
 /// Albums as Cover Flow over a blurred wash of the middle album's art, its songs on glass below.
@@ -249,6 +273,7 @@ struct Scrubber: View {
 struct CoverFlowTracks: View {
     @EnvironmentObject var model: Model
     var album: Album
+    var scrolls = true                  // false: all its songs, in a page that scrolls
 
     var body: some View {
         let m = model.mark(album), keys = model.podKeys, podOnly = model.isPodOnly(album)
@@ -269,7 +294,11 @@ struct CoverFlowTracks: View {
             }
             .padding(.horizontal, 18).padding(.vertical, 10)
             Divider().opacity(0.5)
-            ScrollView {
+            if scrolls { ScrollView { rows(keys) } } else { rows(keys) }
+        }
+    }
+
+    func rows(_ keys: Set<String>) -> some View {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(album.tracks.enumerated()), id: \.element.id) { n, t in
                         HStack(spacing: 12) {
@@ -287,8 +316,6 @@ struct CoverFlowTracks: View {
                     }
                 }
                 .padding(.bottom, 12)
-            }
-        }
     }
 }
 
@@ -344,5 +371,84 @@ struct SpotifyCoverFlow: View {
         .onKeyPress(.rightArrow) { flow.step(1, count: albums.count); return .handled }
         .onKeyPress(.return) { if let a = current { model.path.append(.spotifyAlbum(a)) }; return .handled }
         .onChange(of: albums.map(\.id)) { flow.go(to: min(flow.index, max(albums.count - 1, 0)), count: albums.count) }
+    }
+}
+
+/// Cover Flow of the artists: their portraits in the carousel; under it a smaller one of the middle artist's albums,
+/// newest first, and the middle album's songs. The page scrolls; the carousels take only sideways swipes.
+struct CoverFlowArtists: View {
+    @EnvironmentObject var model: Model
+    var artists: [Artist]
+    @StateObject private var flow = FlowState()
+    @StateObject private var albumFlow = FlowState()
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let i = min(flow.index, max(artists.count - 1, 0))
+        let current = artists.indices.contains(i) ? artists[i] : nil
+        let albums = current.map { $0.albums.sorted { ($0.year, $0.title) > ($1.year, $1.title) } } ?? []
+        let j = min(albumFlow.index, max(albums.count - 1, 0))
+        let album = albums.indices.contains(j) ? albums[j] : nil
+        GeometryReader { page in
+        ScrollView {
+            VStack(spacing: 10) {
+                CoverFlow(count: artists.count, flow: flow, art: { ArtistImage(artist: artists[$0]) }, horizontalOnly: true) {
+                    model.path.append(.artist(artists[$0].name))
+                }
+                .frame(height: 360)
+                .background { FlowGlow(image: current.flatMap { model.artistArt[$0.id] }, seed: current?.id ?? "") }
+                if let a = current {
+                    VStack(spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(a.name).font(.title3.bold()).lineLimit(1)
+                            SidebarMark(mark: model.artistMark(a))
+                        }
+                        Text("\(a.albums.count) album\(a.albums.count == 1 ? "" : "s") · \(a.trackCount) songs").foregroundStyle(.secondary).lineLimit(1)
+                        Scrubber(count: artists.count, index: i) { flow.go(to: $0, count: artists.count) }
+                            .frame(width: 260).padding(.top, 6)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                // the artist's albums and the middle one's songs, together on one card
+                if let al = album {
+                    VStack(spacing: 0) {
+                        CoverFlow(count: albums.count, flow: albumFlow, art: { Cover(image: model.artwork[albums[$0].id], seed: albums[$0].id) },
+                                  horizontalOnly: true, reflection: false, shadow: false, fitAll: true) { _ in }   // a click only scrolls; Open opens
+                            .frame(height: 170)
+                            .padding(.top, 14)
+                        VStack(spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(al.title).font(.headline).lineLimit(1)
+                                SidebarMark(mark: model.mark(al))
+                            }
+                            if al.year > 0 { Text(String(al.year)).font(.subheadline).foregroundStyle(.secondary) }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 4).padding(.bottom, 4)
+                        Divider().opacity(0.5)
+                        CoverFlowTracks(album: al, scrolls: false)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxHeight: .infinity, alignment: .top)       // down to the bottom of the page, however few songs
+                    .glassEffect(.regular, in: .rect(cornerRadius: 22))
+                    .padding(.horizontal, 24).padding(.bottom, 24).padding(.top, 14)
+                }
+            }
+            .frame(minHeight: page.size.height, alignment: .top)
+        }
+        }
+        .focusable()
+        .focused($focused)
+        .focusEffectDisabled()
+        .onAppear { focused = true }
+        // ← → the artists, ⌥← ⌥→ the albums
+        .onKeyPress(keys: [.leftArrow, .rightArrow]) { k in
+            let by = k.key == .leftArrow ? -1 : 1
+            if k.modifiers.contains(.option) { albumFlow.step(by, count: albums.count) } else { flow.step(by, count: artists.count) }
+            return .handled
+        }
+        .onKeyPress(.return) { if let a = current { model.path.append(.artist(a.name)) }; return .handled }
+        .onChange(of: artists.map(\.id)) { flow.go(to: min(flow.index, max(artists.count - 1, 0)), count: artists.count) }
+        .onChange(of: current?.id) { albumFlow.go(to: 0, count: max(albums.count, 1)) }   // another artist: their newest album
     }
 }

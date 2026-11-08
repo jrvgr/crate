@@ -38,8 +38,7 @@ struct RecentView: View {
                             ForEach(Self.items(list)) { item in
                                 switch item {
                                 case .album(let a):
-                                    NavigationLink(value: Route.album(a)) { AlbumTile(album: a) }
-                                        .buttonStyle(.plain)
+                                    AlbumTile(album: a).albumLink(a)
                                         .contextMenu { AlbumMenu(album: a) }
                                 case .singles(let artist, let singles):
                                     NavigationLink(value: Route.artist(artist)) { SinglesTile(artist: artist, albums: singles) }
@@ -52,7 +51,7 @@ struct RecentView: View {
             }
             .padding(24).padding(.bottom, 80)
         }
-        .navigationTitle("Recently Added")
+        .pageTitle("Recently Added")
     }
 
     enum Item: Identifiable {
@@ -158,13 +157,13 @@ struct IPodView: View {
                 .padding(.horizontal, 32).padding(.top, 24).padding(.bottom, 90)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .navigationTitle(model.podName)
+            .pageTitle(model.podName)
             .toolbar {
                 // the page was the iPod's state and then a long scroll down to its settings: one or the other
                 ToolbarItem(placement: .navigation) {
                     Picker("Show", selection: $ui.tab) {
-                        Text("Overview").tag("overview")
-                        Text("Settings").tag("settings")
+                        Image(systemName: "chart.bar").help("Overview").tag("overview")
+                        Image(systemName: "slider.horizontal.3").help("Settings").tag("settings")
                     }
                     .pickerStyle(.segmented).labelsHidden().fixedSize()
                 }
@@ -471,18 +470,154 @@ extension View {
 struct FilterField: View {
     var prompt: String
     @Binding var text: String
+    var toolbar = false                 // a toolbar item: the toolbar draws the glass and sets the height
     var body: some View {
-        HStack(spacing: 6) {
+        let field = HStack(spacing: 6) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
             TextField(prompt, text: $text).textFieldStyle(.plain)
             if !text.isEmpty {
                 Button { text = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(.secondary)
             }
         }
-        .padding(.horizontal, 10).padding(.vertical, 6)
-        .glassEffect(.regular, in: .capsule)
-        .frame(maxWidth: 320)
+        if toolbar {
+            field.padding(.horizontal, 8).frame(width: 200)
+        } else {
+            field.padding(.horizontal, 10).padding(.vertical, 6)
+                .glassEffect(.regular, in: .capsule)
+                .frame(maxWidth: 320)
+        }
     }
+}
+
+extension View {
+    /// A page's filters in the window's toolbar instead of a bar of their own under it: each a toolbar item, so
+    /// they get the toolbar's glass and height. On the left before the title, as the Albums and Artists pages'
+    /// controls: in the middle (.principal) macOS pulled the window's own buttons in from the right edge next to
+    /// them, without the title everything packed to the left, and on the right they went after Sync.
+    /// The page's search field goes on the right, just before the window's own buttons, in the same place on every
+    /// page: the window's toolbar draws it (PageFilter), as a page's own items always land after Sync.
+    func filtersInToolbar<F: View>(search prompt: String? = nil, text: Binding<String>? = nil, @ViewBuilder _ filters: () -> F) -> some View {
+        let f = filters()
+        return toolbar { ToolbarItemGroup(placement: .navigation) { f } }
+            .modifier(PageFilterSource(prompt: prompt, text: text))
+    }
+}
+
+extension View {
+    /// The page's title and subtitle, right after the back/forward arrows as in Finder and Music (PageTitleLabel, in
+    /// BackForward). macOS's own title would come after the page's controls; it stays, empty, because it's what takes
+    /// the toolbar's free space and keeps the window's buttons at the right edge. `show` false leaves the title to a
+    /// list inside the page.
+    func pageTitle(_ title: String, subtitle: String? = nil, show: Bool = true) -> some View {
+        navigationTitle("").modifier(PageTitleSource(title: show ? title : nil, subtitle: subtitle))
+    }
+}
+
+/// The titles of the pages showing, the one that came last on top (a page pushed over another, a list inside a page).
+@MainActor
+final class PageTitles: ObservableObject {
+    static let shared = PageTitles()
+    struct Entry { var id: UUID; var title: String; var subtitle: String? }
+    @Published private(set) var entries: [Entry] = []
+    var current: Entry? { entries.last }
+
+    func set(_ id: UUID, _ title: String?, _ subtitle: String?) {
+        guard let title else { remove(id); return }
+        if let i = entries.firstIndex(where: { $0.id == id }) {
+            if entries[i].title != title || entries[i].subtitle != subtitle { entries[i].title = title; entries[i].subtitle = subtitle }
+        } else { entries.append(Entry(id: id, title: title, subtitle: subtitle)) }
+    }
+    func remove(_ id: UUID) { entries.removeAll { $0.id == id } }
+}
+
+private final class TitleID: ObservableObject { let id = UUID() }
+
+private struct PageTitleSource: ViewModifier {
+    var title: String?
+    var subtitle: String?
+    @StateObject private var me = TitleID()
+    func body(content: Content) -> some View {
+        content
+            .onAppear { PageTitles.shared.set(me.id, title, subtitle) }
+            .onDisappear { PageTitles.shared.remove(me.id) }
+            .onChange(of: title) { PageTitles.shared.set(me.id, title, subtitle) }
+            .onChange(of: subtitle) { PageTitles.shared.set(me.id, title, subtitle) }
+    }
+}
+
+/// The page's title as the toolbar shows it, after the arrows.
+struct PageTitleLabel: View {
+    @ObservedObject private var titles = PageTitles.shared
+    var body: some View {
+        if let t = titles.current {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(t.title).font(.system(size: 15, weight: .bold)).lineLimit(1)
+                if let s = t.subtitle, !s.isEmpty {
+                    Text(s).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            .frame(maxWidth: 300, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 6)
+        }
+    }
+}
+
+/// The search field of the page that's showing, which the window's toolbar draws (ContentView).
+@MainActor
+final class PageFilter: ObservableObject {
+    static let shared = PageFilter()
+    @Published private(set) var prompt: String?        // nil: the page has no search field
+    let text = PageFilterText()
+    private(set) var owner: UUID?
+    fileprivate var write: ((String) -> Void)?
+
+    fileprivate func show(_ owner: UUID, prompt: String, text: Binding<String>) {
+        self.owner = owner; self.prompt = prompt; write = { text.wrappedValue = $0 }
+        self.text.value = text.wrappedValue
+    }
+    fileprivate func hide(_ owner: UUID) {
+        guard self.owner == owner else { return }       // the next page may have taken over already
+        self.owner = nil; prompt = nil; write = nil
+    }
+    fileprivate func update(_ owner: UUID, prompt: String? = nil, text: String? = nil) {
+        guard self.owner == owner else { return }
+        if let prompt, prompt != self.prompt { self.prompt = prompt }
+        if let text, text != self.text.value { self.text.value = text }
+    }
+}
+
+/// The field's text on its own, so typing redraws only the field and not the whole window.
+@MainActor
+final class PageFilterText: ObservableObject {
+    @Published var value = "" { didSet { if value != oldValue { PageFilter.shared.write?(value) } } }
+}
+
+private final class OwnerID: ObservableObject { let id = UUID() }
+
+private struct PageFilterSource: ViewModifier {
+    var prompt: String?
+    var text: Binding<String>?
+    @StateObject private var me = OwnerID()
+    func body(content: Content) -> some View {
+        if let prompt, let text {
+            content
+                .onAppear { PageFilter.shared.show(me.id, prompt: prompt, text: text) }
+                .onDisappear { PageFilter.shared.hide(me.id) }
+                .onChange(of: prompt) { PageFilter.shared.update(me.id, prompt: prompt) }
+                .onChange(of: text.wrappedValue) { PageFilter.shared.update(me.id, text: text.wrappedValue) }   // Clear and friends
+        } else { content }
+    }
+}
+
+/// The window's search field for the page's filter.
+struct PageFilterField: View {
+    var prompt: String
+    @ObservedObject var text = PageFilter.shared.text
+    var body: some View { FilterField(prompt: prompt, text: $text.value, toolbar: true) }
+}
+
+extension View {
 }
 
 /// Every word has to appear in one of the fields.
@@ -608,10 +743,9 @@ struct SongsView: View {
         } primaryAction: { ids in
             if let a = album(ids.first) { model.path.append(.album(a)) }
         }
-        .safeAreaInset(edge: .top, spacing: 0) { filterBar }
+        .pageTitle("Songs", subtitle: ui.filtering ? "\(rows.count) of \(model.libTracks.count) songs" : "\(rows.count) songs")
+        .filtersInToolbar(search: "Filter \(model.libTracks.count) songs", text: $ui.query) { filterBar }
         .overlay { if rows.isEmpty && ui.filtering { ContentUnavailableView("No Songs Match", systemImage: "line.3.horizontal.decrease.circle") } }
-        .navigationTitle("Songs")
-        .navigationSubtitle(ui.filtering ? "\(rows.count) of \(model.libTracks.count) songs" : "\(rows.count) songs")
     }
 
     /// What the rows depend on: the songs, the filters and sort, and (when a filter looks at them) the iPod and queue,
@@ -643,14 +777,12 @@ struct SongsView: View {
     }
 
     /// The same glass controls as the other pages: a search capsule and menus that say what they're set to.
-    var filterBar: some View {
+    @ViewBuilder var filterBar: some View {
         let (genres, kinds) = ui.menus(model.libraryVersion, model.libTracks)
-        return HStack(spacing: 8) {
-            FilterField(prompt: "Filter songs", text: $ui.query)
             Menu {
                 Picker("Show", selection: $ui.show) { ForEach(SongsUI.Show.allCases, id: \.self) { Text($0.rawValue) } }.pickerStyle(.inline)
             } label: { Text(ui.show.rawValue) }
-            .glassMenu()
+            .fixedSize()
             Menu {
                 Picker("Genre", selection: $ui.genre) {
                     Text("All Genres").tag("")
@@ -659,7 +791,7 @@ struct SongsView: View {
                 }
                 .pickerStyle(.inline)
             } label: { Text(ui.genre.isEmpty ? "All Genres" : ui.genre) }
-            .glassMenu()
+            .fixedSize()
             Menu {
                 // pick any mix of ratings ("★★★★★ and ★★★★"); none ticked shows every song
                 Section("Rating") {
@@ -680,12 +812,8 @@ struct SongsView: View {
                 Label(moreLabel, systemImage: "line.3.horizontal.decrease")
                     .labelStyle(.titleAndIcon)
             }
-            .glassMenu()
-            Spacer()
-            if ui.filtering { Button("Clear") { ui.clear() }.buttonStyle(.glass) }
-        }
-        .controlSize(.small)
-        .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 6)
+            .fixedSize()
+            if ui.filtering { Button("Clear") { ui.clear() } }
     }
 
     /// The extra filters, as the menu's label: "Filters" or what's set ("★★★ · FLAC · Never Played").

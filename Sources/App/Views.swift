@@ -8,6 +8,7 @@ struct ContentView: View {
     @EnvironmentObject var model: Model
     @EnvironmentObject var slsk: Slskd
     @FocusState private var searchFocused: Bool
+    @ObservedObject private var pageFilter = PageFilter.shared
 
     var body: some View {
         NavigationSplitView {
@@ -66,9 +67,16 @@ struct ContentView: View {
         .quickLookPreview($model.quickLook)
         .onChange(of: model.place) { old, _ in model.visited(from: old) }
         .toolbar {
+            if let prompt = pageFilter.prompt {
+                // a capsule of its own at the toolbar's height: in the shared glass it merged into the iPod/bell/refresh
+                // buttons' capsule (a ToolbarSpacer between them made no difference)
+                ToolbarItem { PageFilterField(prompt: prompt).frame(height: 36).glassEffect(.regular, in: .capsule) }
+                    .sharedBackgroundVisibility(.hidden)
+            }
             if model.on(.musicAssistant) || model.on(.ownTone) {
                 ToolbarItem { PlayOnMenu(player: model.player, ma: model.ma) }
             }
+            if model.on(.soulseek) || model.on(.appleMusic) || model.on(.youtube) { ToolbarItem { DownloadIndicator() } }
             ToolbarItem { ActivityButton() }
             ToolbarItem {
                 Button { Task { await model.reload() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
@@ -121,6 +129,22 @@ struct ContentView: View {
         .sheet(item: $model.linking) { LinkSheet(track: $0).environmentObject(model) }
         .sheet(isPresented: Binding(get: { model.merge != nil }, set: { if !$0 { model.merge = nil } })) {
             MergeSheet(albums: model.merge ?? []).environmentObject(model)
+        }
+        .confirmationDialog(model.albumOnAlbum.map { "“\($0.dragged.title)” on “\($0.target.title)”" } ?? "",
+                            isPresented: Binding(get: { model.albumOnAlbum != nil }, set: { if !$0 { model.albumOnAlbum = nil } }),
+                            presenting: model.albumOnAlbum) { pair in
+            Button("Use “\(pair.dragged.title)”'s Cover for “\(pair.target.title)”") {
+                if let d = model.coverData(pair.dragged) { Task { await model.setCover(d, for: pair.target) } }
+            }
+            .disabled(model.coverData(pair.dragged) == nil)
+            Button("Use “\(pair.target.title)”'s Cover for “\(pair.dragged.title)”") {
+                if let d = model.coverData(pair.target) { Task { await model.setCover(d, for: pair.dragged) } }
+            }
+            .disabled(model.coverData(pair.target) == nil)
+            Button("Merge the Two Albums…") { model.merge = [pair.target, pair.dragged] }
+            Button("Cancel", role: .cancel) {}
+        } message: { pair in
+            Text("Give one the other's cover, or merge them into one album (you pick the name and artist next).")
         }
         .confirmationDialog(trashTitle, isPresented: Binding(get: { model.confirmTrash != nil }, set: { if !$0 { model.confirmTrash = nil } })) {
             Button("Move to Trash", role: .destructive) {
@@ -230,6 +254,7 @@ struct BackForward: ViewModifier {
                 Button { model.goForward() } label: { Label("Forward", systemImage: "chevron.right") }
                     .disabled(model.forward.isEmpty).keyboardShortcut("]", modifiers: .command).help("Forward")
             }
+            ToolbarItem(placement: .navigation) { PageTitleLabel() }.sharedBackgroundVisibility(.hidden)
         }
     }
 }
@@ -809,6 +834,30 @@ struct ActivityBar: View {
 
 /// Toolbar button with a list of everything Crate did or is doing.
 /// Downloads live here too (they're things running): a row at the bottom opens their page.
+/// While something downloads (Soulseek, Apple Music, YouTube): a ring with how far along it all is; opens Downloads.
+/// Gone again when nothing is coming in.
+struct DownloadIndicator: View {
+    @EnvironmentObject var model: Model
+    @EnvironmentObject var slsk: Slskd
+    var body: some View {
+        let busy = model.downloadEntries(slsk).filter { !$0.finished }
+        if !busy.isEmpty {
+            let p = busy.map { min(max($0.progress, 0), 1) }.reduce(0, +) / Double(busy.count)
+            Button { model.search = ""; model.path = []; model.pane = .downloads } label: {
+                ZStack {
+                    Circle().stroke(.primary.opacity(0.15), lineWidth: 2)
+                    Circle().trim(from: 0, to: max(p, 0.03)).stroke(.primary, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .animation(.easeOut(duration: 0.4), value: p)
+                    Image(systemName: "arrow.down").font(.system(size: 8, weight: .bold))
+                }
+                .frame(width: 16, height: 16)
+            }
+            .help("\(busy.count) downloading · \(Int(p * 100))% – show Downloads")
+        }
+    }
+}
+
 struct ActivityButton: View {
     @EnvironmentObject var model: Model
     @EnvironmentObject var slsk: Slskd

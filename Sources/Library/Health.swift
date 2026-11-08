@@ -174,8 +174,7 @@ struct HealthView: View {
         }
         .sheet(isPresented: $ui.dedupe) { DedupeSheet() }
         .sheet(isPresented: $ui.genres) { GenreMergeSheet().environmentObject(model) }
-        .navigationTitle("Needs Attention")
-        .navigationSubtitle("\(all.count) album\(all.count == 1 ? "" : "s")")
+        .pageTitle("Needs Attention", subtitle: "\(all.count) album\(all.count == 1 ? "" : "s")")
         .task(id: "\(model.albums.count)-\(model.artwork.count)-\(model.metadata.count)-\(model.loading)") {
             let paths = model.albums.flatMap { $0.tracks.map(\.path) }.filter { ui.sizes[$0] == nil }
             if !paths.isEmpty { ui.sizes.merge(await Model.probe(paths)) { _, new in new } }

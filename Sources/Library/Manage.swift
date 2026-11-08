@@ -168,7 +168,8 @@ struct MergeSheet: View {
     }
 }
 
-/// Drop an image (from Finder or a browser) on an album's cover to make it the cover.
+/// Drop an image (from Finder or a browser) on an album's cover to make it the cover, or another album (its folder,
+/// dragged from a grid) to choose between taking its cover and merging the two (Model.albumOnAlbum).
 struct CoverDrop: ViewModifier {
     @EnvironmentObject var model: Model
     var album: Album
@@ -182,11 +183,18 @@ struct CoverDrop: ViewModifier {
                     if model.coverDrop == album.id {
                         RoundedRectangle(cornerRadius: corner, style: .continuous).strokeBorder(.tint, lineWidth: 3)
                             .background(Color.accentColor.opacity(0.18), in: .rect(cornerRadius: corner, style: .continuous))
-                            .overlay { Label("Use as Cover", systemImage: "photo").font(.callout.bold()).padding(8).glassEffect(.regular, in: .capsule) }
+                            .overlay { Label("Drop on This Album", systemImage: "square.and.arrow.down").font(.callout.bold()).padding(8).glassEffect(.regular, in: .capsule) }
                             .allowsHitTesting(false)
                     }
                 }
                 .dropDestination(for: URL.self) { urls, _ in
+                    // another album, dragged from a grid: its folder
+                    let folders = Set(urls.filter(\.isFileURL).map { $0.standardizedFileURL.path })
+                    if let other = model.allAlbums.first(where: { !$0.folder.isEmpty && folders.contains(URL(fileURLWithPath: $0.folder).standardizedFileURL.path) }) {
+                        guard other.id != album.id else { return false }
+                        model.albumOnAlbum = AlbumPair(dragged: other, target: album)
+                        return true
+                    }
                     guard let u = urls.first(where: { !$0.isFileURL || Self.images.contains($0.pathExtension.lowercased()) }) else { return false }
                     Task {
                         let data = u.isFileURL ? try? Data(contentsOf: u) : (try? await URLSession.shared.data(from: u))?.0

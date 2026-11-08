@@ -86,7 +86,7 @@ struct AMAlbumView: View {
             }
             .padding(28).padding(.bottom, 60)
         }
-        .navigationTitle(album.title)
+        .pageTitle(album.title)
         .task { await model.loadAMArt(album) }
     }
 }

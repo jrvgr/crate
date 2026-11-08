@@ -135,3 +135,24 @@ extension Button where Label == SwiftUI.Label<Text, Image> {
         self.init(action: action) { SwiftUI.Label(title, pod: k) }
     }
 }
+
+/// The iPod with where something stands on it as a badge in its corner, as on the album tiles' marks:
+/// a grey plus when it isn't there, then the mark's own symbol and colour.
+struct PodStateIcon: View {
+    var mark: SyncMark
+    var pinned = false                  // an artist kept on the iPod
+    var body: some View {
+        let symbol = pinned ? "pin.fill" : mark.icon ?? "plus"
+        let tint: Color = pinned ? .blue : mark == .none ? .gray : mark.tint
+        Image(symbol: "ipod")
+            .padding(.trailing, 2)
+            .overlay(alignment: .bottomTrailing) {
+                // the symbol in the state's colour on a small plain disc, not a coloured disc
+                Image(systemName: symbol).font(.system(size: 7.5, weight: .heavy)).foregroundStyle(tint)
+                    .frame(width: 12, height: 12)
+                    .background(.background, in: .circle)
+                    .overlay { Circle().strokeBorder(.primary.opacity(0.12), lineWidth: 0.5) }
+                    .offset(x: 3, y: 3)         // out on the corner, past the iPod's edge
+            }
+    }
+}
