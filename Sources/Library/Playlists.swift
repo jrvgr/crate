@@ -54,10 +54,7 @@ enum OwnToneM3U {
 
     /// A path on this Mac as OwnTone sees it (the reverse of LibraryLoader.localPath).
     static func serverPath(_ p: String) -> String {
-        for (a, b) in [("/Volumes/share/", "/share/"), ("/Volumes/media/", "/media/")] where p.hasPrefix(a) {
-            return b + p.dropFirst(a.count)
-        }
-        return p
+        ServerPaths.convert(p, ServerPaths.mappings, from: \.mac, to: \.server)
     }
 
     /// An entry's path or URL the way OwnTone resolves it: relative to the playlist's folder.

@@ -30,15 +30,13 @@ struct Album: Identifiable, Hashable {
 enum LibraryLoader {
     static let audioExts: Set<String> = ["mp3", "m4a", "aac", "flac", "wav", "aif", "aiff", "alac"]
 
-    /// OwnTone paths are inside the add-on (/share/..., /media/...); the Mac sees them under /Volumes.
-    static func localPath(_ p: String) -> String {
-        for (a, b) in [("/share/", "/Volumes/share/"), ("/media/", "/Volumes/media/")] where p.hasPrefix(a) {
-            return b + p.dropFirst(a.count)
-        }
-        return p
+    /// A path as the OwnTone or Subsonic server gives it, where this Mac sees it (ServerPaths).
+    static func localPath(_ p: String, _ map: [ServerPaths.Mapping] = ServerPaths.mappings) -> String {
+        ServerPaths.convert(p, map, from: \.server, to: \.mac)
     }
 
     static func fromOwnTone(_ base: String) async throws -> [LibTrack] {
+        let map = ServerPaths.mappings          // read once, not for each of up to 20,000 songs
         var c = URLComponents(string: base + "/api/search")!
         c.queryItems = [.init(name: "type", value: "tracks"), .init(name: "expression", value: "data_kind is file"),
                         .init(name: "limit", value: "20000")]
@@ -53,7 +51,7 @@ enum LibraryLoader {
             let artist = s("album_artist").isEmpty ? s("artist") : s("album_artist")
             return LibTrack(title: s("title"), artist: artist, album: s("album"), genre: s("genre"),
                             trackNumber: n("track_number"), discNumber: n("disc_number"), year: n("year"),
-                            lengthMs: n("length_ms"), path: localPath(p), trackArtist: s("artist"), uri: s("uri"),
+                            lengthMs: n("length_ms"), path: localPath(p, map), trackArtist: s("artist"), uri: s("uri"),
                             added: iso.date(from: s("time_added")))
         }
     }

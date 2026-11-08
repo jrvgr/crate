@@ -144,6 +144,13 @@ struct LibrarySettings: View {
             } header: { Text("Imports") } footer: {
                 Text("Files dropped on the window, Apple Music imports and finished Soulseek downloads go here as Artist/Album/ (downloads on the same share are moved, not copied). Left empty, that's the Subsonic server's music folder, else your first music folder, else ~/Music/Crate on this Mac.")
             }
+            if model.on(.ownTone) || model.on(.subsonic) {
+                Section {
+                    ServerPathsEditor()
+                } header: { Text("Server Paths") } footer: {
+                    Text("Only when your OwnTone or Subsonic server sees the music under other paths than this Mac does, as in a container or on a NAS: its folder on the left, the same folder on this Mac on the right. Rescan the library after a change.")
+                }
+            }
             Section {
                 SecureField("Discogs token", text: model.$discogsToken, prompt: Text("Optional"))
             } header: { Text("Metadata") } footer: {
