@@ -81,4 +81,4 @@ docs/NOTES.md     detailed notes, file formats and command-line test flags
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The ChicagoFLF font is in the public domain.
+GPL-3.0, see [LICENSE](LICENSE): you may share and change Crate, as long as what you share stays under the GPL with its source. The ChicagoFLF font is in the public domain.
