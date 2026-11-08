@@ -10,6 +10,7 @@ struct CrateApp: App {
         }
         .windowToolbarStyle(.unified)
         .commands {
+            UpdateCommands()
             CommandGroup(after: .sidebar) {
                 Button("Recently Added") { model.search = ""; model.pane = .recent }.keyboardShortcut("1")
                 Button("Albums") { model.search = ""; model.pane = .albums }.keyboardShortcut("2")
