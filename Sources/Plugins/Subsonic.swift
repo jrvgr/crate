@@ -27,7 +27,7 @@ enum SubsonicError: Error, LocalizedError {
 }
 
 /// A song on the server, by library path.
-struct SubsonicSong: Hashable { var id, albumID, cover: String; var rating = 0 }     // rating: the server's stars, 0 for none
+struct SubsonicSong: Hashable { var id, albumID, cover: String; var rating = 0; var serverPath = "" }     // serverPath: as the server reports it     // rating: the server's stars, 0 for none
 
 @MainActor
 final class Subsonic: ObservableObject {
@@ -52,7 +52,8 @@ final class Subsonic: ObservableObject {
 
     /// Library path → the server's song, from the last load.
     private(set) var songs: [String: SubsonicSong] = [:]
-    private(set) var rawPaths: [String] = []         // a few paths as the server reports them (--subsonic-check)
+    private(set) var rawPaths: [String] = []
+    private(set) var serverRoot = ""                 // where the server's absolute paths start (empty when it reports relative ones)         // a few paths as the server reports them (--subsonic-check)
     private var paths: [String: String] = [:]          // song id → library path
     /// Album + title → the server's song: matches files Crate found itself when the server doesn't report real paths.
     private var byKey: [String: SubsonicSong] = [:]
@@ -141,6 +142,7 @@ final class Subsonic: ObservableObject {
             musicFolder = LibraryLoader.localPath(root)
         }
         rawPaths = raw.prefix(5).map { ($0["path"] as? String) ?? "" }
+        serverRoot = Self.commonFolder(raw.compactMap { $0["path"] as? String }.filter { $0.hasPrefix("/") }) ?? ""
         let folder = useShare ? musicFolder : "", cache = Self.cache.path
         let found = await Task.detached { Self.tracks(raw, folder: folder, cache: cache) }.value
         songs = Dictionary(found.map { ($0.0.path, $0.1) }, uniquingKeysWith: { a, _ in a })
@@ -224,7 +226,7 @@ final class Subsonic: ObservableObject {
             let t = LibTrack(title: str("title"), artist: albumArtist, album: str("album"), genre: str("genre"),
                              trackNumber: num("track"), discNumber: num("discNumber"), year: num("year"),
                              lengthMs: num("duration") * 1000, path: path, trackArtist: str("artist"), added: added)
-            return (t, SubsonicSong(id: id, albumID: albumID, cover: str("coverArt"), rating: num("userRating")))
+            return (t, SubsonicSong(id: id, albumID: albumID, cover: str("coverArt"), rating: num("userRating"), serverPath: p))
         }
     }
 
@@ -275,6 +277,13 @@ final class Subsonic: ObservableObject {
     /// Stars (0 clears them), on the server too, so other clients and the next load see them.
     func setRating(_ songID: String, _ stars: Int) async throws {
         _ = try await call("setRating", [.init(name: "id", value: songID), .init(name: "rating", value: "\(stars)")])
+    }
+
+    /// The song's path relative to the server's music folder (for Tagr, which sees the same folder).
+    func relativePath(_ s: SubsonicSong) -> String {
+        let p = s.serverPath
+        guard p.hasPrefix("/") else { return p }
+        return !serverRoot.isEmpty && p.hasPrefix(serverRoot + "/") ? String(p.dropFirst(serverRoot.count + 1)) : String(p.dropFirst())
     }
 
     /// The song's id for a library path.

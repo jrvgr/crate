@@ -160,7 +160,7 @@ struct HealthView: View {
                                     .help("Look the album up on MusicBrainz and iTunes")
                             }
                             Button("Edit Tags", systemImage: "pencil") { model.editAlbum = a }.buttonStyle(.glass)
-                                .disabled(!model.filesHere(a)).help(model.filesHere(a) ? "Edit the album's tags by hand" : Model.serverOnlyHelp)
+                                .disabled(!model.tagsEditable(a)).help(model.tagsEditable(a) ? "Edit the album's tags by hand" : Model.serverOnlyHelp)
                             Button { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: a.folder) } label: { Image(systemName: "folder") }
                                 .buttonStyle(.glass).help("Show in Finder")
                         }

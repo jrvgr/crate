@@ -142,15 +142,9 @@ struct TagEditor: View {
     func save() async {
         s.saving = true; s.done = 0; s.error = nil
         let edits = s.edits()
-        var failed: [String] = []
-        for (path, e) in edits where TagWriter.canWrite(path) {
-            let r = await Task.detached { () -> String? in
-                do { try TagWriter.write(path, e); return nil } catch { return error.localizedDescription }
-            }.value
-            if let r { failed.append(r) }
-            s.done += 1
-        }
-        if let d = s.coverData, !(await Model.writeCover(d, in: album.folder)) { failed.append("couldn't write cover.jpg") }
+        var failed = await model.saveTags(edits.map { (path: $0.0, edit: $0.1) }) { s.done += 1 }.failures
+        // the cover file next to the songs, where they're on this Mac (Tagr embeds it in the server's songs)
+        if let d = s.coverData, model.filesHere(album), !(await Model.writeCover(d, in: album.folder)) { failed.append("couldn't write cover.jpg") }
         await model.refreshFiles(album.tracks.map(\.path), cover: s.coverData, oldID: album.id)
         s.saving = false
         if failed.isEmpty { close() } else { s.error = "\(failed.count) failed: \(failed[0])" }

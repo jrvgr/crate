@@ -30,20 +30,12 @@ extension Model {
     func mergeGenres(_ groups: [GenreGroup]) async -> (files: Int, error: String?) {
         var rename: [String: String] = [:]
         for g in groups { for v in g.variants where v.name != g.keep { rename[v.name] = g.keep } }
-        let cache = Subsonic.cache.path
-        let tracks = libTracks.filter { rename[$0.genre] != nil && !$0.path.hasPrefix(cache) && TagWriter.canWrite($0.path) }
-        let jobs = tracks.map { ($0.path, rename[$0.genre]!) }
-        guard !jobs.isEmpty else { return (0, nil) }
-        let result = await Task.detached { () -> (Int, String?) in
-            var n = 0, err: String?
-            for (p, g) in jobs {
-                do { if try TagWriter.write(p, TagEdit(genre: g)) { n += 1 } }
-                catch { err = err ?? error.localizedDescription }
-            }
-            return (n, err)
-        }.value
-        await refreshFiles(tracks.map(\.path))
-        return result
+        let tagr = viaTagr
+        let tracks = libTracks.filter { rename[$0.genre] != nil && (Subsonic.serverOnly($0.path) ? tagr : TagWriter.canWrite($0.path)) }
+        guard !tracks.isEmpty else { return (0, nil) }
+        let r = await saveTags(tracks.map { (path: $0.path, edit: TagEdit(genre: rename[$0.genre]!)) })
+        await refreshFiles(tracks.map(\.path).filter { !Subsonic.serverOnly($0) })
+        return (r.written.count, r.failures.first)
     }
 }
 

@@ -352,7 +352,7 @@ struct AlbumMenu: View {
             Button("Play", systemImage: "play.fill") { Task { await model.play(album) } }
             AddToPlaylistMenu(tracks: album.tracks)
             Button("Find Metadata…", systemImage: "sparkle.magnifyingglass") { model.lookupAlbum = album }
-            Button("Edit Tags…", systemImage: "pencil") { model.editAlbum = album }.disabled(!model.filesHere(album)).help(model.filesHere(album) ? "" : Model.serverOnlyHelp)
+            Button("Edit Tags…", systemImage: "pencil") { model.editAlbum = album }.disabled(!model.tagsEditable(album)).help(model.tagsEditable(album) ? "" : Model.serverOnlyHelp)
             Button("Organise Files…", systemImage: "folder.badge.gearshape") { model.organize = [album] }.disabled(!model.filesHere(album)).help(model.filesHere(album) ? "" : Model.serverOnlyHelp)
             Button("Find Duplicates…", systemImage: "square.on.square") { model.dedupeAlbum = album }
             Divider()
@@ -361,7 +361,7 @@ struct AlbumMenu: View {
             Menu("Merge With", systemImage: "arrow.triangle.merge") {
                 let same = model.albums.filter { $0.id != album.id && ($0.artist == album.artist || Model.looseMatch($0.title, album.title)) }
                 ForEach(same.prefix(20)) { other in Button(other.title + " – " + other.artist) { model.merge = [album, other] } }
-                    .disabled(!model.filesHere(album))
+                    .disabled(!model.tagsEditable(album))
                 if same.isEmpty { Text("Select albums in the list view to merge any") }
             }
             if model.on(.soulseek) {
@@ -484,11 +484,12 @@ struct AlbumsMenu: View {
                 .disabled(!model.connected)
         }
         let editable = lib.filter(model.filesHere)          // not the ones only on the Subsonic server
+        let taggable = lib.filter(model.tagsEditable)       // those too, when Tagr writes their tags
         if !lib.isEmpty {
             AddToPlaylistMenu(tracks: lib.flatMap(\.tracks))
             Button("Find Metadata for \(lib.count) Albums…", systemImage: "sparkle.magnifyingglass") { model.batchAlbums = lib }
             Button("Organise Files…", systemImage: "folder.badge.gearshape") { model.organize = editable }.disabled(editable.isEmpty)
-            if editable.count > 1 { Button("Merge \(editable.count) Albums…", systemImage: "arrow.triangle.merge") { model.merge = editable } }
+            if taggable.count > 1 { Button("Merge \(taggable.count) Albums…", systemImage: "arrow.triangle.merge") { model.merge = taggable } }
         }
         Divider()
         // albums only on the iPod have no files here: deleting them takes them off the iPod at the next sync
@@ -616,7 +617,7 @@ struct AlbumDetail: View {
                             if !podOnly {
                                 GlassMenu {
                                     Button("Find Metadata…", systemImage: "sparkle.magnifyingglass") { model.lookupAlbum = album }
-                                    Button("Edit Tags…", systemImage: "pencil") { model.editAlbum = album }.disabled(!model.filesHere(album)).help(model.filesHere(album) ? "" : Model.serverOnlyHelp)
+                                    Button("Edit Tags…", systemImage: "pencil") { model.editAlbum = album }.disabled(!model.tagsEditable(album)).help(model.tagsEditable(album) ? "" : Model.serverOnlyHelp)
                                     Button("Find Duplicates…", systemImage: "square.on.square") { model.dedupeAlbum = album }
                                     if model.froggerFeatures {
                                         Button("Cover Studio…", systemImage: "camera.filters") { Task { studio.open = true; await studio.select(album, model: model) } }

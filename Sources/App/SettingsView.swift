@@ -218,6 +218,7 @@ struct PluginSettings: View {
             }
         case .subsonic:
             SubsonicSettings(sub: model.subsonic)
+            TagrSettings(tagr: model.tagr)
         case .musicAssistant:
             MusicAssistantSettings(ma: model.ma)
         case .spotify:
@@ -342,9 +343,9 @@ struct SubsonicSettings: View {
         if ui.passwordSaved {
             LabeledContent("") { Label("Saved", systemImage: "key.fill").font(.caption).foregroundStyle(.green) }
         }
-        Picker("Files", selection: sub.$useShare) {
-            Text("Through the share").tag(true)
-            Text("Over the server only").tag(false)
+        Picker("Read songs", selection: sub.$useShare) {
+            Text("From the share").tag(true)
+            Text("Over the Subsonic API").tag(false)
         }
         .onChange(of: sub.useShare) { Task { await model.reload() } }
         if sub.useShare {
@@ -361,7 +362,7 @@ struct SubsonicSettings: View {
         }
         Text(sub.useShare
              ? "Songs in the music folder are used from there, so Crate can edit their tags, covers and files (in Navidrome, turn on Report Real Path for the Crate player under Settings › Players); the rest are downloaded when a sync needs them."
-             : "No share needed: songs are streamed, and downloaded when a sync needs them. Ratings and playlists are saved on the server. Their tags, covers and files can't be changed from Crate, as the server's API has no way to.")
+             : "No share needed: songs are streamed, and downloaded when a sync needs them. Ratings and playlists are saved on the server. Files can.t be moved or deleted from here; tags can be edited with Tagr (below).")
             .font(.caption).foregroundStyle(.secondary)
     }
 

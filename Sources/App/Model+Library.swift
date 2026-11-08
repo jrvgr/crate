@@ -64,7 +64,7 @@ extension Model {
     /// Whether Crate can change the album's files: some are on this Mac, not only on the iPod or only on the
     /// Subsonic server (whose API can't change tags, covers or files).
     func filesHere(_ a: Album) -> Bool { !isPodOnly(a) && a.tracks.contains { !Subsonic.serverOnly($0.path) } }
-    static let serverOnlyHelp = "Only on the Subsonic server: its files can't be changed from Crate"
+    static let serverOnlyHelp = "Only on the Subsonic server: its files can't be changed from Crate (set up Tagr in Settings › Plugins › Subsonic to edit its tags)"
 
     static func loose(_ s: String) -> String { s.lowercased().filter { $0.isLetter || $0.isNumber } }
 

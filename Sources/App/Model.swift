@@ -84,6 +84,7 @@ final class Model: ObservableObject {
     let player = Player()
     let yt = YouTube()
     let subsonic = Subsonic()
+    let tagr = Tagr()
     let ma = MusicAssistant()
 
     // library

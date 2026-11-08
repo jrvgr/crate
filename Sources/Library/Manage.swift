@@ -154,19 +154,13 @@ struct MergeSheet: View {
         s.working = true; s.error = nil
         // a server song that isn't on this Mac (not on the share, not downloaded) has no file to write;
         // the server keeps its own tags for it
+        let tagr = model.viaTagr          // the server's songs that aren't here: through Tagr, when it's set up
         let tracks = await Task.detached { [all = albums.flatMap(\.tracks)] in
-            all.filter { TagWriter.canWrite($0.path) && FileManager.default.fileExists(atPath: $0.path) }
+            all.filter { Subsonic.serverOnly($0.path) ? tagr : TagWriter.canWrite($0.path) && FileManager.default.fileExists(atPath: $0.path) }
         }.value
         let e = TagEdit(albumArtist: s.artist, album: s.title)
-        var failed: [String] = []
         s.phase = "Writing album tags"; s.done = 0; s.total = tracks.count
-        for t in tracks {
-            defer { s.done += 1 }
-            let p = t.path
-            if let err = await Task.detached(operation: { () -> String? in
-                do { try TagWriter.write(p, e); return nil } catch { return error.localizedDescription }
-            }).value { failed.append(err) }
-        }
+        var failed = await model.saveTags(tracks.map { (path: $0.path, edit: e) }) { s.done += 1 }.failures
         let wasAdding = albums.contains { model.toAdd.contains($0.id) }
         s.phase = "Reading the songs back in"; s.total = 0
         await model.refreshFiles(tracks.map(\.path), oldID: albums.first?.id, rescan: false)
