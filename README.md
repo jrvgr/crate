@@ -64,7 +64,7 @@ With a code-signing identity named "Crate Local Signing" in your keychain, build
 
 ### Releasing
 
-Push a version tag (`git tag v0.2.0 && git push origin v0.2.0`). The Release workflow builds the DMG, signs the update for Sparkle, publishes the GitHub release with its `appcast.xml` and moves the cask in [jrvgr/homebrew-crate](https://github.com/jrvgr/homebrew-crate) to the new version. It needs two repository secrets: `SPARKLE_PRIVATE_KEY` (Sparkle's `generate_keys -x`) and `TAP_GITHUB_TOKEN` (a token that can push to the tap).
+Push a version tag (`git tag v0.2.0 && git push origin v0.2.0`). The Release workflow builds the DMG, signs the update for Sparkle, publishes the GitHub release with its `appcast.xml` and moves the cask in [jrvgr/homebrew-crate](https://github.com/jrvgr/homebrew-crate) to the new version. It needs two repository secrets: `SPARKLE_PRIVATE_KEY` (Sparkle's `generate_keys -x`) and `TAP_DEPLOY_KEY` (the private half of a write deploy key on the tap).
 
 ## Layout
 
