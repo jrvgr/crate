@@ -469,7 +469,7 @@ struct PlaylistMenu: View {
         } else if let uri = model.playURI(playlist) {
             Button(model.playURILabel, systemImage: "play.fill") { Task { await model.playURIs([uri]) } }
         }
-        if model.ownToneEditable(playlist) {
+        if model.serverEditable(playlist) {
             Divider()
             Button("Rename…", systemImage: "pencil") { model.startRename(.ownTone(playlist.id)) }
             Button("Delete…", systemImage: "trash", role: .destructive) { model.confirmDeletePlaylist = .ownTone(playlist.id) }

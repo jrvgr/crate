@@ -27,7 +27,7 @@ struct CrateApp: App {
                 Button("Previous Song") { model.player.previous() }.keyboardShortcut(.leftArrow, modifiers: .command)
                 Divider()
                 Button("Search") { model.focusSearch += 1 }.keyboardShortcut("f")
-                Button("Edit Tags…") { model.editAlbum = model.focusAlbum }.keyboardShortcut("i").disabled(model.focusAlbum == nil)
+                Button("Edit Tags…") { model.editAlbum = model.focusAlbum }.keyboardShortcut("i").disabled(!(model.focusAlbum.map(model.filesHere) ?? false))
                 Button("Find Metadata…") { model.lookupAlbum = model.focusAlbum }.keyboardShortcut("f", modifiers: [.command, .option])
                     .disabled(model.focusAlbum == nil)
                 Button("Quick Look Cover") { if let a = model.focusAlbum { Task { await model.quickLookCover(a) } } }.keyboardShortcut("y").disabled(model.focusAlbum == nil)

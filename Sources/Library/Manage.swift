@@ -21,6 +21,9 @@ extension Model {
     }
 
     func trash(_ tracks: [LibTrack]) async {
+        // songs only on the Subsonic server can't be deleted from here (its API can't delete files)
+        let tracks = tracks.filter { !Subsonic.serverOnly($0.path) }
+        guard !tracks.isEmpty else { notify(Model.serverOnlyHelp); return }
         let paths = tracks.map(\.path)
         let folders = Set(paths.map { ($0 as NSString).deletingLastPathComponent }), roots = trashRoots
         let (failed, gone) = await offMain { () -> (Int, Set<String>) in

@@ -285,8 +285,10 @@ extension Model {
             let want = wantsHidden(db.tracks[i].key, rule)
             if db.tracks[i].hidden != want { db.setHidden(i, want) }
         }
-        for i in db.tracks.indices {        // ratings set in Crate
-            if let r = ratings[aliases[db.tracks[i].key] ?? db.tracks[i].key] { db.setRating(i, r) }
+        for i in db.tracks.indices {        // ratings set in Crate or on the Subsonic server
+            let k = aliases[db.tracks[i].key] ?? db.tracks[i].key
+            if let lib = libraryTrack(key: k)?.track, let r = serverRating(lib), r > 0 { db.setRating(i, r) }
+            else if let r = ratings[k] { db.setRating(i, r) }
         }
         let solo = Set(db.tracks.map { $0.artist.lowercased() } + artists.map { $0.name.lowercased() })
         for i in db.tracks.indices {        // collaborations under their main artist, or back to the full credit

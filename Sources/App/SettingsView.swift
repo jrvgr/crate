@@ -342,7 +342,14 @@ struct SubsonicSettings: View {
         if ui.passwordSaved {
             LabeledContent("") { Label("Saved", systemImage: "key.fill").font(.caption).foregroundStyle(.green) }
         }
-        FolderField(title: "Music folder", path: sub.$musicFolder, help: "The server's music folder as this Mac sees it (on a mounted share)")
+        Picker("Files", selection: sub.$useShare) {
+            Text("Through the share").tag(true)
+            Text("Over the server only").tag(false)
+        }
+        .onChange(of: sub.useShare) { Task { await model.reload() } }
+        if sub.useShare {
+            FolderField(title: "Music folder", path: sub.$musicFolder, help: "The server's music folder as this Mac sees it (on a mounted share)")
+        }
         LabeledContent("Status") {
             HStack {
                 if ui.testing == .subsonic { ProgressView().controlSize(.small) }
@@ -352,7 +359,9 @@ struct SubsonicSettings: View {
                     .disabled(!sub.configured)
             }
         }
-        Text("Songs in the music folder are used from there (in Navidrome, turn on Report Real Path for the Crate player under Settings › Players); the rest are downloaded when a sync needs them.")
+        Text(sub.useShare
+             ? "Songs in the music folder are used from there, so Crate can edit their tags, covers and files (in Navidrome, turn on Report Real Path for the Crate player under Settings › Players); the rest are downloaded when a sync needs them."
+             : "No share needed: songs are streamed, and downloaded when a sync needs them. Ratings and playlists are saved on the server. Their tags, covers and files can't be changed from Crate, as the server's API has no way to.")
             .font(.caption).foregroundStyle(.secondary)
     }
 

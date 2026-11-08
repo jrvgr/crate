@@ -23,8 +23,13 @@ extension Model {
 
     /// Uses an image you dropped on an album's cover as its cover.jpg.
     func setCover(_ data: Data, for album: Album) async {
-        guard NSImage(data: data) != nil, !isPodOnly(album) else { notify("That isn't an image"); return }
+        guard let img = NSImage(data: data), !isPodOnly(album) else { notify("That isn't an image"); return }
         let folder = album.folder
+        guard filesHere(album) else {           // only on the Subsonic server: shown in Crate, the files stay as they are
+            artwork[album.id] = img
+            notify("New cover for \(album.title), shown in Crate only (the album is only on the Subsonic server)")
+            return
+        }
         guard await Self.writeCover(data, in: folder) else { notify("Couldn't write cover.jpg in \(folder)"); return }
         artwork[album.id] = await offMain { ArtCache.storeAlbum(data, folder: folder) ?? NSImage(data: data) }
         await rescanServers()

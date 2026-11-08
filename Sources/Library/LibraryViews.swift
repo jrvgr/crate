@@ -352,15 +352,16 @@ struct AlbumMenu: View {
             Button("Play", systemImage: "play.fill") { Task { await model.play(album) } }
             AddToPlaylistMenu(tracks: album.tracks)
             Button("Find Metadata…", systemImage: "sparkle.magnifyingglass") { model.lookupAlbum = album }
-            Button("Edit Tags…", systemImage: "pencil") { model.editAlbum = album }
-            Button("Organise Files…", systemImage: "folder.badge.gearshape") { model.organize = [album] }
+            Button("Edit Tags…", systemImage: "pencil") { model.editAlbum = album }.disabled(!model.filesHere(album)).help(model.filesHere(album) ? "" : Model.serverOnlyHelp)
+            Button("Organise Files…", systemImage: "folder.badge.gearshape") { model.organize = [album] }.disabled(!model.filesHere(album)).help(model.filesHere(album) ? "" : Model.serverOnlyHelp)
             Button("Find Duplicates…", systemImage: "square.on.square") { model.dedupeAlbum = album }
             Divider()
-            Button("Delete from Library…", systemImage: "trash", role: .destructive) { model.confirmTrash = album.tracks }
+            Button("Delete from Library…", systemImage: "trash", role: .destructive) { model.confirmTrash = album.tracks }.disabled(!model.filesHere(album)).help(model.filesHere(album) ? "" : Model.serverOnlyHelp)
             Button("Quick Look Cover", systemImage: "eye") { Task { await model.quickLookCover(album) } }
             Menu("Merge With", systemImage: "arrow.triangle.merge") {
                 let same = model.albums.filter { $0.id != album.id && ($0.artist == album.artist || Model.looseMatch($0.title, album.title)) }
                 ForEach(same.prefix(20)) { other in Button(other.title + " – " + other.artist) { model.merge = [album, other] } }
+                    .disabled(!model.filesHere(album))
                 if same.isEmpty { Text("Select albums in the list view to merge any") }
             }
             if model.on(.soulseek) {
@@ -482,19 +483,20 @@ struct AlbumsMenu: View {
             Button("Copy \(podOnly.count) Albums to Library", systemImage: "square.and.arrow.down") { Task { await model.copyFromIPod(podOnly) } }
                 .disabled(!model.connected)
         }
+        let editable = lib.filter(model.filesHere)          // not the ones only on the Subsonic server
         if !lib.isEmpty {
             AddToPlaylistMenu(tracks: lib.flatMap(\.tracks))
             Button("Find Metadata for \(lib.count) Albums…", systemImage: "sparkle.magnifyingglass") { model.batchAlbums = lib }
-            Button("Organise Files…", systemImage: "folder.badge.gearshape") { model.organize = lib }
-            if lib.count > 1 { Button("Merge \(lib.count) Albums…", systemImage: "arrow.triangle.merge") { model.merge = lib } }
+            Button("Organise Files…", systemImage: "folder.badge.gearshape") { model.organize = editable }.disabled(editable.isEmpty)
+            if editable.count > 1 { Button("Merge \(editable.count) Albums…", systemImage: "arrow.triangle.merge") { model.merge = editable } }
         }
         Divider()
         // albums only on the iPod have no files here: deleting them takes them off the iPod at the next sync
         if !podOnly.isEmpty {
             Button("Delete \(podOnly.count) Albums from iPod", systemImage: "trash", role: .destructive) { podOnly.forEach { model.toRemove.insert($0.id) } }
         }
-        if !lib.isEmpty {
-            Button("Delete \(lib.count) Albums from Library…", systemImage: "trash", role: .destructive) { model.confirmTrash = lib.flatMap(\.tracks) }
+        if !editable.isEmpty {
+            Button("Delete \(editable.count) Albums from Library…", systemImage: "trash", role: .destructive) { model.confirmTrash = editable.flatMap(\.tracks) }
         }
         if let deselect { Divider(); Button("Deselect All", action: deselect) }
     }
@@ -614,7 +616,7 @@ struct AlbumDetail: View {
                             if !podOnly {
                                 GlassMenu {
                                     Button("Find Metadata…", systemImage: "sparkle.magnifyingglass") { model.lookupAlbum = album }
-                                    Button("Edit Tags…", systemImage: "pencil") { model.editAlbum = album }
+                                    Button("Edit Tags…", systemImage: "pencil") { model.editAlbum = album }.disabled(!model.filesHere(album)).help(model.filesHere(album) ? "" : Model.serverOnlyHelp)
                                     Button("Find Duplicates…", systemImage: "square.on.square") { model.dedupeAlbum = album }
                                     if model.froggerFeatures {
                                         Button("Cover Studio…", systemImage: "camera.filters") { Task { studio.open = true; await studio.select(album, model: model) } }
@@ -673,6 +675,7 @@ struct AlbumDetail: View {
                                 Button("Show in Finder", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: t.path)]) }
                                 Divider()
                                 Button("Delete Song…", systemImage: "trash", role: .destructive) { model.confirmTrash = [t] }
+                                    .disabled(Subsonic.serverOnly(t.path)).help(Subsonic.serverOnly(t.path) ? Model.serverOnlyHelp : "")
                             }
                         }
                     }
@@ -727,9 +730,9 @@ struct PlaylistView: View {
         let hidden = lib.map { l in l.map { model.wantsHidden(model.podKey($0.key), rule) } ?? false }
         let onPodLib = lib.compactMap { $0 }
         let allHidden = !onPodLib.isEmpty && hidden.filter { $0 }.count == onPodLib.count
-        let editable = model.ownToneEditable(playlist)
-        let move = { (a: Int, b: Int) in Task { await model.editOwnTone(playlist) { $0.moveItem(a, to: b) } } }
-        let remove = { (n: Int) in Task { await model.editOwnTone(playlist) { $0.remove(at: n) } } }
+        let editable = model.serverEditable(playlist)
+        let move = { (a: Int, b: Int) in Task { await model.editServerPlaylist(playlist) { $0.moveItem(a, to: b) } } }
+        let remove = { (n: Int) in Task { await model.editServerPlaylist(playlist) { $0.remove(at: n) } } }
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 HStack(alignment: .bottom, spacing: 24) {
